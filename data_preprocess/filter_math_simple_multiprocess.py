@@ -72,33 +72,6 @@ def is_math_problem(record, min_reasoning_length=None, check_full_response=True)
             if solution and r'\boxed' in str(solution):
                 return True
         
-        # Check for full_response field (actual OmniThought format)
-        # All items in OmniThought have full_response with detailed reasoning
-        if check_full_response and 'full_response' in reasoning_item:
-            full_response = reasoning_item['full_response']
-            if full_response:
-                # Full_response should contain mathematical reasoning/thinking
-                # Check for common mathematical problem indicators
-                fr_str = str(full_response).lower()
-                
-                # Check for think tags or mathematical notation
-                has_think = '<think>' in fr_str
-                has_math = any(indicator in fr_str for indicator in [
-                    'solution', 'answer', 'therefore', 'thus', 'result is',
-                    '=', '+', '-', '*', '/', '^', 'sqrt', 'frac', 'sum'
-                ])
-                
-                # Question should be present and possibly math-related
-                question = str(record.get('question', '')).lower()
-                has_question = len(question) > 10  # Reasonable minimum length
-                
-                # If it has thinking process and a valid question, treat as math problem
-                # This is a heuristic for OmniThought dataset
-                if has_think and has_question:
-                    return True
-                elif has_math and has_question:
-                    return True
-        
         # If no explicit math indicators found, return False
         return False
             
@@ -122,25 +95,27 @@ def convert_numpy(obj):
     return obj
 
 
-def filter_reasoning_items_by_token_limit(record, min_reasoning_length, max_thought_tokens, tokenizer):
+def filter_reasoning_items_by_token_limit(record, min_reasoning_length, max_thought_tokens, min_thought_tokens, tokenizer):
     """
-    Filter reasoning items that exceed max_thought_tokens and check if remaining items meet min_reasoning_length.
+    Filter reasoning items by token length and check if remaining items meet min_reasoning_length.
     
     Args:
         record: The data record
         min_reasoning_length: Minimum number of reasoning items required
         max_thought_tokens: Maximum token length for each thought
+        min_thought_tokens: Minimum token length for each thought
         tokenizer: Tokenizer instance
         
     Returns:
-        Tuple of (filtered_record, should_keep) where should_keep indicates if record should be kept
+        Tuple of (filtered_record, should_keep, filter_reason) where should_keep indicates if record should be kept
+        and filter_reason is a string indicating why it was filtered (if applicable)
     """
     reasoning = record.get('reasoning', [])
     
     # Handle different types of reasoning (list, ndarray, etc.)
     # Use explicit length check instead of truthiness check for numpy arrays
     if reasoning is None:
-        return record, False
+        return record, False, "reasoning_is_none"
     
     # Check if reasoning is empty (handles both list and ndarray)
     reasoning_length = 0
@@ -149,10 +124,10 @@ def filter_reasoning_items_by_token_limit(record, min_reasoning_length, max_thou
     elif hasattr(reasoning, 'size'):
         reasoning_length = reasoning.size
     else:
-        return record, False
+        return record, False, "invalid_reasoning_type"
     
     if reasoning_length == 0:
-        return record, False
+        return record, False, "reasoning_empty"
     
     # Convert to list if it's ndarray-like
     reasoning_list = []
@@ -161,15 +136,16 @@ def filter_reasoning_items_by_token_limit(record, min_reasoning_length, max_thou
     elif hasattr(reasoning, '__getitem__') and hasattr(reasoning, 'size'):
         reasoning_list = [reasoning[i] for i in range(reasoning.size)]
     else:
-        return record, False
+        return record, False, "invalid_reasoning_structure"
     
     # First check: if initial count is less than min_reasoning_length, filter out
     if min_reasoning_length is not None and len(reasoning_list) < min_reasoning_length:
-        return record, False
+        return record, False, "reason_num_insufficient"
     
     # Second check: filter reasoning items exceeding max_thought_tokens
     if max_thought_tokens is not None and tokenizer is not None:
         filtered_reasoning = []
+        token_too_long_items = 0
         
         for reasoning_item in reasoning_list:
             if isinstance(reasoning_item, dict):
@@ -177,9 +153,14 @@ def filter_reasoning_items_by_token_limit(record, min_reasoning_length, max_thou
                 if thought is not None and thought != '':
                     try:
                         tokens = tokenizer.encode(str(thought), add_special_tokens=False)
-                        if len(tokens) <= max_thought_tokens:
+                        token_len = len(tokens)
+                        # Check if token length is within bounds
+                        if (max_thought_tokens is None or token_len <= max_thought_tokens) and \
+                           (min_thought_tokens is None or token_len >= min_thought_tokens):
                             # Keep this reasoning item
                             filtered_reasoning.append(reasoning_item)
+                        else:
+                            token_too_long_items += 1
                     except Exception:
                         # If tokenization fails, keep the item to be safe
                         filtered_reasoning.append(reasoning_item)
@@ -192,12 +173,16 @@ def filter_reasoning_items_by_token_limit(record, min_reasoning_length, max_thou
         
         # Third check: after filtering, check if we still have enough items
         if min_reasoning_length is not None and len(filtered_reasoning) < min_reasoning_length:
-            return record, False
+            # Check if it was filtered due to token limit
+            if token_too_long_items > 0:
+                return record, False, "reason_num_insufficient_after_token_filter"
+            else:
+                return record, False, "reason_num_insufficient"
         
         # Update the record with filtered reasoning
         record['reasoning'] = filtered_reasoning
     
-    return record, True
+    return record, True, "passed"
 
 
 def process_parquet_file_worker(args):
@@ -205,13 +190,13 @@ def process_parquet_file_worker(args):
     Process a single parquet file and return math problems.
     This function is run in a separate process.
     """
-    parquet_file, temp_dir, stop_event, min_reasoning_length, max_thought_tokens, tokenizer_path = args
+    parquet_file, temp_dir, stop_event, min_reasoning_length, max_thought_tokens, min_thought_tokens, tokenizer_path = args
     
     import pyarrow.parquet as pq
     
     # Initialize tokenizer if needed
     tokenizer = None
-    if max_thought_tokens is not None:
+    if max_thought_tokens is not None or min_thought_tokens is not None:
         try:
             tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
         except Exception as e:
@@ -219,27 +204,42 @@ def process_parquet_file_worker(args):
     
     math_problems = []
     
+    # Statistics for debugging
+    total_records = 0
+    not_math_count = 0
+    token_too_long_count = 0
+    reason_num_insufficient_count = 0
+    
     try:
         table = pq.read_table(parquet_file)
         df = table.to_pandas()
         
-        for _, row in df.iterrows():
+        for _, row in tqdm(df.iterrows(), desc=f"Processing {parquet_file.name}", unit="row", total=len(df)):
             # Check if stop event is set
             if stop_event.is_set():
                 break
                 
             record = row.to_dict()
+            total_records += 1
             
             # Check if it's a math problem (without min_reasoning_length check here)
             if is_math_problem(record, min_reasoning_length=None, check_full_response=True):
                 # Apply the new filtering logic
-                filtered_record, should_keep = filter_reasoning_items_by_token_limit(
-                    record, min_reasoning_length, max_thought_tokens, tokenizer
+                filtered_record, should_keep, filter_reason = filter_reasoning_items_by_token_limit(
+                    record, min_reasoning_length, max_thought_tokens, min_thought_tokens, tokenizer
                 )
                 
                 if should_keep:
                     json_item = convert_numpy(filtered_record)
                     math_problems.append(json_item)
+                else:
+                    # Track filter reasons
+                    if filter_reason == "token_too_long" or filter_reason == "reason_num_insufficient_after_token_filter":
+                        token_too_long_count += 1
+                    elif filter_reason == "reason_num_insufficient":
+                        reason_num_insufficient_count += 1
+            else:
+                not_math_count += 1
         
         # Clean up
         del df
@@ -247,12 +247,17 @@ def process_parquet_file_worker(args):
         
     except Exception as e:
         print(f"Error processing {parquet_file}: {e}")
-        return []
+        return [], {"total_records": total_records, "not_math_count": not_math_count,
+                    "token_too_long_count": token_too_long_count,
+                    "reason_num_insufficient_count": reason_num_insufficient_count,
+                    "error": str(e)}
     
-    return math_problems
+    return math_problems, {"total_records": total_records, "not_math_count": not_math_count,
+                           "token_too_long_count": token_too_long_count,
+                           "reason_num_insufficient_count": reason_num_insufficient_count}
 
 
-def collect_math_problems_parallel(parquet_files, sample_size, temp_dir, seed=42, max_workers=None, min_reasoning_length=None, max_thought_tokens=None, tokenizer_path=None):
+def collect_math_problems_parallel(parquet_files, sample_size, temp_dir, seed=42, max_workers=None, min_reasoning_length=None, max_thought_tokens=None, min_thought_tokens=None, tokenizer_path=None):
     """
     Process parquet files in parallel using multiple processes.
     Args:
@@ -276,6 +281,12 @@ def collect_math_problems_parallel(parquet_files, sample_size, temp_dir, seed=42
     # Initialize empty file
     open(temp_file, 'w').close()
     
+    # Global statistics for debugging
+    total_records_global = 0
+    not_math_count_global = 0
+    token_too_long_count_global = 0
+    reason_num_insufficient_count_global = 0
+    
     print("\n" + "="*60)
     print("COLLECTING MATH PROBLEMS (MULTI-PROCESS)")
     print("="*60)
@@ -291,7 +302,7 @@ def collect_math_problems_parallel(parquet_files, sample_size, temp_dir, seed=42
         stop_event = manager.Event()
         
         # Prepare arguments for worker processes
-        worker_args = [(file, temp_dir, stop_event, min_reasoning_length, max_thought_tokens, tokenizer_path) for file in shuffled_files]
+        worker_args = [(file, temp_dir, stop_event, min_reasoning_length, max_thought_tokens, min_thought_tokens, tokenizer_path) for file in shuffled_files]
         
         with ProcessPoolExecutor(max_workers=max_workers) as executor:
             # Submit all tasks
@@ -310,7 +321,13 @@ def collect_math_problems_parallel(parquet_files, sample_size, temp_dir, seed=42
                 processed_files += 1
                 
                 try:
-                    math_problems = future.result()
+                    math_problems, stats = future.result()
+                    
+                    # Accumulate statistics
+                    total_records_global += stats.get("total_records", 0)
+                    not_math_count_global += stats.get("not_math_count", 0)
+                    token_too_long_count_global += stats.get("token_too_long_count", 0)
+                    reason_num_insufficient_count_global += stats.get("reason_num_insufficient_count", 0)
                     
                     if math_problems:
                         # Append to temp file
@@ -332,7 +349,26 @@ def collect_math_problems_parallel(parquet_files, sample_size, temp_dir, seed=42
                             print("="*60)
                             break
                     else:
-                        print(f"  [{processed_files}/{len(shuffled_files)}] {parquet_file.name}: no MATH problems")
+                        # Print detailed statistics for each file
+                        print(f"  [{processed_files}/{len(shuffled_files)}] {parquet_file.name}: no MATH problems found")
+                        
+                        # Show detailed filtering statistics
+                        total = stats.get("total_records", 0)
+                        if total > 0:
+                            not_math = stats.get("not_math_count", 0)
+                            token_too_long = stats.get("token_too_long_count", 0)
+                            reason_insufficient = stats.get("reason_num_insufficient_count", 0)
+                            passed = total - not_math - token_too_long - reason_insufficient
+                            
+                            print(f"      └─ Total records: {total:,}")
+                            print(f"          ✗ Not math problems: {not_math:,} ({not_math/total*100:.2f}%)")
+                            print(f"          ✗ Token too long: {token_too_long:,} ({token_too_long/total*100:.2f}%)")
+                            print(f"          ✗ Reason count insufficient: {reason_insufficient:,} ({reason_insufficient/total*100:.2f}%)")
+                            print(f"          ✓ Passed filters: {passed:,} ({passed/total*100:.2f}%)")
+                        else:
+                            print(f"      └─ No records processed (possibly an error)")
+                        if stats.get("error"):
+                            print(f"      └─ Error: {stats['error']}")
                         
                 except Exception as e:
                     print(f"  Error processing {parquet_file}: {e}")
@@ -342,6 +378,14 @@ def collect_math_problems_parallel(parquet_files, sample_size, temp_dir, seed=42
     print("="*60)
     print(f"Files processed: {processed_files}/{len(shuffled_files)}")
     print(f"MATH problems collected: {collected:,}/{sample_size:,}")
+    
+    # Store statistics in a global variable for later use
+    collect_math_problems_parallel.stats = {
+        "total_records": total_records_global,
+        "not_math_count": not_math_count_global,
+        "token_too_long_count": token_too_long_count_global,
+        "reason_num_insufficient_count": reason_num_insufficient_count_global
+    }
     
     return temp_file, collected
 
@@ -580,7 +624,7 @@ def plot_distributions(stats, output_dir):
         print("  - full_response_token_length_distribution.png")
 
 
-def sample_and_split(temp_file, actual_count, test_ratio, output_dir, max_thought_tokens=None, tokenizer_path=None):
+def sample_and_split(temp_file, actual_count, test_ratio, output_dir, max_thought_tokens=None, min_thought_tokens=None, tokenizer_path=None):
     """Load collected problems, split into train/test, and generate plots"""
     print("\nLoading and splitting data...")
     
@@ -653,7 +697,8 @@ def save_results(train, test, output_dir, args=None):
         "sampling_method": "Random file selection with multi-process parallelization",
         "filter_options": {
             "min_reasoning_length": getattr(args, 'reason_sample_num', None) if args else None,
-            "max_thought_tokens": getattr(args, 'max_thought_tokens', None) if args else None
+            "max_thought_tokens": getattr(args, 'max_thought_tokens', None) if args else None,
+            "min_thought_tokens": getattr(args, 'min_thought_tokens', None) if args else None
         }
     }
     
@@ -712,7 +757,8 @@ Example:
       --test_ratio 0.01 \
       --seed 42 \
       --max_workers 8 \
-      --max_thought_tokens 1024
+      --max_thought_tokens 1024 \
+      --min_thought_tokens 64
         """
     )
     
@@ -732,6 +778,8 @@ Example:
                        help="Minimum number of reasoning samples required (default: None, no filter)")
     parser.add_argument("--max_thought_tokens", type=int, default=None,
                        help="Maximum token length for thought field (default: None, no limit)")
+    parser.add_argument("--min_thought_tokens", type=int, default=None,
+                       help="Minimum token length for thought field (default: None, no limit)")
     parser.add_argument("--tokenizer_path", type=str, default="/mnt/moonfs/public-models-m2/Qwen/Qwen3-8B",
                        help="Path to tokenizer (default: /mnt/moonfs/public-models-m2/Qwen/Qwen3-8B)")
     
@@ -762,7 +810,10 @@ Example:
     print(f"Max workers: {args.max_workers or 'CPU count'}")
     print(f"Total parquet files available: {len(parquet_files)}")
     if args.max_thought_tokens is not None:
-        print(f"Max thought tokens: {args.max_thought_tokens}")
+        if args.max_thought_tokens is not None:
+            print(f"Max thought tokens: {args.max_thought_tokens}")
+        if args.min_thought_tokens is not None:
+            print(f"Min thought tokens: {args.min_thought_tokens}")
         print(f"Tokenizer path: {args.tokenizer_path}")
     
     # Create temp directory
@@ -774,15 +825,34 @@ Example:
         # Collect MATH problems with multi-process processing
         temp_file, actual_count = collect_math_problems_parallel(
             parquet_files, args.sample_size, temp_dir, args.seed, args.max_workers, 
-            args.reason_sample_num, args.max_thought_tokens, args.tokenizer_path
+            args.reason_sample_num, args.max_thought_tokens, args.min_thought_tokens, args.tokenizer_path
         )
         
         if actual_count == 0:
             print("\nNo MATH problems found!")
+            print("\n" + "="*60)
+            print("FILTERING STATISTICS (DEBUG INFO)")
+            print("="*60)
+            stats = getattr(collect_math_problems_parallel, 'stats', {})
+            if stats:
+                total = stats.get("total_records", 0)
+                not_math = stats.get("not_math_count", 0)
+                token_too_long = stats.get("token_too_long_count", 0)
+                reason_insufficient = stats.get("reason_num_insufficient_count", 0)
+                
+                print(f"Total records processed: {total:,}")
+                print(f"  - Not math problems: {not_math:,} ({not_math/total*100:.2f}%)")
+                print(f"  - Token too long: {token_too_long:,} ({token_too_long/total*100:.2f}%)")
+                print(f"  - Reason number insufficient: {reason_insufficient:,} ({reason_insufficient/total*100:.2f}%)")
+                passed = total - not_math - token_too_long - reason_insufficient
+                print(f"  - Passed all filters: {passed:,} ({passed/total*100:.2f}%)")
+            else:
+                print("No statistics available (this should not happen)")
+            print("="*60 + "\n")
             return
         
         # Split into train/test
-        train, test = sample_and_split(temp_file, actual_count, args.test_ratio, args.output_dir, args.max_thought_tokens, args.tokenizer_path)
+        train, test = sample_and_split(temp_file, actual_count, args.test_ratio, args.output_dir, args.max_thought_tokens, args.min_thought_tokens, args.tokenizer_path)
         
         # Save results
         save_results(train, test, args.output_dir, args)
@@ -815,12 +885,13 @@ if __name__ == "__main__":
 """
 python /home/luoyashuo/research/graph_kd/cdad/data_preprocess/filter_math_simple_multiprocess.py \
     --input_path /mnt/moonfs/luoyashuo-m2/hf_home/dataset/alibaba-pai/OmniThought/data \
-    --output_dir /mnt/moonfs/luoyashuo-m2/research/cdad/data/omnithought_math_20k \
+    --output_dir /mnt/moonfs/luoyashuo-m2/research/cdad/data/omnithought_math_20k_2 \
     --sample_size 20000 \
     --test_ratio 0.01 \
     --seed 307 \
     --max_workers 32 \
-    --reason_sample_num 4 \
+    --reason_sample_num 3 \
     --max_thought_tokens 4096 \
+    --min_thought_tokens 1024 \
     --tokenizer_path /mnt/moonfs/public-models-m2/Qwen/Qwen3-8B
 """
