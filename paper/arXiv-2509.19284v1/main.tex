@@ -1,0 +1,114 @@
+\documentclass[]{fairmeta}
+% Option "twocolumn" available, but please prioritize single-column
+
+
+%\usepackage[backref=page]{hyperref} 
+\usepackage{array}
+\usepackage{booktabs}
+\usepackage{xspace}
+\usepackage{tcolorbox}
+\usepackage{enumitem}
+\usepackage{wrapfig}
+
+% Wait Less, Solve More:
+\title{What Characterizes Effective Reasoning? Revisiting Length, Review, and Structure of CoT}
+
+\author[1,2,*]{Yunzhen Feng}
+\author[1,2,\dagger]{Julia Kempe}
+\author[1,\dagger]{Cheng Zhang}
+\author[1,\dagger]{Parag Jain}
+\author[1,\dagger]{Anthony Hartshorn}
+
+\affiliation[1]{Meta Superintelligence Labs}
+\affiliation[2]{New York University}
+
+\contribution[*]{Work done during an internship at Meta}
+\contribution[\dagger]{Joint advising}
+
+% commands for commenting
+\newcommand{\optional}[1]{\textcolor{gray}{\textit{#1}}}
+\newcommand{\concern}[1]{\textcolor{red!50}{! #1}}
+\newcommand{\todo}[1]{\textcolor{blue!50}{{TODO: #1}}}
+\newcommand{\yunzhen}[1]{{#1}}
+% \newcommand{\todo}[1]{}
+
+\newcommand{\CZ}[1]{\textbf{\textcolor{purple}{[CZ: #1]}}}
+\newcommand{\cz}[1]{\textcolor{purple}{#1}}
+
+
+\newcommand{\review}{\texttt{review}\xspace}
+\newcommand{\progress}{\texttt{progress}\xspace}
+\newcommand{\Review}{\texttt{Review}\xspace}
+\newcommand{\Length}{\texttt{Length}\xspace}
+\newcommand{\length}{\texttt{length}\xspace}
+\newcommand{\rr}{\texttt{Review Ratio}\xspace}
+\newcommand{\fsf}{\texttt{FSF}\xspace}
+\newcommand{\failedstep}{\texttt{Failed-Step Fraction}\xspace}
+
+\newtcolorbox{questionbox}{
+    colback=blue!8!white,
+    colframe=blue!60!black,
+    colbacktitle=blue!85!black,
+    coltitle=white,
+    fonttitle=\bfseries,
+    title=Question,
+    rounded corners=3pt,
+    boxrule=1.5pt,
+    left=8pt,
+    right=8pt,
+    top=8pt,
+    bottom=8pt
+}
+
+\abstract{
+Large reasoning models (LRMs) spend substantial test-time compute on long chain-of-thought (CoT) traces, but what \emph{characterizes} an effective CoT remains unclear. While prior work reports gains from lengthening CoTs and increasing review \yunzhen{(revisiting earlier steps)} via appended \textit{wait} tokens, recent studies suggest that shorter thinking can outperform longer traces. We therefore conduct a systematic evaluation across ten LRMs on math and scientific reasoning. Contrary to the “longer-is-better” narrative, we find that \yunzhen{both naive CoT lengthening and increased review} are associated with \emph{lower} accuracy. 
+
+As CoT unfolds step by step, token-level metrics can conflate verbosity with process quality. We introduce a graph view of CoT to extract structure and identify a single statistic—the \emph{Failed-Step Fraction (FSF)}, the fraction of steps in abandoned branches—that consistently outpredicts length and review ratio for correctness across models. To probe causality, we design two interventions. First, we rank candidate CoTs by each metric at test time, where FSF yields the largest pass@1 gains; second, we edit CoTs to remove failed branches, which significantly improves accuracy, indicating that failed branches bias subsequent reasoning. Taken together, these results characterize effective CoTs as those that \emph{fail less} and support \emph{structure-aware} test-time scaling over indiscriminately generating long CoT.
+}
+
+\date{\today}
+\correspondence{Yunzhen Feng at \email{yf2231@nyu.edu}}
+
+% You can add additional metadata fields as follows 
+% \metadata[Code]{\url{https://github.com/facebookresearch/repo}}
+% \metadata[Blogpost]{\url{https://ai.meta.com/blog/?page=1}}
+
+\begin{document}
+
+\maketitle
+
+\input{sections/intro_parag}
+% \input{sections/1_introduction}
+
+\input{sections/2_related_work}
+
+% \input{sections/3_framework}
+
+
+
+\input{sections/3_new}
+
+\input{sections/4_results}
+
+\input{sections/6_discussion}
+
+% \clearpage
+
+% \input{sections/8_miscs}
+
+\clearpage
+\newpage
+
+
+
+\input{sections/9_acknowledgement}
+\bibliographystyle{assets/plainnat}
+\bibliography{main}
+
+\clearpage
+\newpage
+\beginappendix
+
+\input{sections/A_1}
+
+\end{document}
