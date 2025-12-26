@@ -1,10 +1,15 @@
 #!/usr/bin/env python3
 """
-Build reasoning graphs from COT data and compute FSF (Failed-Step Fraction).
+Generate reasoning graphs with thought-level concurrency.
 
-This script reads a JSONL dataset, uses an LLM to convert each reasoning trace
-into a Graphviz DOT representation, computes the FSF metric, and saves the results.
-Now supports multiple models and multiple runs per model, with automatic stability analysis.
+This script:
+1. Reads a JSONL dataset with reasoning traces
+2. Creates fine-grained tasks: (thought_id, thought, model_name, run_id)
+3. Processes tasks with high concurrency (thought-level parallelism)
+4. Saves results immediately after each task completes
+5. Outputs flattened format: (question, thought, q_id, t_id, reasoning_graph, model)
+
+No analysis or plotting logic included.
 """
 
 import asyncio
@@ -12,19 +17,19 @@ import json
 import re
 import sys
 from pathlib import Path
-from typing import List, Dict, Any, Optional
-import statistics
-import matplotlib.pyplot as plt
-import numpy as np
-from collections import defaultdict
+from typing import List, Dict, Any, Optional, Tuple, Set
+from tqdm import tqdm
+from dataclasses import dataclass
 
+# Try to import pydot for DOT parsing
 try:
-    from tqdm import tqdm
-    from tqdm.asyncio import tqdm as async_tqdm
-    HAS_TQDM = True
+    import pydot
+    HAS_PYDOT = True
 except ImportError:
-    HAS_TQDM = False
-    print("Warning: tqdm not available, progress bar disabled")
+    HAS_PYDOT = False
+    print("Error: pydot is required for DOT parsing")
+    print("Install with: pip install pydot")
+    sys.exit(1)
 
 # Add parent directory to path to import rollout.py
 sys.path.append(str(Path(__file__).parent.parent))
@@ -55,18 +60,97 @@ Generate complete Graphviz DOT code in dot blocks.
 """.strip()
 
 
-class ReasoningGraphBuilder:
+@dataclass
+class Task:
+    """Represents a single annotation task."""
+    thought_id: str  # Format: "{q_id}_{t_id}"
+    q_id: int        # Line number in input file (0-based)
+    t_id: int        # Index in reasoning array
+    question: str    # Original question
+    thought: str     # Thought text
+    model_name: str  # Model name
+    run_id: int      # Run ID
+
+
+class DOTValidator:
+    """Utility class for validating and parsing DOT code using pydot."""
+
+    @staticmethod
+    def is_valid_dot(dot_code: str) -> Tuple[bool, Optional[str]]:
+        """Validate if the given string is valid DOT code."""
+        if not dot_code or not dot_code.strip():
+            return False, "Empty DOT code"
+
+        try:
+            graphs = pydot.graph_from_dot_data(dot_code)
+            if graphs is None or len(graphs) == 0:
+                return False, "Failed to parse DOT code: no graphs returned"
+
+            graph = graphs[0]
+            if graph is None:
+                return False, "Failed to parse DOT code: graph is None"
+
+            return True, None
+
+        except Exception as e:
+            return False, f"DOT parsing error: {str(e)}"
+
+    @staticmethod
+    def parse_dot(dot_code: str) -> Optional[Any]:
+        """Parse DOT code into a pydot graph object."""
+        try:
+            graphs = pydot.graph_from_dot_data(dot_code)
+            if graphs and len(graphs) > 0 and graphs[0] is not None:
+                return graphs[0]
+            return None
+        except Exception:
+            return None
+    @staticmethod
+    def is_valid_dot_strict(dot_code: str) -> Tuple[bool, Optional[str]]:
+        """Strict validation - checks if DOT code has actual content."""
+        if not dot_code or not dot_code.strip():
+            return False, "Empty DOT code"
+        
+        # Check for basic structure (edges -> or node definitions [])
+        if '->' not in dot_code and '[' not in dot_code:
+            return False, "No edges (->) or node attributes ([...]) found"
+        
+        try:
+            graphs = pydot.graph_from_dot_data(dot_code)
+            if graphs is None or len(graphs) == 0:
+                return False, "No graphs returned from parser"
+            
+            graph = graphs[0]
+            if graph is None:
+                return False, "Parsed graph is None"
+            
+            # Check if graph has actual content
+            nodes = graph.get_nodes()
+            edges = graph.get_edges()
+            
+            # A valid reasoning graph should have at least some nodes or edges
+            if not nodes and not edges:
+                return False, "Graph has no nodes or edges"
+            
+            return True, None
+        except Exception as e:
+            return False, f"Parse error: {str(e)}"
+
+
+
+class ReasoningGraphGenerator:
     def __init__(
         self,
         models: List[str] = None,
         runs_per_model: int = 1,
+        max_retries: int = 0,
         timeout: float = 600.0,
         max_connections_per_service: int = 256,
         temperature: float = 0.1,
         max_tokens: int = 4096,
-        max_concurrent_requests: int = 10
+        max_concurrent_requests: int = 100
     ):
-        # If single model is provided, convert to list
+        """Initialize the generator."""
         if models is None:
             models = ["gpt-oss-120b-judge"]
         elif isinstance(models, str):
@@ -74,14 +158,13 @@ class ReasoningGraphBuilder:
 
         self.models = models
         self.runs_per_model = runs_per_model
+        self.max_retries = max_retries
         self.timeout = timeout
         self.max_connections_per_service = max_connections_per_service
         self.temperature = temperature
         self.max_tokens = max_tokens
-        self.max_concurrent_requests = max_concurrent_requests
         self.semaphore = asyncio.Semaphore(max_concurrent_requests)
 
-        # Initialize LLM clients for each model
         self.llm_clients = {}
         for model in self.models:
             self.llm_clients[model] = AsyncConsulOpenAIProxy(
@@ -90,27 +173,19 @@ class ReasoningGraphBuilder:
                 max_connections_per_service=max_connections_per_service
             )
 
+        self.dot_validator = DOTValidator()
+
     async def close(self):
         """Close all LLM clients."""
         for client in self.llm_clients.values():
             await client.close()
 
     async def generate_reasoning_graph(self, thought: str, model: str) -> Optional[str]:
-        """
-        Generate Graphviz DOT code for a reasoning trace using LLM.
-
-        Args:
-            thought: The reasoning trace (COT) to convert to graph
-            model: The model to use for generation
-
-        Returns:
-            Graphviz DOT code as string, or None if generation fails
-        """
+        """Generate Graphviz DOT code for a reasoning trace using LLM."""
         if not thought or not thought.strip():
             return None
 
         if model not in self.llm_clients:
-            print(f"Warning: Model {model} not found")
             return None
 
         messages_for_llm = [
@@ -118,497 +193,353 @@ class ReasoningGraphBuilder:
             {"role": "user", "content": f"{GRAPH_GENERATION_PROMPT}\n\nReasoning trace:\n{thought}"}
         ]
 
-        async with self.semaphore:
+        # Retry logic
+        max_retries = self.max_retries
+        last_error = None
+
+        for attempt in range(max_retries + 1):
             try:
-                result = await self.llm_clients[model].chat_completions(
-                    messages=messages_for_llm,
-                    n=1,
-                    temperature=self.temperature,
-                    max_tokens=self.max_tokens,
-                )
+                async with self.semaphore:
+                    result = await self.llm_clients[model].chat_completions(
+                        messages=messages_for_llm,
+                        n=1,
+                        temperature=self.temperature,
+                        max_tokens=self.max_tokens,
+                    )
 
-                if not result or 'choices' not in result or not result['choices']:
-                    print(f"Warning: Empty result from LLM")
-                    return None
+                    if not result or 'choices' not in result or not result['choices']:
+                        if attempt < max_retries:
+                            print(f"    Retry attempt {attempt + 1}/{max_retries}: Empty response")
+                            await asyncio.sleep(0.1 * (attempt + 1))  # Small delay
+                        continue
 
-                content = result['choices'][0]['message']['content']
+                    content = result['choices'][0]['message']['content']
 
-                # Extract DOT code from the response (look for ```dot ... ``` blocks)
-                dot_match = re.search(r'```(?:dot\n)?(.*?)```', content, re.DOTALL)
-                if dot_match:
-                    return dot_match.group(1).strip()
-                else:
-                    # If no code block found, return the entire content
-                    return content.strip()
+                    dot_match = re.search(r'```(?:dot\n)?(.*?)```', content, re.DOTALL)
+                    if dot_match:
+                        dot_code = dot_match.group(1).strip()
+                    else:
+                        dot_code = content.strip()
+
+                    is_valid, error_msg = self.dot_validator.is_valid_dot_strict(dot_code)
+                    if not is_valid:
+                        if attempt < max_retries:
+                            print(f"    Retry attempt {attempt + 1}/{max_retries}: Invalid DOT - {error_msg}")
+                            last_error = error_msg
+                            await asyncio.sleep(0.1 * (attempt + 1))  # Small delay
+                        continue
+
+                    # Success
+                    if attempt > 0:
+                        print(f"    Success after {attempt} retries")
+                    return dot_code
 
             except Exception as e:
-                print(f"Error generating graph with model {model}: {e}")
-                return None
-
-    def compute_fsf_from_dot(self, dot_code: str) -> Optional[float]:
-        """
-        Compute Failed-Step Fraction (FSF) from Graphviz DOT code.
-
-        FSF = (# failed nodes) / (# all nodes)
-
-        Args:
-            dot_code: Graphviz DOT code
-
-        Returns:
-            FSF value between 0 and 1, or None if parsing fails
-        """
-        if not dot_code:
-            return None
-
-        try:
-            # Count total nodes
-            total_nodes = len(re.findall(r'\[.*?\]', dot_code, re.DOTALL))
-
-            # Count failed nodes (nodes with fillcolor=lightpink)
-            failed_nodes = len(re.findall(r'fillcolor\s*=\s*["\']?lightpink["\']?', dot_code, re.IGNORECASE))
-
-            if total_nodes == 0:
-                return None
-
-            return failed_nodes / total_nodes
-
-        except Exception as e:
-            print(f"Error computing FSF: {e}")
-            return None
-
-
-async def process_single_entry(entry: Dict[str, Any], builder: ReasoningGraphBuilder, entry_idx: int) -> Dict[str, Any]:
-    """
-    Process a single dataset entry by generating reasoning graphs and computing FSF for all reasoning traces
-    with multiple models and multiple runs per model.
-
-    Args:
-        entry: The dataset entry
-        builder: ReasoningGraphBuilder instance
-        entry_idx: Index of the entry for progress tracking
-
-    Returns:
-        Modified entry with reasoning_graph and fsf fields added
-    """
-    if 'reasoning' not in entry or not entry['reasoning']:
-        return entry
-
-    # Process each reasoning trace
-    for i, reasoning_item in enumerate(entry['reasoning']):
-        thought = reasoning_item.get('thought', '')
-
-        if not thought:
-            continue
-
-        print(f"Processing entry {entry_idx}, reasoning {i}...")
-
-        reasoning_results = []
-
-        # Run for each model and each run
-        for model in builder.models:
-            for run in range(builder.runs_per_model):
-                print(f"  Using model {model}, run {run + 1}/{builder.runs_per_model}")
-
-                # Generate reasoning graph
-                graph_dot = await builder.generate_reasoning_graph(thought, model)
-
-                if graph_dot:
-                    # Compute FSF
-                    fsf = builder.compute_fsf_from_dot(graph_dot)
-
-                    # Store results
-                    result = {
-                        'model_name': model,
-                        'run_id': run + 1,
-                        'reasoning_graph': graph_dot,
-                        'fsf': fsf
-                    }
-                    reasoning_results.append(result)
-                    print(f"    Generated graph with FSF={fsf}")
-                else:
-                    print(f"    Failed to generate graph")
-                    result = {
-                        'model_name': model,
-                        'run_id': run + 1,
-                        'reasoning_graph': None,
-                        'fsf': None
-                    }
-                    reasoning_results.append(result)
-
-            await asyncio.sleep(1)  # Small delay between models
-
-        # Add all results to the reasoning item
-        reasoning_item['reasoning_graph'] = reasoning_results
-
-    return entry
-
-
-def compute_fsf_stability_metrics(entries: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """
-    Compute FSF stability metrics for each data entry.
-
-    1. Same-model FSF standard deviation (within-model consistency)
-    2. Cross-model mean difference (between-model variance)
-
-    Args:
-        entries: List of processed entries with reasoning_graph results
-
-    Returns:
-        Dictionary mapping entry indices to stability metrics
-    """
-    stability_metrics = {}
-
-    for entry_idx, entry in enumerate(entries):
-        if 'reasoning' not in entry or not entry['reasoning']:
-            continue
-
-        entry_metrics = {}
-
-        for reasoning_idx, reasoning_item in enumerate(entry['reasoning']):
-            if ('reasoning_graph' not in reasoning_item or
-                not isinstance(reasoning_item['reasoning_graph'], list)):
+                last_error = str(e)
+                if attempt < max_retries:
+                    wait_time = 2 ** attempt  # Exponential backoff
+                    print(f"    Retry attempt {attempt + 1}/{max_retries}: {e} (waiting {wait_time}s)")
+                    await asyncio.sleep(wait_time)
                 continue
 
-            all_results = reasoning_item['reasoning_graph']
+        # All retries failed
+        if max_retries > 0 and last_error:
+            print(f"    Failed after {max_retries} retries: {last_error}")
+        return None
 
-            # Group results by model
-            model_fsf_results = defaultdict(list)
-            for result in all_results:
-                if result['fsf'] is not None:
-                    model_fsf_results[result['model_name']].append(result['fsf'])
-
-            # Compute within-model standard deviation
-            within_model_std = {}
-            for model, fsf_values in model_fsf_results.items():
-                if len(fsf_values) > 1:
-                    within_model_std[model] = statistics.stdev(fsf_values)
-                else:
-                    within_model_std[model] = 0.0
-
-            # Compute between-model mean difference
-            model_means = {}
-            for model, fsf_values in model_fsf_results.items():
-                if fsf_values:
-                    model_means[model] = statistics.mean(fsf_values)
-
-            cross_model_mean_diff = None
-            if len(model_means) > 1:
-                all_means = list(model_means.values())
-                # Compute mean of absolute differences between all pairs of models
-                differences = []
-                for i in range(len(all_means)):
-                    for j in range(i + 1, len(all_means)):
-                        differences.append(abs(all_means[i] - all_means[j]))
-                cross_model_mean_diff = statistics.mean(differences) if differences else None
-
-            # Store metrics for this reasoning
-            entry_metrics[f'reasoning_{reasoning_idx}'] = {
-                'within_model_std': within_model_std,
-                'cross_model_mean_diff': cross_model_mean_diff,
-                'model_means': model_means,
-                'all_results': model_fsf_results
-            }
-
-        if entry_metrics:
-            stability_metrics[f'entry_{entry_idx}'] = entry_metrics
-
-    return stability_metrics
-
-
-def plot_fsf_stability(stability_metrics: Dict[str, Any], output_dir: str = 'fsf_stability_plots'):
-    """
-    Generate visualization plots for FSF stability metrics.
-
-    Args:
-        stability_metrics: Stability metrics computed by compute_fsf_stability_metrics
-        output_dir: Directory to save the plots
-    """
-    output_path = Path(output_dir)
-    output_path.mkdir(parents=True, exist_ok=True)
-
-    # Prepare data for plotting
-    entry_names = list(stability_metrics.keys())
-    reasoning_data = defaultdict(lambda: {
-        'within_model_stds': defaultdict(list),
-        'cross_model_diffs': []
-    })
-
-    # Extract data
-    for entry_key, entry_data in stability_metrics.items():
-        for reasoning_key, reasoning_data_dict in entry_data.items():
-            # Collect within-model standard deviations
-            for model, std in reasoning_data_dict['within_model_std'].items():
-                reasoning_data[reasoning_key]['within_model_stds'][model].append(std)
-
-            # Collect cross-model mean differences
-            cross_model_diff = reasoning_data_dict['cross_model_mean_diff']
-            if cross_model_diff is not None:
-                reasoning_data[reasoning_key]['cross_model_diffs'].append(cross_model_diff)
-
-    # Plot 1: Within-model FSF standard deviation
-    plt.figure(figsize=(12, 8))
-    for reasoning_key, data in reasoning_data.items():
-        for model, stds in data['within_model_stds'].items():
-            plt.subplot(2, 1, 1)
-            plt.scatter([f"{reasoning_key}-{model}"] * len(stds), stds, label=f"{reasoning_key}-{model}", alpha=0.7)
-
-    plt.title('Within-Model FSF Standard Deviation')
-    plt.ylabel('FSF Std Dev')
-    plt.xticks(rotation=45)
-    plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
-    plt.tight_layout()
-    plt.savefig(output_path / 'within_model_std.png', dpi=300, bbox_inches='tight')
-    plt.close()
-
-    # Plot 2: Between-model mean differences
-    plt.figure(figsize=(10, 6))
-    all_cross_model_diffs = []
-    labels = []
-    for reasoning_key, data in reasoning_data.items():
-        if data['cross_model_diffs']:
-            all_cross_model_diffs.extend(data['cross_model_diffs'])
-            labels.extend([reasoning_key] * len(data['cross_model_diffs']))
-
-    if all_cross_model_diffs:
-        plt.scatter(labels, all_cross_model_diffs, alpha=0.7)
-        plt.title('Between-Model Mean FSF Differences')
-        plt.ylabel('Mean Absolute Difference')
-        plt.xlabel('Reasoning Instance')
-        plt.xticks(rotation=45)
-        plt.tight_layout()
-        plt.savefig(output_path / 'between_model_diffs.png', dpi=300, bbox_inches='tight')
-    else:
-        print("Warning: No cross-model differences to plot")
-    plt.close()
-
-    # Summary statistics plot
-    plt.figure(figsize=(12, 6))
-
-    # Summary for within-model std
-    plt.subplot(1, 2, 1)
-    all_within_stds = []
-    model_names = []
-    for data in reasoning_data.values():
-        for model, stds in data['within_model_stds'].items():
-            if stds:
-                all_within_stds.append(statistics.mean(stds))
-                model_names.append(model)
-
-    if all_within_stds:
-        plt.boxplot(all_within_stds, labels=['All Models'])
-        plt.title('Distribution of Within-Model\nFSF Standard Deviations')
-        plt.ylabel('FSF Std Dev')
-
-    # Summary for between-model differences
-    plt.subplot(1, 2, 2)
-    all_cross_diffs = []
-    for data in reasoning_data.values():
-        all_cross_diffs.extend(data['cross_model_diffs'])
-
-    if all_cross_diffs:
-        plt.boxplot(all_cross_diffs, labels=['Between-Model'])
-        plt.title('Distribution of Between-Model\nMean FSF Differences')
-        plt.ylabel('Mean Absolute Difference')
-
-    plt.tight_layout()
-    plt.savefig(output_path / 'fsf_stability_summary.png', dpi=300, bbox_inches='tight')
-    plt.close()
-
-    print(f"Plots saved to {output_path.absolute()}")
-
-
-def save_stability_metrics(stability_metrics: Dict[str, Any], output_file: str):
-    """
-    Save stability metrics to a JSON file.
-
-    Args:
-        stability_metrics: Stability metrics computed by compute_fsf_stability_metrics
-        output_file: Path to output JSON file
-    """
-    with open(output_file, 'w', encoding='utf-8') as f:
-        json.dump(stability_metrics, f, indent=2, ensure_ascii=False)
-    print(f"Stability metrics saved to {output_file}")
-
-
-def load_and_analyze_results(results_file: str, output_dir: str = 'fsf_stability_plots'):
-    """
-    Load processed results from a JSONL file and perform stability analysis.
-
-    Args:
-        results_file: Path to the processed JSONL file
-        output_dir: Directory to save analysis plots and metrics
-
-    Returns:
-        Stability metrics dictionary
-    """
-    # Read the results
+def load_entries(input_path: str) -> List[Dict[str, Any]]:
+    """Load all entries from input JSONL file."""
     entries = []
-    with open(results_file, 'r', encoding='utf-8') as f:
+    with open(input_path, 'r', encoding='utf-8') as f:
         for line in f:
             if line.strip():
                 entries.append(json.loads(line))
+    return entries
 
-    print(f"Loaded {len(entries)} entries from {results_file}")
 
-    # Compute stability metrics
-    stability_metrics = compute_fsf_stability_metrics(entries)
+def load_output_entries(output_path: str) -> Tuple[List[Dict[str, Any]], Set[str]]:
+    """
+    Load entries from output file and extract completed task keys.
 
-    # Save stability metrics to JSON
-    metrics_file = Path(output_dir) / 'stability_metrics.json'
-    save_stability_metrics(stability_metrics, str(metrics_file))
+    Returns:
+        Tuple of (entries, completed_task_keys)
+        - entries: List of output entries
+        - completed_task_keys: Set of completed task keys
+          Format: "{thought_id}_{model_name}_{run_id}"
+    """
+    output_file = Path(output_path)
+    if not output_file.exists():
+        return [], set()
 
-    # Generate plots
-    plot_fsf_stability(stability_metrics, output_dir)
+    entries = []
+    completed_keys = set()
 
-    return stability_metrics
+    with open(output_file, 'r', encoding='utf-8') as f:
+        for line in f:
+            if line.strip():
+                entry = json.loads(line)
+                entries.append(entry)
+
+                # Extract completed task key
+                key_parts = [
+                    str(entry.get('q_id', '')),
+                    str(entry.get('t_id', '')),
+                    entry.get('model', ''),
+                    str(entry.get('run_id', ''))
+                ]
+                if all(part for part in key_parts):
+                    key = "_".join(key_parts)
+                    completed_keys.add(key)
+
+    return entries, completed_keys
+
+
+def generate_tasks(
+    input_entries: List[Dict[str, Any]],
+    models: List[str],
+    runs_per_model: int,
+    completed_keys: Set[str],
+    start_idx: int,
+    end_idx: int
+) -> List[Task]:
+    """
+    Generate all annotation tasks.
+
+    Args:
+        input_entries: List of entries from input file
+        models: List of model names
+        runs_per_model: Number of runs per model
+        completed_keys: Set of completed task keys
+        start_idx: Starting index (inclusive)
+        end_idx: Ending index (exclusive)
+
+    Returns:
+        List of Task objects to process
+    """
+    tasks = []
+
+    for q_id in range(start_idx, end_idx):
+        if q_id >= len(input_entries):
+            break
+
+        entry = input_entries[q_id]
+        question = entry.get('question', '')
+
+        if 'reasoning' not in entry:
+            continue
+
+        for t_id, reasoning_item in enumerate(entry['reasoning']):
+            thought = reasoning_item.get('thought', '')
+            if not thought:
+                continue
+
+            thought_id = f"{q_id}_{t_id}"
+
+            for model_name in models:
+                for run_id in range(1, runs_per_model + 1):
+                    # Check if already completed
+                    task_key = f"{q_id}_{t_id}_{model_name}_{run_id}"
+                    if task_key in completed_keys:
+                        continue
+
+                    task = Task(
+                        thought_id=thought_id,
+                        q_id=q_id,
+                        t_id=t_id,
+                        question=question,
+                        thought=thought,
+                        model_name=model_name,
+                        run_id=run_id
+                    )
+                    tasks.append(task)
+
+    return tasks
+
+
+def save_result(output_path: str, result: Dict[str, Any]):
+    """Append a single result to output JSONL file."""
+    with open(output_path, 'a', encoding='utf-8') as f:
+        f.write(json.dumps(result, ensure_ascii=False) + '\n')
+
+
+async def process_task(
+    task: Task,
+    generator: ReasoningGraphGenerator,
+    input_entries: List[Dict[str, Any]],
+    output_path: str,
+    pbar: tqdm
+) -> bool:
+    """
+    Process a single task.
+
+    Args:
+        task: Task to process
+        generator: ReasoningGraphGenerator instance
+        input_entries: List of input entries
+        output_path: Path to output file
+        pbar: Progress bar
+
+    Returns:
+        True if successful, False otherwise
+    """
+    try:
+        # Generate graph
+        graph_dot = await generator.generate_reasoning_graph(task.thought, task.model_name)
+
+        if graph_dot is None:
+            pbar.update(1)
+            return False
+
+        # Create output record
+        result = {
+            'question': task.question,
+            'thought': task.thought,
+            'q_id': task.q_id,
+            't_id': task.t_id,
+            'reasoning_graph': graph_dot,
+            'model': task.model_name,
+            'run_id': task.run_id
+        }
+
+        # Save immediately
+        save_result(output_path, result)
+
+        pbar.update(1)
+        return True
+
+    except Exception as e:
+        print(f"Error processing task {task.thought_id}: {e}")
+        pbar.update(1)
+        return False
 
 
 async def process_dataset(
     input_path: str,
     output_path: str,
-    builder: ReasoningGraphBuilder,
+    generator: ReasoningGraphGenerator,
     start_idx: int = 0,
-    end_idx: Optional[int] = None
+    end_idx: Optional[int] = None,
+    max_concurrent_tasks: int = 100
 ):
     """
-    Process a dataset file and generate reasoning graphs with FSF scores.
+    Process dataset with thought-level concurrency and checkpointing.
 
     Args:
         input_path: Path to input JSONL file
         output_path: Path to output JSONL file
-        builder: ReasoningGraphBuilder instance
-        start_idx: Starting index for processing (inclusive)
-        end_idx: Ending index for processing (exclusive)
+        generator: ReasoningGraphGenerator instance
+        start_idx: Starting index (inclusive)
+        end_idx: Ending index (exclusive)
+        max_concurrent_tasks: Maximum concurrent tasks
     """
-    input_file = Path(input_path)
-    output_file = Path(output_path)
+    print(f"Loading entries from {input_path}...")
+    input_entries = load_entries(input_path)
+    total_input_entries = len(input_entries)
 
-    if not input_file.exists():
-        raise FileNotFoundError(f"Input file not found: {input_path}")
+    if end_idx is None or end_idx > total_input_entries:
+        end_idx = total_input_entries
 
-    # Create output directory if it doesn't exist
-    output_file.parent.mkdir(parents=True, exist_ok=True)
+    print(f"Total entries in input: {total_input_entries}")
+    print(f"Processing entries {start_idx} to {end_idx}")
 
-    # Read all entries
-    entries = []
-    with open(input_file, 'r', encoding='utf-8') as f:
-        for line in f:
-            if line.strip():
-                entries.append(json.loads(line))
+    # Load or initialize output file
+    print(f"Loading checkpoint from {output_path}...")
+    output_entries, completed_keys = load_output_entries(output_path)
 
-    total_entries = len(entries)
-    print(f"Loaded {total_entries} entries from {input_path}")
-
-    # Apply index range
-    if end_idx is None:
-        end_idx = total_entries
-    entries_to_process = entries[start_idx:end_idx]
-    print(f"Processing entries {start_idx} to {end_idx} ({len(entries_to_process)} entries)")
-
-    # Process entries concurrently
-    tasks = []
-    for idx, entry in enumerate(entries_to_process, start=start_idx):
-        task = process_single_entry(entry, builder, idx)
-        tasks.append(task)
-
-    # Wait for all tasks to complete with progress bar
-    if HAS_TQDM:
-        processed_entries = []
-        for task in async_tqdm.as_completed(tasks, total=len(tasks), desc="Processing entries"):
-            processed_entries.append(await task)
+    if not output_entries:
+        print("No checkpoint found. Starting fresh...")
     else:
-        processed_entries = await asyncio.gather(*tasks)
+        print(f"Found {len(output_entries)} existing results")
+        print(f"Found {len(completed_keys)} completed tasks")
 
-    # Write results to output file
-    with open(output_file, 'w', encoding='utf-8') as f:
-        for entry in processed_entries:
-            f.write(json.dumps(entry, ensure_ascii=False) + '\n')
+    # Generate tasks
+    print("Generating tasks...")
+    tasks = generate_tasks(
+        input_entries,
+        generator.models,
+        generator.runs_per_model,
+        completed_keys,
+        start_idx,
+        end_idx
+    )
+
+    if not tasks:
+        print("All tasks already completed!")
+        return
+
+    print(f"Total tasks to process: {len(tasks)}")
+
+    # Process tasks with progress bar
+    with tqdm(total=len(tasks), desc="Processing tasks") as pbar:
+        # Create semaphore for concurrent task limit
+        semaphore = asyncio.Semaphore(max_concurrent_tasks)
+
+        async def process_task_with_semaphore(task):
+            async with semaphore:
+                return await process_task(task, generator, input_entries, output_path, pbar)
+
+        # Process all tasks
+        await asyncio.gather(*[process_task_with_semaphore(task) for task in tasks])
 
     print(f"\nResults saved to {output_path}")
-    print(f"Total entries processed: {len(processed_entries)}")
+    print(f"Total tasks processed: {len(tasks)}")
 
 
 async def main():
     """Main entry point."""
     import argparse
 
-    parser = argparse.ArgumentParser(description='Build reasoning graphs and compute FSF from COT data')
-    parser.add_argument('--input', type=str, required=True,
-                       help='Path to input JSONL file')
-    parser.add_argument('--output', type=str, required=True,
-                       help='Path to output JSONL file')
-    parser.add_argument('--models', type=str, nargs='+', default=['gpt-oss-120b-judge'],
-                       help='Model names for LLM API (can specify multiple)')
-    parser.add_argument('--runs-per-model', type=int, default=1,
-                       help='Number of runs per model for each COT')
-    parser.add_argument('--start-idx', type=int, default=0,
-                       help='Starting index for processing')
-    parser.add_argument('--end-idx', type=int, default=None,
-                       help='Ending index for processing')
-    parser.add_argument('--max-concurrent', type=int, default=10,
-                       help='Maximum concurrent requests')
-    parser.add_argument('--temperature', type=float, default=0.1,
-                       help='Temperature for LLM generation')
-    parser.add_argument('--max-tokens', type=int, default=4096,
-                       help='Max tokens for LLM generation')
-    parser.add_argument('--analyze', action='store_true',
-                       help='Skip processing and only analyze existing results')
-    parser.add_argument('--plot-dir', type=str, default='fsf_stability_plots',
-                       help='Directory to save stability plots')
+    parser = argparse.ArgumentParser(description='Generate reasoning graphs with thought-level concurrency')
+    parser.add_argument('--input', type=str, required=True, help='Path to input JSONL file')
+    parser.add_argument('--output', type=str, required=True, help='Path to output JSONL file')
+    parser.add_argument('--models', type=str, nargs='+', default=['gpt-oss-120b-judge'], help='Model names')
+    parser.add_argument('--runs-per-model', type=int, default=1, help='Number of runs per model')
+    parser.add_argument('--max-retries', type=int, default=0, help='Max retries per task on failure (default: 0)')
+    parser.add_argument('--start-idx', type=int, default=0, help='Starting index')
+    parser.add_argument('--end-idx', type=int, default=None, help='Ending index')
+    parser.add_argument('--max-concurrent-tasks', type=int, default=100, help='Max concurrent tasks')
+    parser.add_argument('--temperature', type=float, default=0.1, help='Temperature for generation')
+    parser.add_argument('--max-tokens', type=int, default=4096, help='Max tokens for generation')
 
     args = parser.parse_args()
 
-    # Set default plot directory relative to output file if not specified
-    if args.plot_dir == 'fsf_stability_plots' and args.output:
-        output_path = Path(args.output)
-        args.plot_dir = str(output_path.parent / f"{output_path.stem}_plots")
+    print("Using pydot for DOT parsing")
+    print(f"Max concurrent tasks: {args.max_concurrent_tasks}")
 
-    # If analyze mode, load and analyze existing results
-    if args.analyze:
-        print(f"Analyzing existing results from {args.output}")
-        metrics = load_and_analyze_results(args.output, args.plot_dir)
-        print(f"Analysis complete. Plots saved to {args.plot_dir}")
-        return
-
-    # Create builder
-    builder = ReasoningGraphBuilder(
+    generator = ReasoningGraphGenerator(
         models=args.models,
         runs_per_model=args.runs_per_model,
-        max_concurrent_requests=args.max_concurrent,
+        max_retries=args.max_retries,
+        max_concurrent_requests=min(args.max_concurrent_tasks, 50),  # Limit per-model concurrency
         temperature=args.temperature,
         max_tokens=args.max_tokens
     )
 
     try:
-        # Process dataset
         await process_dataset(
             input_path=args.input,
             output_path=args.output,
-            builder=builder,
+            generator=generator,
             start_idx=args.start_idx,
-            end_idx=args.end_idx
+            end_idx=args.end_idx,
+            max_concurrent_tasks=args.max_concurrent_tasks
         )
-
-        # Automatically analyze results after processing
-        print("\nAnalyzing results for FSF stability...")
-        metrics = load_and_analyze_results(args.output, args.plot_dir)
-        print(f"Analysis complete. Plots saved to {args.plot_dir}")
     finally:
-        await builder.close()
+        await generator.close()
 
 
 if __name__ == '__main__':
     asyncio.run(main())
 
 """
+Example usage:
 python3 reasoning_graph/build_reasoning_graph.py \
     --input /mnt/moonfs/luoyashuo-m2/research/cdad/data/omnithought_math_20k/train.jsonl \
-    --output /mnt/moonfs/luoyashuo-m2/research/cdad/data/omnithought_math_20k/train_rg.jsonl \
-    --models gpt-oss-120b-judge Qwen2-5-72B-Instruct-20250314 \
-    --runs-per-model 5 \
-    --max-concurrent 10 \
-    --temperature 0.3 \
-    --max-tokens 8192 \
+    --output /mnt/moonfs/luoyashuo-m2/research/cdad/data/omnithought_math_20k/rg_info.jsonl \
+    --models gpt-oss-120b-judge claude-3.7-sonnet Qwen2-5-72B-Instruct \
+    --runs-per-model 3 \
     --start-idx 0 \
-    --end-idx 50
+    --end-idx 4 \
+    --max-concurrent 256
+
 """

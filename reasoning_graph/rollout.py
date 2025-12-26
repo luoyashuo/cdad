@@ -169,6 +169,8 @@ class AsyncConsulOpenAIProxy:
             service_name=model,
             max_connections_per_service=max_connections_per_service,
         )
+        # 备用URL（第二种方式）
+        self.fallback_base_url = 'https://openai.app.msh.team/v1'
 
     @property
     def base_url(self) -> str:
@@ -179,23 +181,46 @@ class AsyncConsulOpenAIProxy:
             raise ValueError(f"Model mismatch: {kwargs['model']} != {self.model}")
         kwargs['model'] = self.model
 
-        async with self.proxy.request(
-            'POST',
-            f'{self.base_url}/chat/completions',
-            json=kwargs,
-            timeout=self.timeout,
-        ) as response:
-            if response.status != 200:
-                text = await response.text()
-                raise Exception(f"HTTP {response.status}: {text}")
-            return await response.json()
+        # 第一种方式：使用当前逻辑（基于model的URL）
+        try:
+            async with self.proxy.request(
+                'POST',
+                f'{self.base_url}/chat/completions',
+                json=kwargs,
+                timeout=self.timeout,
+            ) as response:
+                if response.status != 200:
+                    text = await response.text()
+                    raise Exception(f"HTTP {response.status}: {text}")
+                return await response.json()
+        except Exception as e:
+            # logger.error(f"First attempt failed with {self.base_url}: {str(e)}")
+            # 第二种方式：使用备用URL https://openai.app.msh.team/
+            # logger.info(f"Falling back to {self.fallback_base_url}")
+            
+            # 为备用URL创建带有Authorization的请求
+            async with aiohttp.ClientSession() as session:
+                headers = {
+                    'Content-Type': 'application/json',
+                    'Authorization': 'Bearer sk-YTkmaWW2gMc18X3GMLXMwPoeoFuGPk2DnI0yX8Vxtnh8gMat'
+                }
+                async with session.post(
+                    f'{self.fallback_base_url}/chat/completions',
+                    json=kwargs,
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=self.timeout),
+                ) as response:
+                    if response.status != 200:
+                        text = await response.text()
+                        raise Exception(f"HTTP {response.status}: {text}")
+                    return await response.json()
 
     async def close(self):
         pass
 
 
 if __name__ == '__main__':
-    service_name = 'gpt-oss-120b-judge'
+    service_name = 'claude-3.7-sonnet'
     timeout = 600.0
     max_connections_per_service = 256
     async def test_llm_client(service_name, timeout, max_connections_per_service):
