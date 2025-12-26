@@ -12,7 +12,7 @@ uv pip install flash-attn --no-build-isolation
 uv pip install flashinfer-python -i https://flashinfer.ai/whl/cu124/torch2.6
 uv pip install git+https://github.com/NICTA/pyairports.git
 uv pip install rich
-uv pip install transformers==4.54.0 accelerate==1.12.0 deepspeed
+uv pip install transformers==4.54.0 accelerate==1.8.0 deepspeed
 uv pip install vllm==0.8.5.post1
 sudo apt-get install python3.10-dev
 uv pip install swanlab
