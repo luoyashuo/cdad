@@ -162,6 +162,9 @@ class AsyncConsulOpenAIProxy:
         timeout: float = 600.0,
         max_connections_per_service: int = 256,
     ) -> None:
+        if model == 'gpt-oss-120b':
+            # model = 'mullet-luoyashuo-droe7'
+            model = 'wren-luoyashuo-ckgxq'
         self.model = model
         self.timeout = timeout
         self.max_connections_per_service = max_connections_per_service
@@ -220,8 +223,14 @@ class AsyncConsulOpenAIProxy:
 
 
 if __name__ == '__main__':
+    '''
+    red model run oss://openai/gpt-oss-120b --in stone 
+    curl https://wren-luoyashuo-ckgxq.app.msh.team/v1/chat/completions -H "Content-Type: application/json" -d '{"messages": [{"role": "user", "content": "谁刺杀了林肯？"}], "max_tokens": 4096}'
+    curl https://mullet-luoyashuo-droe7.app.msh.team/v1/chat/completions -H "Content-Type: application/json" -d '{"messages": [{"role": "user", "content": "谁刺杀了林肯？"}], "max_tokens": 4096}'
+    
+    '''
     service_name = 'claude-3.7-sonnet'
-    timeout = 600.0
+    timeout = 6000.0
     max_connections_per_service = 256
     async def test_llm_client(service_name, timeout, max_connections_per_service):
         llm_client = AsyncConsulOpenAIProxy(

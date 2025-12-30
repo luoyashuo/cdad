@@ -22,17 +22,18 @@ from transformers import AutoTokenizer
 from tqdm import tqdm
 
 
-def is_math_problem(record, min_reasoning_length=None, check_full_response=True):
+def is_problem_of_type(record, problem_type='math', min_reasoning_length=None, check_full_response=True):
     """
-    Check if a record is a MATH problem
-    
+    Check if a record is a MATH or CODE problem
+
     Note: Actual OmniThought dataset doesn't have \boxed patterns in solution fields.
     It contains full_response with reasoning. This function adapts to the actual data format.
-    
+
     Args:
         record: The data record to check
+        problem_type: Type of problem to check for ('math' or 'code')
         min_reasoning_length: Minimum length of reasoning list (optional)
-        check_full_response: Whether to check full_response for mathematical problem indicators (default: True)
+        check_full_response: Whether to check full_response for problem indicators (default: True)
     """
     try:
         if 'reasoning' not in record:
@@ -66,14 +67,35 @@ def is_math_problem(record, min_reasoning_length=None, check_full_response=True)
         if not isinstance(reasoning_item, dict):
             return False
         
-        # Check for solution field with \boxed (original criteria, rare in this dataset)
-        if 'solution' in reasoning_item:
-            solution = reasoning_item['solution']
-            if solution and r'\boxed' in str(solution):
-                return True
-        
-        # If no explicit math indicators found, return False
-        return False
+        if problem_type == 'math':
+            # Check for solution field with \boxed (math problem indicator)
+            if 'solution' in reasoning_item:
+                solution = reasoning_item['solution']
+                if solution and r'\boxed' in str(solution):
+                    return True
+            # If no explicit math indicators found, return False
+            return False
+        else:  # problem_type == 'code'
+            # Check for code-related indicators in full_response or solution
+            if 'full_response' in reasoning_item:
+                full_response = reasoning_item['full_response']
+                if full_response:
+                    # Common code indicators
+                    code_indicators = ['def ', 'class ', 'import ', '#include', 'public static',
+                                     'function ', 'void ', 'int ', 'print(', 'printf(']
+                    if any(indicator in str(full_response) for indicator in code_indicators):
+                        return True
+
+            if 'solution' in reasoning_item:
+                solution = reasoning_item['solution']
+                if solution:
+                    code_indicators = ['def ', 'class ', 'import ', '#include', 'public static',
+                                     'function ', 'void ', 'int ', 'print(', 'printf(']
+                    if any(indicator in str(solution) for indicator in code_indicators):
+                        return True
+
+            # If no code indicators found, return False
+            return False
             
     except Exception as e:
         # Uncomment for debugging:
@@ -187,10 +209,10 @@ def filter_reasoning_items_by_token_limit(record, min_reasoning_length, max_thou
 
 def process_parquet_file_worker(args):
     """
-    Process a single parquet file and return math problems.
+    Process a single parquet file and return math/code problems.
     This function is run in a separate process.
     """
-    parquet_file, temp_dir, stop_event, min_reasoning_length, max_thought_tokens, min_thought_tokens, tokenizer_path = args
+    parquet_file, temp_dir, stop_event, min_reasoning_length, max_thought_tokens, min_thought_tokens, tokenizer_path, problem_type = args
     
     import pyarrow.parquet as pq
     
@@ -222,8 +244,8 @@ def process_parquet_file_worker(args):
             record = row.to_dict()
             total_records += 1
             
-            # Check if it's a math problem (without min_reasoning_length check here)
-            if is_math_problem(record, min_reasoning_length=None, check_full_response=True):
+            # Check if it's the requested type of problem (without min_reasoning_length check here)
+            if is_problem_of_type(record, problem_type=problem_type, min_reasoning_length=None, check_full_response=True):
                 # Apply the new filtering logic
                 filtered_record, should_keep, filter_reason = filter_reasoning_items_by_token_limit(
                     record, min_reasoning_length, max_thought_tokens, min_thought_tokens, tokenizer
@@ -257,13 +279,14 @@ def process_parquet_file_worker(args):
                            "reason_num_insufficient_count": reason_num_insufficient_count}
 
 
-def collect_math_problems_parallel(parquet_files, sample_size, temp_dir, seed=42, max_workers=None, min_reasoning_length=None, max_thought_tokens=None, min_thought_tokens=None, tokenizer_path=None):
+def collect_problems_parallel(parquet_files, sample_size, temp_dir, seed=42, max_workers=None, min_reasoning_length=None, max_thought_tokens=None, min_thought_tokens=None, tokenizer_path=None, problem_type='math'):
     """
     Process parquet files in parallel using multiple processes.
     Args:
         min_reasoning_length: Minimum length of reasoning list for filtering
         max_thought_tokens: Maximum token length for thought field
         tokenizer_path: Path to tokenizer
+        problem_type: Type of problem to collect ('math' or 'code')
     """
     if max_workers is None:
         # Default to number of CPU cores
@@ -290,7 +313,7 @@ def collect_math_problems_parallel(parquet_files, sample_size, temp_dir, seed=42
     print("\n" + "="*60)
     print("COLLECTING MATH PROBLEMS (MULTI-PROCESS)")
     print("="*60)
-    print(f"Target: {sample_size:,} MATH problems")
+    print(f"Target: {sample_size:,} MATH problems" if sample_size is not None else "Target: All available MATH problems (no limit)")
     print(f"Processing files in random order (seed: {seed})")
     print(f"Max workers: {max_workers}")
     if max_thought_tokens is not None:
@@ -302,7 +325,7 @@ def collect_math_problems_parallel(parquet_files, sample_size, temp_dir, seed=42
         stop_event = manager.Event()
         
         # Prepare arguments for worker processes
-        worker_args = [(file, temp_dir, stop_event, min_reasoning_length, max_thought_tokens, min_thought_tokens, tokenizer_path) for file in shuffled_files]
+        worker_args = [(file, temp_dir, stop_event, min_reasoning_length, max_thought_tokens, min_thought_tokens, tokenizer_path, problem_type) for file in shuffled_files]
         
         with ProcessPoolExecutor(max_workers=max_workers) as executor:
             # Submit all tasks
@@ -333,16 +356,17 @@ def collect_math_problems_parallel(parquet_files, sample_size, temp_dir, seed=42
                         # Append to temp file
                         with open(temp_file, 'a', encoding='utf-8') as f:
                             for problem in math_problems:
-                                if collected >= sample_size:
+                                if sample_size is not None and collected >= sample_size:
                                     stop_event.set()
                                     break
                                 f.write(json.dumps(problem, ensure_ascii=False) + '\n')
                                 collected += 1
                         
+                        problem_type_name = "MATH" if problem_type == 'math' else "CODE"
                         print(f"  [{processed_files}/{len(shuffled_files)}] {parquet_file.name}: "
-                              f"+{len(math_problems)} MATH problems, total: {collected:,}/{sample_size:,}")
+                              f"+{len(math_problems)} {problem_type_name} problems, total: {collected:,}" + (f"/{sample_size:,}" if sample_size is not None else ""))
                         
-                        if collected >= sample_size:
+                        if sample_size is not None and collected >= sample_size:
                             stop_event.set()
                             print("\n" + "="*60)
                             print("TARGET REACHED!")
@@ -350,18 +374,19 @@ def collect_math_problems_parallel(parquet_files, sample_size, temp_dir, seed=42
                             break
                     else:
                         # Print detailed statistics for each file
-                        print(f"  [{processed_files}/{len(shuffled_files)}] {parquet_file.name}: no MATH problems found")
-                        
+                        problem_type_name = "math " if problem_type == 'math' else "code "
+                        print(f"  [{processed_files}/{len(shuffled_files)}] {parquet_file.name}: no {problem_type_name}problems found")
+
                         # Show detailed filtering statistics
                         total = stats.get("total_records", 0)
                         if total > 0:
-                            not_math = stats.get("not_math_count", 0)
+                            not_target = stats.get("not_math_count", 0)
                             token_too_long = stats.get("token_too_long_count", 0)
                             reason_insufficient = stats.get("reason_num_insufficient_count", 0)
-                            passed = total - not_math - token_too_long - reason_insufficient
-                            
+                            passed = total - not_target - token_too_long - reason_insufficient
+
                             print(f"      └─ Total records: {total:,}")
-                            print(f"          ✗ Not math problems: {not_math:,} ({not_math/total*100:.2f}%)")
+                            print(f"          ✗ Not {problem_type} problems: {not_target:,} ({not_target/total*100:.2f}%)")
                             print(f"          ✗ Token too long: {token_too_long:,} ({token_too_long/total*100:.2f}%)")
                             print(f"          ✗ Reason count insufficient: {reason_insufficient:,} ({reason_insufficient/total*100:.2f}%)")
                             print(f"          ✓ Passed filters: {passed:,} ({passed/total*100:.2f}%)")
@@ -375,12 +400,13 @@ def collect_math_problems_parallel(parquet_files, sample_size, temp_dir, seed=42
     
     print("\n" + "="*60)
     print("COLLECTION COMPLETE")
+    problem_type_name = "MATH" if problem_type == 'math' else "CODE"
     print("="*60)
     print(f"Files processed: {processed_files}/{len(shuffled_files)}")
-    print(f"MATH problems collected: {collected:,}/{sample_size:,}")
-    
+    print(f"{problem_type_name} problems collected: {collected:,}" + (f"/{sample_size:,}" if sample_size is not None else ""))
+
     # Store statistics in a global variable for later use
-    collect_math_problems_parallel.stats = {
+    collect_problems_parallel.stats = {
         "total_records": total_records_global,
         "not_math_count": not_math_count_global,
         "token_too_long_count": token_too_long_count_global,
@@ -673,26 +699,32 @@ def save_results(train, test, output_dir, args=None):
         args: Command line arguments to save (optional)
     """
     os.makedirs(output_dir, exist_ok=True)
-    
+
     # Save train
     train_path = os.path.join(output_dir, "train.jsonl")
     with open(train_path, 'w', encoding='utf-8') as f:
         for item in train:
             f.write(json.dumps(item, ensure_ascii=False) + '\n')
-    
+
     # Save test
     test_path = os.path.join(output_dir, "test.jsonl")
     with open(test_path, 'w', encoding='utf-8') as f:
         for item in test:
             f.write(json.dumps(item, ensure_ascii=False) + '\n')
-    
+
+    # Determine filter criteria based on problem type
+    problem_type = 'math' if args is None else getattr(args, 'problem_type', 'math')
+    filter_criteria = "Contains '\\boxed' in reasoning solution" if problem_type == 'math' else "Contains code indicators in full_response/solution"
+    dataset_name = f"OmniThought {problem_type.upper()} Filtered (Multi-Process)"
+
     # Save info
     info = {
-        "dataset": "OmniThought MATH Filtered (Multi-Process)",
+        "dataset": dataset_name,
+        "problem_type": problem_type,
         "train_samples": len(train),
         "test_samples": len(test),
         "total_samples": len(train) + len(test),
-        "filter_criteria": "Contains '\\boxed' in reasoning solution",
+        "filter_criteria": filter_criteria,
         "format": "Original OmniThought format",
         "sampling_method": "Random file selection with multi-process parallelization",
         "filter_options": {
@@ -716,13 +748,14 @@ def save_results(train, test, output_dir, args=None):
     print(f"  - dataset_info.json")
 
 
-def show_sample(train):
-    """Show a sample MATH problem"""
+def show_sample(train, problem_type='math'):
+    """Show a sample problem"""
     if not train:
         return
-    
+
     print("\n" + "="*60)
-    print("SAMPLE MATH PROBLEM")
+    problem_type_name = "MATH" if problem_type == 'math' else "CODE"
+    print(f"SAMPLE {problem_type_name} PROBLEM")
     print("="*60)
     
     sample = train[0]
@@ -742,7 +775,7 @@ def show_sample(train):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Filter MATH data from OmniThought with multi-process parallelization",
+        description="Filter MATH or CODE data from OmniThought with multi-process parallelization",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Requirements:
@@ -750,15 +783,26 @@ Requirements:
   - transformers: pip install transformers
 
 Example:
+  # Filter math problems with sample size limit
   python filter_math_simple_multiprocess.py \
       --input_path /path/to/omnithought/data \
       --output_dir /path/to/output \
+      --problem_type math \
       --sample_size 20000 \
       --test_ratio 0.01 \
       --seed 42 \
       --max_workers 8 \
       --max_thought_tokens 1024 \
       --min_thought_tokens 64
+
+  # Filter code problems without sample size limit (process all data)
+  python filter_math_simple_multiprocess.py \
+      --input_path /path/to/omnithought/data \
+      --output_dir /path/to/output \
+      --problem_type code \
+      --test_ratio 0.01 \
+      --seed 42 \
+      --max_workers 8
         """
     )
     
@@ -766,8 +810,10 @@ Example:
                        help="Path to OmniThought dataset directory containing parquet files")
     parser.add_argument("--output_dir", type=str, required=True,
                        help="Output directory for filtered dataset")
-    parser.add_argument("--sample_size", type=int, default=30000,
-                       help="Number of MATH problems to collect (default: 30000)")
+    parser.add_argument("--problem_type", type=str, default="math", choices=["math", "code"],
+                       help="Type of problem to filter (math or code, default: math)")
+    parser.add_argument("--sample_size", type=int, default=None,
+                       help="Number of problems to collect (default: None, no limit)")
     parser.add_argument("--test_ratio", type=float, default=0.1,
                        help="Ratio of test split (default: 0.1)")
     parser.add_argument("--seed", type=int, default=42,
@@ -798,13 +844,14 @@ Example:
     if not parquet_files:
         print(f"Error: No parquet files found in '{args.input_path}'")
         return
-    
+
     print("="*60)
-    print("OmniThought MATH Dataset Filter (Multi-Process)")
+    problem_type_name = "MATH" if args.problem_type == 'math' else "CODE"
+    print(f"OmniThought {problem_type_name} Dataset Filter (Multi-Process)")
     print("="*60)
     print(f"Input directory: {args.input_path}")
     print(f"Output directory: {args.output_dir}")
-    print(f"Target sample size: {args.sample_size:,}")
+    print(f"Target sample size: {args.sample_size:,}" if args.sample_size is not None else "Target sample size: No limit (process all)")
     print(f"Test ratio: {args.test_ratio}")
     print(f"Random seed: {args.seed}")
     print(f"Max workers: {args.max_workers or 'CPU count'}")
@@ -820,31 +867,32 @@ Example:
     temp_dir = tempfile.mkdtemp(prefix="math_filter_mp_")
     print(f"Temporary directory: {temp_dir}")
     print("="*60)
-    
+
     try:
-        # Collect MATH problems with multi-process processing
-        temp_file, actual_count = collect_math_problems_parallel(
-            parquet_files, args.sample_size, temp_dir, args.seed, args.max_workers, 
-            args.reason_sample_num, args.max_thought_tokens, args.min_thought_tokens, args.tokenizer_path
+        # Collect problems with multi-process processing
+        temp_file, actual_count = collect_problems_parallel(
+            parquet_files, args.sample_size, temp_dir, args.seed, args.max_workers,
+            args.reason_sample_num, args.max_thought_tokens, args.min_thought_tokens, args.tokenizer_path, args.problem_type
         )
-        
+
         if actual_count == 0:
-            print("\nNo MATH problems found!")
+            problem_type_name = "MATH" if args.problem_type == 'math' else "CODE"
+            print(f"\nNo {problem_type_name} problems found!")
             print("\n" + "="*60)
             print("FILTERING STATISTICS (DEBUG INFO)")
             print("="*60)
-            stats = getattr(collect_math_problems_parallel, 'stats', {})
+            stats = getattr(collect_problems_parallel, 'stats', {})
             if stats:
                 total = stats.get("total_records", 0)
-                not_math = stats.get("not_math_count", 0)
+                not_target = stats.get("not_math_count", 0)
                 token_too_long = stats.get("token_too_long_count", 0)
                 reason_insufficient = stats.get("reason_num_insufficient_count", 0)
-                
+
                 print(f"Total records processed: {total:,}")
-                print(f"  - Not math problems: {not_math:,} ({not_math/total*100:.2f}%)")
+                print(f"  - Not {args.problem_type} problems: {not_target:,} ({not_target/total*100:.2f}%)")
                 print(f"  - Token too long: {token_too_long:,} ({token_too_long/total*100:.2f}%)")
                 print(f"  - Reason number insufficient: {reason_insufficient:,} ({reason_insufficient/total*100:.2f}%)")
-                passed = total - not_math - token_too_long - reason_insufficient
+                passed = total - not_target - token_too_long - reason_insufficient
                 print(f"  - Passed all filters: {passed:,} ({passed/total*100:.2f}%)")
             else:
                 print("No statistics available (this should not happen)")
@@ -868,7 +916,7 @@ Example:
         print("="*60)
         
         # Show sample
-        show_sample(train)
+        show_sample(train, args.problem_type)
         
     finally:
         # Clean up
@@ -883,13 +931,28 @@ if __name__ == "__main__":
     main()
 
 """
+# Filter math problems with sample size limit
 python /home/luoyashuo/research/graph_kd/cdad/data_preprocess/filter_math_simple_multiprocess.py \
     --input_path /mnt/moonfs/luoyashuo-m2/hf_home/dataset/alibaba-pai/OmniThought/data \
     --output_dir /mnt/moonfs/luoyashuo-m2/research/cdad/data/omnithought_math_20k_2 \
-    --sample_size 20000 \
+    --problem_type math \
+    --sample_size 50000 \
     --test_ratio 0.01 \
     --seed 307 \
     --max_workers 32 \
+    --reason_sample_num 3 \
+    --max_thought_tokens 4096 \
+    --min_thought_tokens 1024 \
+    --tokenizer_path /mnt/moonfs/public-models-m2/Qwen/Qwen3-8B
+
+# Filter code problems without sample size limit (process all data)
+python /home/luoyashuo/research/graph_kd/cdad/data_preprocess/filter_math_simple_multiprocess.py \
+    --input_path /mnt/moonfs/luoyashuo-m2/hf_home/dataset/alibaba-pai/OmniThought/data \
+    --output_dir /mnt/moonfs/luoyashuo-m2/research/cdad/data/omnithought_code_all \
+    --problem_type code \
+    --test_ratio 0.01 \
+    --seed 307 \
+    --max_workers 64 \
     --reason_sample_num 3 \
     --max_thought_tokens 4096 \
     --min_thought_tokens 1024 \

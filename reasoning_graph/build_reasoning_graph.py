@@ -512,7 +512,8 @@ async def main():
         max_retries=args.max_retries,
         max_concurrent_requests=min(args.max_concurrent_tasks, 50),  # Limit per-model concurrency
         temperature=args.temperature,
-        max_tokens=args.max_tokens
+        max_tokens=args.max_tokens, 
+        timeout=1200
     )
 
     try:
@@ -536,10 +537,33 @@ Example usage:
 python3 reasoning_graph/build_reasoning_graph.py \
     --input /mnt/moonfs/luoyashuo-m2/research/cdad/data/omnithought_math_20k/train.jsonl \
     --output /mnt/moonfs/luoyashuo-m2/research/cdad/data/omnithought_math_20k/rg_info.jsonl \
-    --models gpt-oss-120b-judge claude-3.7-sonnet Qwen2-5-72B-Instruct \
+    --models gpt-oss-120b \
     --runs-per-model 3 \
     --start-idx 0 \
-    --end-idx 4 \
-    --max-concurrent 256
+    --end-idx 9999999 \
+    --max-concurrent-tasks 200 \
+    --max-retries 3
 
+
+
+
+python3 reasoning_graph/build_reasoning_graph.py \
+    --input /mnt/moonfs/luoyashuo-m2/research/cdad/data/omnithought_math_all/train.jsonl \
+    --output /mnt/moonfs/luoyashuo-m2/research/cdad/data/omnithought_math_all/rg_info.jsonl \
+    --models gpt-oss-120b \
+    --runs-per-model 1 \
+    --start-idx 0 \
+    --end-idx 999999999 \
+    --max-concurrent-tasks 200 \
+    --max-retries 3
+
+python3 reasoning_graph/build_reasoning_graph.py \
+    --input /mnt/moonfs/luoyashuo-m2/research/cdad/data/omnithought_code_all/train.jsonl \
+    --output /mnt/moonfs/luoyashuo-m2/research/cdad/data/omnithought_code_all/rg_info.jsonl \
+    --models gpt-oss-120b \
+    --runs-per-model 1 \
+    --start-idx 0 \
+    --end-idx 999999999 \
+    --max-concurrent-tasks 200 \
+    --max-retries 3
 """
