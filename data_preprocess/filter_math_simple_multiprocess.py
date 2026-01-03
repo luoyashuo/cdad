@@ -676,9 +676,9 @@ def sample_and_split(temp_file, actual_count, test_ratio, output_dir, max_though
         except Exception as e:
             print(f"Warning: Failed to load tokenizer: {e}")
     
-    # Analyze data and create plots
+    # Analyze data (plots disabled for clean output)
     stats = analyze_data(problems, tokenizer)
-    plot_distributions(stats, output_dir)
+    # plot_distributions(stats, output_dir)  # Disabled: keep output clean
     
     # Split
     random.seed(42)
@@ -694,9 +694,9 @@ def sample_and_split(temp_file, actual_count, test_ratio, output_dir, max_though
 
 def save_results(train, test, output_dir, args=None):
     """
-    Save train/test splits and dataset info
+    Save train/test splits
     Args:
-        args: Command line arguments to save (optional)
+        args: Command line arguments to determine output format
     """
     os.makedirs(output_dir, exist_ok=True)
 
@@ -706,46 +706,15 @@ def save_results(train, test, output_dir, args=None):
         for item in train:
             f.write(json.dumps(item, ensure_ascii=False) + '\n')
 
-    # Save test
-    test_path = os.path.join(output_dir, "test.jsonl")
-    with open(test_path, 'w', encoding='utf-8') as f:
+    # Save val (renamed from test)
+    val_path = os.path.join(output_dir, "val.jsonl")
+    with open(val_path, 'w', encoding='utf-8') as f:
         for item in test:
             f.write(json.dumps(item, ensure_ascii=False) + '\n')
 
-    # Determine filter criteria based on problem type
-    problem_type = 'math' if args is None else getattr(args, 'problem_type', 'math')
-    filter_criteria = "Contains '\\boxed' in reasoning solution" if problem_type == 'math' else "Contains code indicators in full_response/solution"
-    dataset_name = f"OmniThought {problem_type.upper()} Filtered (Multi-Process)"
-
-    # Save info
-    info = {
-        "dataset": dataset_name,
-        "problem_type": problem_type,
-        "train_samples": len(train),
-        "test_samples": len(test),
-        "total_samples": len(train) + len(test),
-        "filter_criteria": filter_criteria,
-        "format": "Original OmniThought format",
-        "sampling_method": "Random file selection with multi-process parallelization",
-        "filter_options": {
-            "min_reasoning_length": getattr(args, 'reason_sample_num', None) if args else None,
-            "max_thought_tokens": getattr(args, 'max_thought_tokens', None) if args else None,
-            "min_thought_tokens": getattr(args, 'min_thought_tokens', None) if args else None
-        }
-    }
-    
-    # Add args to info if provided
-    if args is not None:
-        info["args"] = vars(args)
-    
-    info_path = os.path.join(output_dir, "dataset_info.json")
-    with open(info_path, 'w', encoding='utf-8') as f:
-        json.dump(info, f, indent=2, ensure_ascii=False)
-    
     print(f"\nSaved to {output_dir}:")
     print(f"  - train.jsonl ({len(train):,} samples)")
-    print(f"  - test.jsonl ({len(test):,} samples)")
-    print(f"  - dataset_info.json")
+    print(f"  - val.jsonl ({len(test):,} samples)")
 
 
 def show_sample(train, problem_type='math'):
@@ -808,8 +777,8 @@ Example:
     
     parser.add_argument("--input_path", type=str, required=True,
                        help="Path to OmniThought dataset directory containing parquet files")
-    parser.add_argument("--output_dir", type=str, required=True,
-                       help="Output directory for filtered dataset")
+    parser.add_argument("-o", "--output_dir", type=str, required=True,
+                       help="Output directory for filtered dataset (will only contain train.jsonl and val.jsonl)")
     parser.add_argument("--problem_type", type=str, default="math", choices=["math", "code"],
                        help="Type of problem to filter (math or code, default: math)")
     parser.add_argument("--sample_size", type=int, default=None,
@@ -934,7 +903,7 @@ if __name__ == "__main__":
 # Filter math problems with sample size limit
 python /home/luoyashuo/research/graph_kd/cdad/data_preprocess/filter_math_simple_multiprocess.py \
     --input_path /mnt/moonfs/luoyashuo-m2/hf_home/dataset/alibaba-pai/OmniThought/data \
-    --output_dir /mnt/moonfs/luoyashuo-m2/research/cdad/data/omnithought_math_20k_2 \
+    -o /mnt/moonfs/luoyashuo-m2/research/cdad/data/omnithought_math_20k_2 \
     --problem_type math \
     --sample_size 50000 \
     --test_ratio 0.01 \
@@ -948,7 +917,7 @@ python /home/luoyashuo/research/graph_kd/cdad/data_preprocess/filter_math_simple
 # Filter code problems without sample size limit (process all data)
 python /home/luoyashuo/research/graph_kd/cdad/data_preprocess/filter_math_simple_multiprocess.py \
     --input_path /mnt/moonfs/luoyashuo-m2/hf_home/dataset/alibaba-pai/OmniThought/data \
-    --output_dir /mnt/moonfs/luoyashuo-m2/research/cdad/data/omnithought_code_all \
+    -o /mnt/moonfs/luoyashuo-m2/research/cdad/data/omnithought_code_all \
     --problem_type code \
     --test_ratio 0.01 \
     --seed 307 \

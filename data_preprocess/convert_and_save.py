@@ -64,40 +64,22 @@ def convert_to_hf_format(jsonl_path, output_dir):
         'test': test_dataset
     })
 
-    # Save to disk
-    print(f"Saving HuggingFace dataset to {output_dir}")
-    dataset_dict.save_to_disk(output_dir)
-
-    # Also save as separate JSONL files for easy access
+    # Save as separate JSONL files
     os.makedirs(output_dir, exist_ok=True)
 
     train_jsonl = os.path.join(output_dir, "train.jsonl")
-    test_jsonl = os.path.join(output_dir, "test.jsonl")
+    val_jsonl = os.path.join(output_dir, "val.jsonl")
 
     with open(train_jsonl, 'w', encoding='utf-8') as f:
         for item in train_data:
             f.write(json.dumps(item, ensure_ascii=False) + '\n')
 
-    with open(test_jsonl, 'w', encoding='utf-8') as f:
+    with open(val_jsonl, 'w', encoding='utf-8') as f:
         for item in test_data:
             f.write(json.dumps(item, ensure_ascii=False) + '\n')
 
     print(f"Saved {len(train_data)} train samples to {train_jsonl}")
-    print(f"Saved {len(test_data)} test samples to {test_jsonl}")
-
-    # Save dataset info
-    info = {
-        "dataset": "OmniThought MATH Filtered",
-        "train_samples": len(train_data),
-        "test_samples": len(test_data),
-        "total_samples": len(data),
-        "filter_criteria": "Contains '\\boxed' in reasoning solution",
-        "format": "Original OmniThought format",
-        "description": "MATH problems with \boxed answers from OmniThought dataset"
-    }
-
-    with open(os.path.join(output_dir, "dataset_info.json"), 'w', encoding='utf-8') as f:
-        json.dump(info, f, indent=2, ensure_ascii=False)
+    print(f"Saved {len(test_data)} validation samples to {val_jsonl}")
 
 
 def create_math_dataset(output_jsonl):
