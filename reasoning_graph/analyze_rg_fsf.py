@@ -472,7 +472,14 @@ curl https://wren-luoyashuo-ckgxq.app.msh.team/v1/chat/completions -H "Content-T
 """
 """
 python reasoning_graph/analyze_rg_fsf.py \
-    --input /mnt/moonfs/luoyashuo-m2/research/cdad/data/omnithought_math_20k/rg_info.jsonl \
-    --output-dir  /mnt/moonfs/luoyashuo-m2/research/cdad/data/omnithought_math_20k/rg_plot \
+    --input /mnt/moonfs/luoyashuo-m2/research/cdad/data/omnithought_math_all/rg_info.jsonl \
+    --output-dir  /mnt/moonfs/luoyashuo-m2/research/cdad/data/omnithought_math_all/rg_plot \
+    --workers 64
+"""
+
+"""
+python reasoning_graph/analyze_rg_fsf.py \
+    --input /mnt/moonfs/luoyashuo-m2/research/cdad/data/omnithought_code_all/rg_info.jsonl \
+    --output-dir  /mnt/moonfs/luoyashuo-m2/research/cdad/data/omnithought_code_all/rg_plot \
     --workers 64
 """

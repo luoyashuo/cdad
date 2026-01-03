@@ -164,7 +164,7 @@ class AsyncConsulOpenAIProxy:
     ) -> None:
         if model == 'gpt-oss-120b':
             # model = 'mullet-luoyashuo-droe7'
-            model = 'wren-luoyashuo-ckgxq'
+            model = 'kiwi-luoyashuo-hkxwf'
         self.model = model
         self.timeout = timeout
         self.max_connections_per_service = max_connections_per_service

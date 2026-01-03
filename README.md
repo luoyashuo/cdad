@@ -16,4 +16,5 @@ uv pip install transformers==4.54.0 accelerate==1.8.0 deepspeed
 uv pip install vllm==0.8.5.post1
 sudo apt-get install python3.10-dev
 uv pip install swanlab
+uv pip install loguru
 ```
