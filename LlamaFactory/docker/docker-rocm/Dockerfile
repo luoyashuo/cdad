@@ -4,6 +4,7 @@ FROM ${BASE_IMAGE}
 
 # Installation arguments
 ARG PIP_INDEX=https://pypi.org/simple
+ARG EXTRAS=metrics
 ARG INSTALL_FLASHATTN=false
 ARG HTTP_PROXY=""
 ARG PYTORCH_INDEX=https://download.pytorch.org/whl/rocm6.3
@@ -27,14 +28,21 @@ WORKDIR /app
 # Change pip source
 RUN pip config set global.index-url "${PIP_INDEX}" && \
     pip config set global.extra-index-url "${PIP_INDEX}" && \
-    pip install --no-cache-dir --upgrade pip packaging wheel setuptools editables "hatchling>=1.18.0"
+    pip install --no-cache-dir --upgrade pip packaging wheel setuptools
 
-# Copy the application into the image
+# Reinstall pytorch rocm
+RUN pip uninstall -y torch torchvision torchaudio && \
+    pip install --no-cache-dir --pre torch torchvision torchaudio --index-url "${PYTORCH_INDEX}"
+
+# Install the requirements
+COPY requirements.txt /app
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy the rest of the application into the image
 COPY . /app
 
-# Reinstall pytorch rocm and install LLaMA Factory
-RUN pip uninstall -y torch torchvision torchaudio && \
-    pip install --no-cache-dir --no-build-isolation -e --pre ".[metrics,deepspeed]" --index-url "${PYTORCH_INDEX}"
+# Install LLaMA Factory
+RUN pip install --no-cache-dir -e ".[${EXTRAS}]" --no-build-isolation
 
 # Rebuild flash attention
 RUN if [ "${INSTALL_FLASHATTN}" == "true" ]; then \
@@ -57,12 +65,6 @@ EXPOSE 8000
 # unset proxy
 ENV http_proxy=
 ENV https_proxy=
-
-# Set no_proxy environment variable
-ENV no_proxy="localhost, 127.0.0.1, ::1"
-
-# fix pydantic version
-RUN pip install pydantic==2.10.6
 
 # Reset pip config
 RUN pip config unset global.index-url && \

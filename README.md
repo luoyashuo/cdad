@@ -19,4 +19,5 @@ uv pip install swanlab
 uv pip install loguru
 cd LlamaFactory
 uv pip install llamafactory[metrics]
+uv pip install -r requirements.txt
 ```

@@ -6,17 +6,15 @@ on:
     branches:
       - "main"
     paths:
-      - "**/*.py"
-      - "pyproject.toml"
-      - "Makefile"
+      - "**.py"
+      - "requirements.txt"
       - ".github/workflows/*.yml"
   pull_request:
     branches:
       - "main"
     paths:
-      - "**/*.py"
-      - "pyproject.toml"
-      - "Makefile"
+      - "**.py"
+      - "requirements.txt"
       - ".github/workflows/*.yml"
 
 jobs:
@@ -25,25 +23,26 @@ jobs:
       fail-fast: false
       matrix:
         python:
+          - "3.9"
+          - "3.10"
           - "3.11"
           - "3.12"
-          - "3.13"
         os:
           - "ubuntu-latest"
           - "windows-latest"
-          - "macos-latest"
+          - "macos-13"
         transformers:
-          - ""
+          - null
         include:  # test backward compatibility
-          - python: "3.11"
+          - python: "3.9"
+            os: "ubuntu-latest"
+            transformers: "4.45.0"
+          - python: "3.9"
+            os: "ubuntu-latest"
+            transformers: "4.49.0"
+          - python: "3.9"
             os: "ubuntu-latest"
             transformers: "4.51.0"
-          - python: "3.11"
-            os: "ubuntu-latest"
-            transformers: "4.53.0"
-          - python: "3.11"
-            os: "ubuntu-latest"
-            transformers: "4.55.0"
 
     runs-on: ${{ matrix.os }}
 
@@ -59,23 +58,22 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install uv
-        uses: astral-sh/setup-uv@v7
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
-          github-token: ${{ github.token }}
-          enable-cache: false
+          cache: "pip"
+          cache-dependency-path: "**/requirements*.txt"
 
       - name: Install dependencies
         run: |
-          uv venv
-          uv pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
-          uv pip install -e ".[dev]"
+          python -m pip install --upgrade pip
+          python -m pip install ".[torch,dev]"
 
       - name: Install transformers
         if: ${{ matrix.transformers }}
         run: |
-          uv pip install "transformers==${{ matrix.transformers }}"
+          python -m pip install "transformers==${{ matrix.transformers }}"
 
       - name: Cache files
         id: hf-hub-cache
@@ -87,25 +85,18 @@ jobs:
       - name: Check quality
         run: |
           make style && make quality
-        env:
-          UV_NO_SYNC: 1
 
       - name: Check license
         run: |
           make license
-        env:
-          UV_NO_SYNC: 1
 
       - name: Check build
         run: |
           make build
-        env:
-          UV_NO_SYNC: 1
 
       - name: Test with pytest
         run: |
           make test
         env:
-          UV_NO_SYNC: 1
           HF_HOME: ${{ runner.temp }}/huggingface
           HF_HUB_OFFLINE: "${{ steps.hf-hub-cache.outputs.cache-hit == 'true' && '1' || '0' }}"
