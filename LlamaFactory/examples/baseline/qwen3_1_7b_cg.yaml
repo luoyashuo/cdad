@@ -19,7 +19,7 @@ dataloader_num_workers: 4
 ### output
 output_dir: /mnt/moonfs/luoyashuo-m2/research/cdad/ckpt/baseline/qwen3_1_7b_base_sft_cg
 logging_steps: 10
-save_steps: 500
+save_strategy: epoch
 plot_loss: true
 overwrite_output_dir: true
 save_only_model: false
@@ -38,7 +38,7 @@ resume_from_checkpoint: null
 
 ### eval
 eval_dataset: omnithought_level1_cg_val
-val_size: 0.1
+# val_size: 0.1
 per_device_eval_batch_size: 1
 eval_strategy: steps
 eval_steps: 500

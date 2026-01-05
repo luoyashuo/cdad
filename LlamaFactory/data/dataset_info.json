@@ -741,26 +741,80 @@
   },
   "omnithought_level1_cg_train": {
     "file_name": "/mnt/moonfs/luoyashuo-m2/research/cdad/data/omnithought_level1_cg/train.jsonl",
-    "formatting": "sharegpt"
+    "formatting": "sharegpt",
+    "columns": {
+      "messages": "conversations"
+    },
+    "tags": {
+      "role_tag": "role",
+      "content_tag": "content",
+      "user_tag": "user",
+      "assistant_tag": "assistant"
+    }
   },
   "omnithought_level1_cg_val": {
     "file_name": "/mnt/moonfs/luoyashuo-m2/research/cdad/data/omnithought_level1_cg/val.jsonl",
-    "formatting": "sharegpt"
+    "formatting": "sharegpt",
+    "columns": {
+      "messages": "conversations"
+    },
+    "tags": {
+      "role_tag": "role",
+      "content_tag": "content",
+      "user_tag": "user",
+      "assistant_tag": "assistant"
+    }
   },
   "omnithought_level1_rv_train": {
     "file_name": "/mnt/moonfs/luoyashuo-m2/research/cdad/data/omnithought_level1_rv/train.jsonl",
-    "formatting": "sharegpt"
+    "formatting": "sharegpt",
+    "columns": {
+      "messages": "conversations"
+    },
+    "tags": {
+      "role_tag": "role",
+      "content_tag": "content",
+      "user_tag": "user",
+      "assistant_tag": "assistant"
+    }
   },
   "omnithought_level1_rv_val": {
     "file_name": "/mnt/moonfs/luoyashuo-m2/research/cdad/data/omnithought_level1_rv/val.jsonl",
-    "formatting": "sharegpt"
+    "formatting": "sharegpt",
+    "columns": {
+      "messages": "conversations"
+    },
+    "tags": {
+      "role_tag": "role",
+      "content_tag": "content",
+      "user_tag": "user",
+      "assistant_tag": "assistant"
+    }
   },
   "omnithought_level1_fsf_train": {
     "file_name": "/mnt/moonfs/luoyashuo-m2/research/cdad/data/omnithought_level1_fsf/train.jsonl",
-    "formatting": "sharegpt"
+    "formatting": "sharegpt",
+    "columns": {
+      "messages": "conversations"
+    },
+    "tags": {
+      "role_tag": "role",
+      "content_tag": "content",
+      "user_tag": "user",
+      "assistant_tag": "assistant"
+    }
   },
   "omnithought_level1_fsf_val": {
     "file_name": "/mnt/moonfs/luoyashuo-m2/research/cdad/data/omnithought_level1_fsf/val.jsonl",
-    "formatting": "sharegpt"
+    "formatting": "sharegpt",
+    "columns": {
+      "messages": "conversations"
+    },
+    "tags": {
+      "role_tag": "role",
+      "content_tag": "content",
+      "user_tag": "user",
+      "assistant_tag": "assistant"
+    }
   }
 }

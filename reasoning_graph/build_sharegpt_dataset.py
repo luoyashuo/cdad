@@ -172,7 +172,16 @@ def register_to_dataset_info(dataset_info_path: str, dataset_name: str, file_pat
         # 添加到 dataset_info
         dataset_info[dataset_name] = {
             "file_name": relative_path,
-            "formatting": "sharegpt"
+            "formatting": "sharegpt",
+            "columns": {
+                "messages": "conversations"
+            },
+            "tags": {
+                "role_tag": "role",
+                "content_tag": "content",
+                "user_tag": "user",
+                "assistant_tag": "assistant"
+            }
         }
 
         # 写回 dataset_info.json
