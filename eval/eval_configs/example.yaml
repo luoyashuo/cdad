@@ -6,34 +6,39 @@ model_path: /mnt/moonfs/luoyashuo-m2/research/cdad/ckpt/baseline/qwen3_1_7b_base
 vllm:
   tp: 2  # tensor parallel size
   gpu_memory_utilization: 0.9  # GPU显存利用率
+  max_model_len: 32768  # vLLM启动时的最大上下文长度（prompt + completion）
+
+# 评测并发配置
+eval:
+  parallel: 30  # 并发请求数，增加可提高测试速度，但需要确保服务端能承受
 
 # 评测配置 - 不指定子集，测试所有默认子集
 benchmarks:
   # AIME 2024 - 不指定子集，将默认测试所有可用子集
-  # AIME24:
-  #   dataset_name: "aime24"
-  #   # 不指定subset，将使用默认子集（default）
-  #   repeats: 1
-  #   temperature: 0.0
-  #   max_tokens: 8192
-  #   few_shot_num: 0
+  AIME24:
+    dataset_name: "aime24"
+    # 不指定subset，将使用默认子集（default）
+    repeats: 1
+    temperature: 1.0
+    max_tokens: 20000
+    few_shot_num: 0
 
   # AIME 2025 - 不指定子集，将默认测试所有可用子集（AIME2025-I 和 AIME2025-II）
   AIME25:
     dataset_name: "aime25"
     # 不指定subset，将测试 AIME2025-I 和 AIME2025-II 两个子集
     repeats: 1
-    temperature: 0.0
-    max_tokens: 128
+    temperature: 1.0
+    max_tokens: 20000
     few_shot_num: 0
 
   # # MATH-500
-  # MATH500:
-  #   dataset_name: "math_500"
-  #   repeats: 1
-  #   temperature: 0.0
-  #   max_tokens: 8192
-  #   few_shot_num: 0
+  MATH500:
+    dataset_name: "math_500"
+    repeats: 1
+    temperature: 1.0
+    max_tokens: 20000
+    few_shot_num: 0
 
   # # AMC 2023
   # AMC23:

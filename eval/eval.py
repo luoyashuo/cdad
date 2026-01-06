@@ -85,19 +85,26 @@ def run_task_with_progress(task_config: TaskConfig, benchmark_name: str):
 class VLLMServiceManager:
     """管理vLLM服务的启动和停止"""
 
-    def __init__(self, model_path: str, tp: int = 1, gpu_memory_utilization: float = 0.9, timeout: float = None):
+    def __init__(self, model_path: str, tp: int = 1, gpu_memory_utilization: float = 0.9,
+                 timeout: float = None, max_model_len: int = None):
         self.model_path = model_path
         self.tp = tp
         self.gpu_memory_utilization = gpu_memory_utilization
         self.timeout = timeout or 600  # 默认10分钟超时
+        self.max_model_len = max_model_len  # 最大模型长度，与benchmark的max_tokens保持一致
         self.process = None
         self.api_url = "http://localhost:8000"
+        self.log_file = None
         # 从路径中提取合适的模型名称
         path_parts = model_path.split('/')
         if 'checkpoint' in path_parts[-1].lower() and len(path_parts) > 1:
             self.model_name = path_parts[-2]
         else:
             self.model_name = path_parts[-1]
+
+        # 设置vLLM日志目录
+        self.log_dir = Path("/home/luoyashuo/research/graph_kd/cdad/eval/vllm_logs")
+        self.log_dir.mkdir(parents=True, exist_ok=True)
 
     def start(self, timeout: int = 300) -> bool:
         """启动vLLM服务"""
@@ -108,14 +115,25 @@ class VLLMServiceManager:
             "--tensor-parallel-size", str(self.tp),
             "--gpu-memory-utilization", str(self.gpu_memory_utilization),
             "--port", "8000",
-            "--host", "0.0.0.0"
+            "--host", "0.0.0.0",
+            "--generation-config", "vllm"  # 使用vLLM的生成配置而不是模型自带的
         ]
+
+        # 如果设置了max_model_len，添加到启动命令
+        if self.max_model_len:
+            cmd.extend(["--max-model-len", str(self.max_model_len)])
+
+        # 创建日志文件
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        log_path = self.log_dir / f"vllm_{timestamp}.log"
+        self.log_file = open(log_path, 'w', encoding='utf-8')
+        logger.info(f"vLLM日志将保存至: {log_path}")
 
         logger.info(f"启动vLLM服务: {' '.join(cmd)}")
         self.process = subprocess.Popen(
             cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE
+            stdout=self.log_file,
+            stderr=subprocess.STDOUT  # 将stderr也重定向到同一个日志文件
         )
 
         # 等待服务启动
@@ -134,6 +152,9 @@ class VLLMServiceManager:
         if self.process:
             self.process.terminate()
             logger.info("vLLM服务已停止")
+        if self.log_file:
+            self.log_file.close()
+            logger.info("vLLM日志文件已关闭")
 
     def _check_service(self) -> bool:
         """检查vLLM服务是否可用"""
@@ -154,7 +175,7 @@ class BenchmarkEvaluator:
         self.config_file = config_file
         self.config = self._load_config()
         self.results = {}
-        self.base_dir = Path(self.config['model_path']).parent
+        self.base_dir = Path(self.config['model_path'])
         self.version = datetime.now().strftime("version_%Y%m%d_%H%M%S")
         self.output_dir = self.base_dir / "evalscope" / self.version
         self.debug_mode = self.config.get('debug', False)  # 支持debug模式
@@ -176,7 +197,7 @@ class BenchmarkEvaluator:
         benchmark_config = self.config['benchmarks'][benchmark_name]
 
         logger.info(f"开始创建 benchmark {benchmark_name} 的 TaskConfig")
-        logger.info(f"benchmark 配置: {list(benchmark_config.keys())}")
+        logger.info(f"benchmark 配置内容: {benchmark_config}")
 
         # 检查是否使用LLM Judge
         if 'judge_strategy' in benchmark_config and 'llm' in str(benchmark_config['judge_strategy']).lower():
@@ -226,20 +247,42 @@ class BenchmarkEvaluator:
             'max_tokens': benchmark_config.get('max_tokens', 2048),
             'repetition_penalty': benchmark_config.get('repetition_penalty', 1.0)
         }
+        logger.info(f"[{benchmark_name}] 生成配置 (从benchmark读取): {generation_config_dict}")
 
         # 添加额外的gen_config配置
         gen_config = benchmark_config.get('gen_config', {})
         if gen_config:
+            logger.info(f"[{benchmark_name}] 额外的gen_config配置: {gen_config}")
             generation_config_dict.update(gen_config)
 
         # 创建 GenerateConfig 对象
         task_config.generation_config = GenerateConfig.model_validate(generation_config_dict)
+        logger.info(f"[{benchmark_name}] 最终GenerateConfig对象: {task_config.generation_config}")
+
+        # 详细打印GenerateConfig的属性
+        if hasattr(task_config.generation_config, '__dict__'):
+            logger.info(f"[{benchmark_name}] GenerateConfig详细属性: {task_config.generation_config.__dict__}")
+        if hasattr(task_config.generation_config, 'max_tokens'):
+            logger.info(f"[{benchmark_name}] GenerateConfig.max_tokens = {task_config.generation_config.max_tokens}")
 
         # 设置工作目录
         task_config.work_dir = str(self.output_dir / benchmark_name)
 
+        # 设置并发数
+        parallel = self.config.get('eval', {}).get('parallel', 1)
+        task_config.eval_batch_size = parallel
+
         # 默认使用规则验证 - 不设置judge_strategy和judge_model_args
         # 这将强制使用EvalScope默认的规则验证方法
+
+        # 打印最终的TaskConfig配置摘要
+        logger.info(f"[{benchmark_name}] TaskConfig创建完成:")
+        logger.info(f"  - model: {task_config.model}")
+        logger.info(f"  - datasets: {task_config.datasets}")
+        logger.info(f"  - eval_type: {task_config.eval_type}")
+        logger.info(f"  - api_url: {task_config.api_url}")
+        logger.info(f"  - generation_config: {task_config.generation_config}")
+        logger.info(f"  - work_dir: {task_config.work_dir}")
 
         return task_config
 
@@ -265,11 +308,17 @@ class BenchmarkEvaluator:
         # 保存配置
         self._save_config()
 
+        # 从vllm配置中获取max_model_len
+        max_model_len = self.config.get('vllm', {}).get('max_model_len', None)
+        if max_model_len:
+            logger.info(f"vLLM max_model_len 设置为: {max_model_len}")
+
         # 启动vLLM服务
         vllm_manager = VLLMServiceManager(
             model_path=self.config['model_path'],
             tp=self.config.get('vllm', {}).get('tp', 1),
-            gpu_memory_utilization=self.config.get('vllm', {}).get('gpu_memory_utilization', 0.9)
+            gpu_memory_utilization=self.config.get('vllm', {}).get('gpu_memory_utilization', 0.9),
+            max_model_len=max_model_len
         )
 
         if not vllm_manager.start():
@@ -335,6 +384,24 @@ class BenchmarkEvaluator:
             # 停止vLLM服务
             vllm_manager.stop()
 
+    def _convert_to_serializable(self, obj):
+        """将对象转换为JSON可序列化的格式"""
+        if obj is None:
+            return None
+        if isinstance(obj, (str, int, float, bool)):
+            return obj
+        if isinstance(obj, (list, tuple)):
+            return [self._convert_to_serializable(item) for item in obj]
+        if isinstance(obj, dict):
+            return {k: self._convert_to_serializable(v) for k, v in obj.items()}
+        # 处理Report等自定义对象
+        if hasattr(obj, '__dict__'):
+            return self._convert_to_serializable(obj.__dict__)
+        if hasattr(obj, 'to_dict'):
+            return self._convert_to_serializable(obj.to_dict())
+        # 其他类型转为字符串
+        return str(obj)
+
     def save_results(self):
         """保存评测结果"""
         # 创建结果汇总文件
@@ -345,27 +412,44 @@ class BenchmarkEvaluator:
         results_summary.to_excel(excel_path, index=False)
         logger.info(f"Excel汇总结果已保存至: {excel_path}")
 
-        # 保存JSON格式的详细结果
+        # 保存JSON格式的详细结果 - 先转换为可序列化格式
         json_path = self.output_dir / "detailed_results.json"
+        serializable_results = self._convert_to_serializable(self.results)
         with open(json_path, 'w', encoding='utf-8') as f:
-            json.dump(self.results, f, ensure_ascii=False, indent=2)
+            json.dump(serializable_results, f, ensure_ascii=False, indent=2)
         logger.info(f"详细结果已保存至: {json_path}")
 
     def _prepare_results_summary(self) -> pd.DataFrame:
         """准备结果汇总"""
-        summary_data = {'benchmark': [], 'score': []}
+        summary_data = {'benchmark': [], 'dataset': [], 'score': []}
 
-        for benchmark_name, result in self.results.items():
-            # 提取分数
-            if isinstance(result, dict) and 'score' in result:
-                score = result['score']
-            elif isinstance(result, dict) and 'accuracy' in result:
-                score = result['accuracy']
+        # 先将结果转换为可序列化的字典格式，以便正确提取分数
+        serializable_results = self._convert_to_serializable(self.results)
+
+        for benchmark_name, result in serializable_results.items():
+            # run_task 返回的结果格式是 {dataset_name: {score: xxx, ...}}
+            # 需要遍历内层字典来提取分数
+            if isinstance(result, dict):
+                for dataset_name, dataset_result in result.items():
+                    if isinstance(dataset_result, dict):
+                        # 从嵌套字典中提取分数
+                        if 'score' in dataset_result:
+                            score = dataset_result['score']
+                        elif 'accuracy' in dataset_result:
+                            score = dataset_result['accuracy']
+                        else:
+                            score = 'N/A'
+                    else:
+                        score = 'N/A'
+
+                    summary_data['benchmark'].append(benchmark_name)
+                    summary_data['dataset'].append(dataset_name)
+                    summary_data['score'].append(score)
             else:
-                score = 'N/A'
-
-            summary_data['benchmark'].append(benchmark_name)
-            summary_data['score'].append(score)
+                # 兜底处理
+                summary_data['benchmark'].append(benchmark_name)
+                summary_data['dataset'].append('unknown')
+                summary_data['score'].append('N/A')
 
         return pd.DataFrame(summary_data)
 
