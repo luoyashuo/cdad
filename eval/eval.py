@@ -25,6 +25,7 @@ from evalscope.config import TaskConfig
 from evalscope.run import run_task
 from evalscope.constants import EvalBackend
 from evalscope.utils.logger import get_logger
+from evalscope.api.model.generate_config import GenerateConfig
 
 logger = get_logger()
 
@@ -84,18 +85,26 @@ def run_task_with_progress(task_config: TaskConfig, benchmark_name: str):
 class VLLMServiceManager:
     """管理vLLM服务的启动和停止"""
 
-    def __init__(self, model_path: str, tp: int = 1, gpu_memory_utilization: float = 0.9):
+    def __init__(self, model_path: str, tp: int = 1, gpu_memory_utilization: float = 0.9, timeout: float = None):
         self.model_path = model_path
         self.tp = tp
         self.gpu_memory_utilization = gpu_memory_utilization
+        self.timeout = timeout or 600  # 默认10分钟超时
         self.process = None
         self.api_url = "http://localhost:8000"
+        # 从路径中提取合适的模型名称
+        path_parts = model_path.split('/')
+        if 'checkpoint' in path_parts[-1].lower() and len(path_parts) > 1:
+            self.model_name = path_parts[-2]
+        else:
+            self.model_name = path_parts[-1]
 
     def start(self, timeout: int = 300) -> bool:
         """启动vLLM服务"""
         cmd = [
             "python", "-m", "vllm.entrypoints.openai.api_server",
             "--model", self.model_path,
+            "--served-model-name", self.model_name,  # 显式指定服务模型名称
             "--tensor-parallel-size", str(self.tp),
             "--gpu-memory-utilization", str(self.gpu_memory_utilization),
             "--port", "8000",
@@ -148,6 +157,14 @@ class BenchmarkEvaluator:
         self.base_dir = Path(self.config['model_path']).parent
         self.version = datetime.now().strftime("version_%Y%m%d_%H%M%S")
         self.output_dir = self.base_dir / "evalscope" / self.version
+        self.debug_mode = self.config.get('debug', False)  # 支持debug模式
+
+        # 提取模型名称用于日志显示
+        path_parts = self.config['model_path'].split('/')
+        if 'checkpoint' in path_parts[-1].lower() and len(path_parts) > 1:
+            self.model_name = path_parts[-2]
+        else:
+            self.model_name = path_parts[-1]
 
     def _load_config(self) -> Dict:
         """加载配置文件"""
@@ -157,6 +174,9 @@ class BenchmarkEvaluator:
     def _create_task_config(self, benchmark_name: str) -> TaskConfig:
         """创建TaskConfig配置"""
         benchmark_config = self.config['benchmarks'][benchmark_name]
+
+        logger.info(f"开始创建 benchmark {benchmark_name} 的 TaskConfig")
+        logger.info(f"benchmark 配置: {list(benchmark_config.keys())}")
 
         # 检查是否使用LLM Judge
         if 'judge_strategy' in benchmark_config and 'llm' in str(benchmark_config['judge_strategy']).lower():
@@ -171,10 +191,19 @@ class BenchmarkEvaluator:
 
         task_config = TaskConfig()
 
-        # 设置模型信息
-        task_config.model_id = self.config['model_path'].split('/')[-1]
-        task_config.eval_type = 'service'
-        task_config.eval_backend = EvalBackend.NATIVE
+        # 设置模型信息 - 与VLLMServiceManager使用相同的模型名称提取逻辑
+        path_parts = self.config['model_path'].split('/')
+        if 'checkpoint' in path_parts[-1].lower() and len(path_parts) > 1:
+            model_name = path_parts[-2]
+        else:
+            model_name = path_parts[-1]
+
+        task_config.model = model_name  # 设置实际模型名称
+        task_config.model_id = model_name
+        task_config.eval_type = 'openai_api'  # 改为正确的API类型，支持通过HTTP API调用模型
+        task_config.eval_backend = EvalBackend.NATIVE  # 保持使用原生的评估后端
+        task_config.api_url = 'http://localhost:8000/v1'  # 设置API URL
+        task_config.api_key = 'EMPTY'  # 设置API密钥
 
         # 设置数据集
         task_config.datasets = [benchmark_config['dataset_name']]
@@ -189,21 +218,22 @@ class BenchmarkEvaluator:
         }
         task_config.dataset_args = {benchmark_config['dataset_name']: dataset_args}
 
-        # 设置模型API参数
-        generation_config = {
-            'model': task_config.model_id,
-            'base_url': 'http://localhost:8000/v1',
-            'api_key': 'EMPTY',
+        # 设置模型API参数 - 使用 GenerateConfig 对象而不是字典
+        generation_config_dict = {
             'temperature': benchmark_config.get('temperature', 0.0),
             'top_p': benchmark_config.get('top_p', 1.0),
             'top_k': benchmark_config.get('top_k', 50),
             'max_tokens': benchmark_config.get('max_tokens', 2048),
             'repetition_penalty': benchmark_config.get('repetition_penalty', 1.0)
         }
-        trigger_config = benchmark_config.get('trigger_config', {})
-        generation_config.update(trigger_config, **generation_config)
 
-        task_config.generation_config = generation_config
+        # 添加额外的gen_config配置
+        gen_config = benchmark_config.get('gen_config', {})
+        if gen_config:
+            generation_config_dict.update(gen_config)
+
+        # 创建 GenerateConfig 对象
+        task_config.generation_config = GenerateConfig.model_validate(generation_config_dict)
 
         # 设置工作目录
         task_config.work_dir = str(self.output_dir / benchmark_name)
@@ -223,6 +253,13 @@ class BenchmarkEvaluator:
 
     def run_evaluation(self):
         """运行评测"""
+        logger.info(f"\n{'='*60}")
+        logger.info(f"开始运行评估 - 模型: {self.model_name}")
+        logger.info(f"配置文件: {self.config_file}")
+        logger.info(f"输出目录: {self.output_dir}")
+        logger.info(f"调试模式: {self.debug_mode}")
+        logger.info(f"{'='*60}\n")
+
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
         # 保存配置
@@ -269,9 +306,19 @@ class BenchmarkEvaluator:
                 # 外部进度显示
                 repeats = self.config['benchmarks'][benchmark_name].get('repeats', 1)
                 remaining_benchmarks = total_benchmarks - idx - 1
+                logger.info(f"\n{'='*50}")
                 logger.info(f"正在评估 {benchmark_name} (repeat: {repeats}次) (剩余: {remaining_benchmarks}个benchmark)")
+                logger.info(f"数据集: {self.config['benchmarks'][benchmark_name].get('dataset_name', 'unknown')}")
+                logger.info(f"子集: {self.config['benchmarks'][benchmark_name].get('subset', 'default')}")
+                logger.info(f"模型: {self.model_name if hasattr(self, 'model_name') else 'unknown'}")
 
-                task_config = self._create_task_config(benchmark_name)
+                try:
+                    logger.info(f"开始创建 {benchmark_name} 的 TaskConfig...")
+                    task_config = self._create_task_config(benchmark_name)
+                    logger.info(f"TaskConfig 创建成功: {task_config.model} {task_config.datasets}")
+                except Exception as e:
+                    logger.error(f"创建 TaskConfig 失败: {str(e)}")
+                    raise
 
                 # 使用tqdm显示内部进度
                 logger.info(f"开始评测 {benchmark_name}...")
