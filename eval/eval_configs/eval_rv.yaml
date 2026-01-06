@@ -1,0 +1,79 @@
+# EvalScope 评测配置文件 - 测试所有子集版本
+# 模型路径
+model_path: /mnt/moonfs/luoyashuo-m2/research/cdad/ckpt/baseline/qwen3_1_7b_base_sft_rv/checkpoint-23944
+
+# vLLM配置
+vllm:
+  tp: 2  # tensor parallel size
+  gpu_memory_utilization: 0.9  # GPU显存利用率
+  max_model_len: 32768  # vLLM启动时的最大上下文长度（prompt + completion）
+
+# 评测并发配置
+eval:
+  parallel: 80  # 并发请求数，增加可提高测试速度，但需要确保服务端能承受
+
+# 评测配置 - 不指定子集，测试所有默认子集
+benchmarks:
+  AIME24:
+    dataset_name: "aime24"
+    repeats: 16
+    temperature: 1.0
+    max_tokens: 25000
+    few_shot_num: 0
+
+  AIME25:
+    dataset_name: "aime25"
+    repeats: 16
+    temperature: 1.0
+    max_tokens: 25000
+    few_shot_num: 0
+
+  MATH500:
+    dataset_name: "math_500"
+    repeats: 3
+    temperature: 1.0
+    max_tokens: 25000
+    few_shot_num: 0
+
+  AMC23:
+    dataset_name: "amc"
+    subset: "2023"  # AMC 必须指定年份作为子集
+    repeats: 3
+    temperature: 0.0
+    max_tokens: 25000
+    few_shot_num: 0
+
+  GPQA_Diamond:
+    dataset_name: "gpqa"
+    subset: "diamond"
+    repeats: 3
+    temperature: 0.0
+    max_tokens: 25000
+    few_shot_num: 0
+
+  # # MBPP
+  MBPP:
+    dataset_name: "mbpp"
+    repeats: 3
+    temperature: 0.0
+    max_tokens: 25000
+    few_shot_num: 0
+    use_sandbox: true
+
+  # # HumanEval
+  HumanEval:
+    dataset_name: "humaneval"
+    repeats: 3
+    temperature: 0.0
+    max_tokens: 25000
+    few_shot_num: 0
+    use_sandbox: true
+
+  LiveCodeBench:
+    dataset_name: "live_code_bench"
+    repeats: 3
+    temperature: 0.0
+    max_tokens: 25000
+    few_shot_num: 0
+    use_sandbox: true
+  

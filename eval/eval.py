@@ -272,6 +272,11 @@ class BenchmarkEvaluator:
         parallel = self.config.get('eval', {}).get('parallel', 1)
         task_config.eval_batch_size = parallel
 
+        # 设置sandbox配置
+        if 'use_sandbox' in benchmark_config:
+            task_config.use_sandbox = benchmark_config['use_sandbox']
+            logger.info(f"[{benchmark_name}] use_sandbox设置为: {task_config.use_sandbox}")
+
         # 默认使用规则验证 - 不设置judge_strategy和judge_model_args
         # 这将强制使用EvalScope默认的规则验证方法
 

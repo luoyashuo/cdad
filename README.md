@@ -21,7 +21,9 @@ cd LlamaFactory
 uv pip install llamafactory[metrics]
 uv pip install -r requirements.txt
 uv pip install evalscope
+uv pip install evalscope[sandbox]
 uv pip install vllm==0.8.5
 uv pip install colorlog
 uv pip install openpyxl
+
 ```
