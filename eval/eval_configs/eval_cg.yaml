@@ -10,55 +10,65 @@ vllm:
 
 # 评测并发配置
 eval:
-  parallel: 80  # 并发请求数，增加可提高测试速度，但需要确保服务端能承受
+  parallel: 30  # 并发请求数，增加可提高测试速度，但需要确保服务端能承受
+
+# 沙箱配置 - 临时文件存储路径 (避免打爆主机存储)
+sandbox:
+  work_dir: /mnt/moonfs/luoyashuo-m2/tmp/evalscope_sandbox
 
 # 评测配置 - 不指定子集，测试所有默认子集
 benchmarks:
-  AIME24:
-    dataset_name: "aime24"
-    repeats: 16
-    temperature: 1.0
-    max_tokens: 25000
-    few_shot_num: 0
+  # AIME24:
+  #   dataset_name: "aime24"
+  #   repeats: 16
+  #   temperature: 1.0
+  #   max_tokens: 25000
+  #   few_shot_num: 0
 
-  AIME25:
-    dataset_name: "aime25"
-    repeats: 16
-    temperature: 1.0
-    max_tokens: 25000
-    few_shot_num: 0
+  # AIME25:
+  #   dataset_name: "aime25"
+  #   repeats: 16
+  #   temperature: 1.0
+  #   max_tokens: 25000
+  #   few_shot_num: 0
 
-  MATH500:
-    dataset_name: "math_500"
-    repeats: 3
-    temperature: 1.0
-    max_tokens: 25000
-    few_shot_num: 0
+  # MATH500:
+  #   dataset_name: "math_500"
+  #   repeats: 3
+  #   temperature: 1.0
+  #   max_tokens: 25000
+  #   few_shot_num: 0
 
-  AMC23:
-    dataset_name: "amc"
-    subset: "2023"  # AMC 必须指定年份作为子集
-    repeats: 3
-    temperature: 0.0
-    max_tokens: 25000
-    few_shot_num: 0
+  # AMC24:
+  #   dataset_name: "amc"
+  #   subset: "amc24"  # AMC 必须指定年份作为子集
+  #   repeats: 3
+  #   temperature: 0.0
+  #   max_tokens: 25000
+  #   few_shot_num: 0
 
-  GPQA_Diamond:
-    dataset_name: "gpqa"
-    subset: "diamond"
-    repeats: 3
-    temperature: 0.0
-    max_tokens: 25000
-    few_shot_num: 0
-
+  # GPQA_Diamond:
+  #   dataset_name: "gpqa_diamond"
+  #   repeats: 3
+  #   temperature: 0.0
+  #   max_tokens: 25000
+  #   few_shot_num: 0
+    
+  # GSM8K:
+  #   dataset_name: "gsm8k"
+  #   repeats: 3
+  #   temperature: 0.0
+  #   max_tokens: 25000
+  #   few_shot_num: 0
   # # MBPP
-  MBPP:
-    dataset_name: "mbpp"
-    repeats: 3
-    temperature: 0.0
-    max_tokens: 25000
-    few_shot_num: 0
-    use_sandbox: true
+  # MBPP:
+  #   dataset_name: "mbpp"
+  #   repeats: 3
+  #   temperature: 0.0
+  #   max_tokens: 25000
+  #   few_shot_num: 0
+  #   use_sandbox: true
+  #   sandbox_workers: 5  # Docker容器数量，用于并行执行代码
 
   # # HumanEval
   HumanEval:
@@ -67,13 +77,13 @@ benchmarks:
     temperature: 0.0
     max_tokens: 25000
     few_shot_num: 0
-    use_sandbox: true
+    use_sandbox: false
 
   LiveCodeBench:
     dataset_name: "live_code_bench"
     repeats: 3
-    temperature: 0.0
+    temperature: 1.0
     max_tokens: 25000
     few_shot_num: 0
-    use_sandbox: true
+    use_sandbox: false
   

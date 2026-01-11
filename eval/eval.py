@@ -277,6 +277,23 @@ class BenchmarkEvaluator:
             task_config.use_sandbox = benchmark_config['use_sandbox']
             logger.info(f"[{benchmark_name}] use_sandbox设置为: {task_config.use_sandbox}")
 
+            # 设置sandbox worker数量 (docker容器数量)
+            sandbox_workers = benchmark_config.get('sandbox_workers', 5)
+            task_config.judge_worker_num = sandbox_workers
+            logger.info(f"[{benchmark_name}] judge_worker_num设置为: {sandbox_workers}")
+
+            # 设置沙箱工作目录 (避免临时文件打爆主机存储)
+            sandbox_config = self.config.get('sandbox', {})
+            if sandbox_config.get('work_dir'):
+                sandbox_work_dir = sandbox_config['work_dir']
+                # 确保目录存在
+                Path(sandbox_work_dir).mkdir(parents=True, exist_ok=True)
+                # 配置沙箱管理器使用指定的工作目录
+                task_config.sandbox_manager_config = {
+                    'work_dir': sandbox_work_dir
+                }
+                logger.info(f"[{benchmark_name}] sandbox工作目录设置为: {sandbox_work_dir}")
+
         # 默认使用规则验证 - 不设置judge_strategy和judge_model_args
         # 这将强制使用EvalScope默认的规则验证方法
 
