@@ -157,13 +157,31 @@ class VLLMServiceManager:
             logger.info("vLLM日志文件已关闭")
 
     def _check_service(self) -> bool:
-        """检查vLLM服务是否可用"""
+        """检查vLLM服务是否可用，包括模型是否已加载"""
         try:
-            response = requests.get(
+            # 检查服务健康状态
+            health_response = requests.get(
                 f"{self.api_url}/health",
                 timeout=5
             )
-            return response.status_code == 200
+            if health_response.status_code != 200:
+                return False
+
+            # 检查模型是否已注册（确保模型加载完成）
+            models_response = requests.get(
+                f"{self.api_url}/v1/models",
+                timeout=5
+            )
+            if models_response.status_code != 200:
+                return False
+
+            models_data = models_response.json()
+            model_ids = [m.get('id') for m in models_data.get('data', [])]
+            if self.model_name not in model_ids:
+                logger.debug(f"模型 {self.model_name} 尚未加载，当前可用模型: {model_ids}")
+                return False
+
+            return True
         except:
             return False
 

@@ -4,13 +4,13 @@ model_path: /mnt/moonfs/luoyashuo-m2/research/cdad/ckpt/baseline/qwen3_1_7b_base
 
 # vLLM配置
 vllm:
-  tp: 2  # tensor parallel size
+  tp: 4  # tensor parallel size
   gpu_memory_utilization: 0.9  # GPU显存利用率
   max_model_len: 32768  # vLLM启动时的最大上下文长度（prompt + completion）
 
 # 评测并发配置
 eval:
-  parallel: 30  # 并发请求数，增加可提高测试速度，但需要确保服务端能承受
+  parallel: 60  # 并发请求数，增加可提高测试速度，但需要确保服务端能承受
 
 # 沙箱配置 - 临时文件存储路径 (避免打爆主机存储)
 sandbox:
