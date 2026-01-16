@@ -1,0 +1,13 @@
+{
+   "stamp" : true,
+   "sources" : [
+      {
+         "usage" : "toplevel",
+         "filename" : "neurips_2025.tex"
+      }
+   ],
+   "process" : {
+      "fontmaps" : [],
+      "compiler" : "pdflatex"
+   }
+}
