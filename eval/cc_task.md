@@ -11,7 +11,7 @@ MBPP
 HumanEval
 2. 脚本输入：
 一个yaml文件（例如eval/xxx.yaml）,包括以下内容：
-    - model_path: /mnt/moonfs/luoyashuo-m2/research/cdad/ckpt/baseline/qwen3_1_7b_base_sft_cg/checkpoint-23944
+    - model_path: /mnt/moonfs/luoyashuo-ksyun/research/cdad/ckpt/baseline/qwen3_1_7b_base_sft_cg/checkpoint-23944
     - 输入config:
         - 每个benchmark的测评次数
         - 每个benchmark的eval scope的配置

@@ -1,5 +1,5 @@
 ### model
-model_name_or_path: /mnt/moonfs/public-models-m2/Qwen/Qwen3-1.7B-Base
+model_name_or_path: /mnt/moonfs/public-models-ksyun/Qwen/Qwen3-1.7B-Base
 trust_remote_code: true
 
 ### method
@@ -17,7 +17,7 @@ preprocessing_num_workers: 16
 dataloader_num_workers: 4
 
 ### output
-output_dir: /mnt/moonfs/luoyashuo-m2/research/cdad/ckpt/baseline/qwen3_1_7b_base_sft_random
+output_dir: /mnt/moonfs/luoyashuo-ksyun/research/cdad/ckpt/baseline/qwen3_1_7b_base_sft_random
 logging_steps: 10
 save_strategy: epoch
 plot_loss: true

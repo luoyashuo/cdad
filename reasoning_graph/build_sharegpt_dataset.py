@@ -854,11 +854,11 @@ if __name__ == "__main__":
 # 1. CD Optimal 策略（7B 模型配置：CD 范围 0-6）
 """
 python build_sharegpt_dataset.py \
-    -i /mnt/moonfs/luoyashuo-m2/research/cdad/data/omnithought_math_all/train_merge_level1.jsonl \
-       /mnt/moonfs/luoyashuo-m2/research/cdad/data/omnithought_code_all/train_merge_level1.jsonl \
+    -i /mnt/moonfs/luoyashuo-ksyun/research/cdad/data/omnithought_math_all/train_merge_level1.jsonl \
+       /mnt/moonfs/luoyashuo-ksyun/research/cdad/data/omnithought_code_all/train_merge_level1.jsonl \
     -s cd_optimal \
     --cd_min 0 --cd_max 6 \
-    -o /mnt/moonfs/luoyashuo-m2/research/cdad/data/omnithought_cd_optimal \
+    -o /mnt/moonfs/luoyashuo-ksyun/research/cdad/data/omnithought_cd_optimal \
     --train-ratio 0.99 \
     -r ../LlamaFactory/data/dataset_info.json
 """
@@ -866,11 +866,11 @@ python build_sharegpt_dataset.py \
 # 2. RV Optimal 策略（7B 模型配置：RV 范围 3-5）
 """
 python build_sharegpt_dataset.py \
-    -i /mnt/moonfs/luoyashuo-m2/research/cdad/data/omnithought_math_all/train_merge_level1.jsonl \
-       /mnt/moonfs/luoyashuo-m2/research/cdad/data/omnithought_code_all/train_merge_level1.jsonl \
+    -i /mnt/moonfs/luoyashuo-ksyun/research/cdad/data/omnithought_math_all/train_merge_level1.jsonl \
+       /mnt/moonfs/luoyashuo-ksyun/research/cdad/data/omnithought_code_all/train_merge_level1.jsonl \
     -s rv_optimal \
     --rv_min 3 --rv_max 5 \
-    -o /mnt/moonfs/luoyashuo-m2/research/cdad/data/omnithought_rv_optimal \
+    -o /mnt/moonfs/luoyashuo-ksyun/research/cdad/data/omnithought_rv_optimal \
     --train-ratio 0.99 \
     -r ../LlamaFactory/data/dataset_info.json
 """
@@ -878,14 +878,14 @@ python build_sharegpt_dataset.py \
 # 3. Combined 双规则概率采样（7B 模型配置）
 """
 python build_sharegpt_dataset.py \
-    -i /mnt/moonfs/luoyashuo-m2/research/cdad/data/omnithought_math_all/train_merge_level1.jsonl \
-       /mnt/moonfs/luoyashuo-m2/research/cdad/data/omnithought_code_all/train_merge_level1.jsonl \
+    -i /mnt/moonfs/luoyashuo-ksyun/research/cdad/data/omnithought_math_all/train_merge_level1.jsonl \
+       /mnt/moonfs/luoyashuo-ksyun/research/cdad/data/omnithought_code_all/train_merge_level1.jsonl \
     -s combined \
     --cd_min 0 --cd_max 6 \
     --rv_min 3 --rv_max 5 \
     --mu_cd 6 \
     --beta 0.5 \
-    -o /mnt/moonfs/luoyashuo-m2/research/cdad/data/omnithought_combined \
+    -o /mnt/moonfs/luoyashuo-ksyun/research/cdad/data/omnithought_combined \
     --train-ratio 0.99 \
     -r ../LlamaFactory/data/dataset_info.json
 """
@@ -893,13 +893,13 @@ python build_sharegpt_dataset.py \
 # 4. Combined + FSF 最低（在候选范围内选择 FSF 最低的）
 """
 python build_sharegpt_dataset.py \
-    -i /mnt/moonfs/luoyashuo-m2/research/cdad/data/omnithought_math_all/train_merge_level1.jsonl \
-       /mnt/moonfs/luoyashuo-m2/research/cdad/data/omnithought_code_all/train_merge_level1.jsonl \
+    -i /mnt/moonfs/luoyashuo-ksyun/research/cdad/data/omnithought_math_all/train_merge_level1.jsonl \
+       /mnt/moonfs/luoyashuo-ksyun/research/cdad/data/omnithought_code_all/train_merge_level1.jsonl \
     -s combined \
     --cd_min 0 --cd_max 6 \
     --rv_min 3 --rv_max 5 \
     --fsf_lowest \
-    -o /mnt/moonfs/luoyashuo-m2/research/cdad/data/omnithought_combined_fsf \
+    -o /mnt/moonfs/luoyashuo-ksyun/research/cdad/data/omnithought_combined_fsf \
     --train-ratio 0.99 \
     -r ../LlamaFactory/data/dataset_info.json
 """
@@ -909,10 +909,10 @@ python build_sharegpt_dataset.py \
 # 5. 使用预选的 CG 最高字段
 """
 python build_sharegpt_dataset.py \
-    -i /mnt/moonfs/luoyashuo-m2/research/cdad/data/omnithought_math_all/train_merge_level1.jsonl \
-       /mnt/moonfs/luoyashuo-m2/research/cdad/data/omnithought_code_all/train_merge_level1.jsonl \
+    -i /mnt/moonfs/luoyashuo-ksyun/research/cdad/data/omnithought_math_all/train_merge_level1.jsonl \
+       /mnt/moonfs/luoyashuo-ksyun/research/cdad/data/omnithought_code_all/train_merge_level1.jsonl \
     -s selected_by_cognitive_difficulty \
-    -o /mnt/moonfs/luoyashuo-m2/research/cdad/data/omnithought_level1_cg \
+    -o /mnt/moonfs/luoyashuo-ksyun/research/cdad/data/omnithought_level1_cg \
     --train-ratio 0.99 \
     -r ../LlamaFactory/data/dataset_info.json
 """
@@ -920,10 +920,10 @@ python build_sharegpt_dataset.py \
 # 6. 使用预选的 RV 最高字段
 """
 python build_sharegpt_dataset.py \
-    -i /mnt/moonfs/luoyashuo-m2/research/cdad/data/omnithought_math_all/train_merge_level1.jsonl \
-       /mnt/moonfs/luoyashuo-m2/research/cdad/data/omnithought_code_all/train_merge_level1.jsonl \
+    -i /mnt/moonfs/luoyashuo-ksyun/research/cdad/data/omnithought_math_all/train_merge_level1.jsonl \
+       /mnt/moonfs/luoyashuo-ksyun/research/cdad/data/omnithought_code_all/train_merge_level1.jsonl \
     -s selected_by_reasoning_verbosity \
-    -o /mnt/moonfs/luoyashuo-m2/research/cdad/data/omnithought_level1_rv \
+    -o /mnt/moonfs/luoyashuo-ksyun/research/cdad/data/omnithought_level1_rv \
     --train-ratio 0.99 \
     -r ../LlamaFactory/data/dataset_info.json
 """
@@ -931,10 +931,10 @@ python build_sharegpt_dataset.py \
 # 7. 使用预选的 FSF 最低字段
 """
 python build_sharegpt_dataset.py \
-    -i /mnt/moonfs/luoyashuo-m2/research/cdad/data/omnithought_math_all/train_merge_level1.jsonl \
-       /mnt/moonfs/luoyashuo-m2/research/cdad/data/omnithought_code_all/train_merge_level1.jsonl \
+    -i /mnt/moonfs/luoyashuo-ksyun/research/cdad/data/omnithought_math_all/train_merge_level1.jsonl \
+       /mnt/moonfs/luoyashuo-ksyun/research/cdad/data/omnithought_code_all/train_merge_level1.jsonl \
     -s selected_by_lowest_fsf \
-    -o /mnt/moonfs/luoyashuo-m2/research/cdad/data/omnithought_level1_fsf \
+    -o /mnt/moonfs/luoyashuo-ksyun/research/cdad/data/omnithought_level1_fsf \
     --train-ratio 0.99 \
     -r ../LlamaFactory/data/dataset_info.json
 """

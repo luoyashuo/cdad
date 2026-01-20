@@ -1,6 +1,6 @@
 # EvalScope 评测配置文件 - 测试所有子集版本
 # 模型路径
-model_path: /mnt/moonfs/luoyashuo-m2/research/cdad/ckpt/baseline/qwen3_1_7b_base_sft_rv/checkpoint-23944
+model_path: /mnt/moonfs/luoyashuo-ksyun/research/cdad/ckpt/baseline/qwen3_1_7b_base_sft_rv/checkpoint-23944
 
 # vLLM配置
 vllm:
@@ -14,7 +14,7 @@ eval:
 
 # 沙箱配置 - 临时文件存储路径 (避免打爆主机存储)
 sandbox:
-  work_dir: /mnt/moonfs/luoyashuo-m2/tmp/evalscope_sandbox
+  work_dir: /mnt/moonfs/luoyashuo-ksyun/tmp/evalscope_sandbox
 
 # 评测配置 - 不指定子集，测试所有默认子集
 benchmarks:

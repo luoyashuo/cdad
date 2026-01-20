@@ -360,14 +360,14 @@ if __name__ == '__main__':
     main()
 """
 python3 reasoning_graph/merge_rg_info.py \
-    --input /mnt/moonfs/luoyashuo-m2/research/cdad/data/omnithought_math_all/train.jsonl \
-    --output /mnt/moonfs/luoyashuo-m2/research/cdad/data/omnithought_math_all/train_merge.jsonl \
-    --rg-files /mnt/moonfs/luoyashuo-m2/research/cdad/data/omnithought_math_all/rg_info.jsonl \
+    --input /mnt/moonfs/luoyashuo-ksyun/research/cdad/data/omnithought_math_all/train.jsonl \
+    --output /mnt/moonfs/luoyashuo-ksyun/research/cdad/data/omnithought_math_all/train_merge.jsonl \
+    --rg-files /mnt/moonfs/luoyashuo-ksyun/research/cdad/data/omnithought_math_all/rg_info.jsonl \
     -w 60
 python3 reasoning_graph/merge_rg_info.py \
-    --input /mnt/moonfs/luoyashuo-m2/research/cdad/data/omnithought_code_all/train.jsonl \
-    --output /mnt/moonfs/luoyashuo-m2/research/cdad/data/omnithought_code_all/train_merge.jsonl \
-    --rg-files /mnt/moonfs/luoyashuo-m2/research/cdad/data/omnithought_code_all/rg_info.jsonl \
+    --input /mnt/moonfs/luoyashuo-ksyun/research/cdad/data/omnithought_code_all/train.jsonl \
+    --output /mnt/moonfs/luoyashuo-ksyun/research/cdad/data/omnithought_code_all/train_merge.jsonl \
+    --rg-files /mnt/moonfs/luoyashuo-ksyun/research/cdad/data/omnithought_code_all/rg_info.jsonl \
     -w 60
 
 

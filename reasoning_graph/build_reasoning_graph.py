@@ -535,8 +535,8 @@ if __name__ == '__main__':
 """
 Example usage:
 python3 reasoning_graph/build_reasoning_graph.py \
-    --input /mnt/moonfs/luoyashuo-m2/research/cdad/data/omnithought_math_20k/train.jsonl \
-    --output /mnt/moonfs/luoyashuo-m2/research/cdad/data/omnithought_math_20k/rg_info.jsonl \
+    --input /mnt/moonfs/luoyashuo-ksyun/research/cdad/data/omnithought_math_20k/train.jsonl \
+    --output /mnt/moonfs/luoyashuo-ksyun/research/cdad/data/omnithought_math_20k/rg_info.jsonl \
     --models gpt-oss-120b \
     --runs-per-model 3 \
     --start-idx 0 \
@@ -548,8 +548,8 @@ python3 reasoning_graph/build_reasoning_graph.py \
 
 
 python3 reasoning_graph/build_reasoning_graph.py \
-    --input /mnt/moonfs/luoyashuo-m2/research/cdad/data/omnithought_math_all/train.jsonl \
-    --output /mnt/moonfs/luoyashuo-m2/research/cdad/data/omnithought_math_all/rg_info.jsonl \
+    --input /mnt/moonfs/luoyashuo-ksyun/research/cdad/data/omnithought_math_all/train.jsonl \
+    --output /mnt/moonfs/luoyashuo-ksyun/research/cdad/data/omnithought_math_all/rg_info.jsonl \
     --models gpt-oss-120b \
     --runs-per-model 1 \
     --start-idx 0 \
@@ -558,8 +558,8 @@ python3 reasoning_graph/build_reasoning_graph.py \
     --max-retries 3
 
 python3 reasoning_graph/build_reasoning_graph.py \
-    --input /mnt/moonfs/luoyashuo-m2/research/cdad/data/omnithought_code_all/train.jsonl \
-    --output /mnt/moonfs/luoyashuo-m2/research/cdad/data/omnithought_code_all/rg_info.jsonl \
+    --input /mnt/moonfs/luoyashuo-ksyun/research/cdad/data/omnithought_code_all/train.jsonl \
+    --output /mnt/moonfs/luoyashuo-ksyun/research/cdad/data/omnithought_code_all/rg_info.jsonl \
     --models gpt-oss-120b \
     --runs-per-model 1 \
     --start-idx 0 \

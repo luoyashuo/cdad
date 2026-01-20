@@ -31,7 +31,7 @@ import signal
 from loguru import logger
 
 
-DEFAULT_INPUT_FILE = "/mnt/moonfs/luoyashuo-m2/research/cdad/data/omnithought_math_all/train_merge_part.jsonl"
+DEFAULT_INPUT_FILE = "/mnt/moonfs/luoyashuo-ksyun/research/cdad/data/omnithought_math_all/train_merge_part.jsonl"
 
 # 全局变量用于传递过滤等级
 FILTER_LEVEL = 2
@@ -476,24 +476,24 @@ if __name__ == "__main__":
     exit(main())
 """
 python reasoning_graph/select_diff_data.py \
-    -i /mnt/moonfs/luoyashuo-m2/research/cdad/data/omnithought_math_all/train_merge.jsonl \
-    -o /mnt/moonfs/luoyashuo-m2/research/cdad/data/omnithought_math_all/train_merge_level2.jsonl \
+    -i /mnt/moonfs/luoyashuo-ksyun/research/cdad/data/omnithought_math_all/train_merge.jsonl \
+    -o /mnt/moonfs/luoyashuo-ksyun/research/cdad/data/omnithought_math_all/train_merge_level2.jsonl \
     --level 2 \
     -p 32
 python reasoning_graph/select_diff_data.py \
-    -i /mnt/moonfs/luoyashuo-m2/research/cdad/data/omnithought_math_all/train_merge.jsonl \
-    -o /mnt/moonfs/luoyashuo-m2/research/cdad/data/omnithought_math_all/train_merge_level1.jsonl \
+    -i /mnt/moonfs/luoyashuo-ksyun/research/cdad/data/omnithought_math_all/train_merge.jsonl \
+    -o /mnt/moonfs/luoyashuo-ksyun/research/cdad/data/omnithought_math_all/train_merge_level1.jsonl \
     --level 1 \
     -p 32
 
 python reasoning_graph/select_diff_data.py \
-    -i /mnt/moonfs/luoyashuo-m2/research/cdad/data/omnithought_code_all/train_merge.jsonl \
-    -o /mnt/moonfs/luoyashuo-m2/research/cdad/data/omnithought_code_all/train_merge_level2.jsonl \
+    -i /mnt/moonfs/luoyashuo-ksyun/research/cdad/data/omnithought_code_all/train_merge.jsonl \
+    -o /mnt/moonfs/luoyashuo-ksyun/research/cdad/data/omnithought_code_all/train_merge_level2.jsonl \
     --level 2 \
     -p 32
 python reasoning_graph/select_diff_data.py \
-    -i /mnt/moonfs/luoyashuo-m2/research/cdad/data/omnithought_code_all/train_merge.jsonl \
-    -o /mnt/moonfs/luoyashuo-m2/research/cdad/data/omnithought_code_all/train_merge_level1.jsonl \
+    -i /mnt/moonfs/luoyashuo-ksyun/research/cdad/data/omnithought_code_all/train_merge.jsonl \
+    -o /mnt/moonfs/luoyashuo-ksyun/research/cdad/data/omnithought_code_all/train_merge_level1.jsonl \
     --level 1 \
     -p 32
 """

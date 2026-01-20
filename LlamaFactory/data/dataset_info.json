@@ -740,7 +740,7 @@
     "folder": "python"
   },
   "omnithought_level1_cg_train": {
-    "file_name": "/mnt/moonfs/luoyashuo-m2/research/cdad/data/omnithought_level1_cg/train.jsonl",
+    "file_name": "/mnt/moonfs/luoyashuo-ksyun/research/cdad/data/omnithought_level1_cg/train.jsonl",
     "formatting": "sharegpt",
     "columns": {
       "messages": "conversations"
@@ -753,7 +753,7 @@
     }
   },
   "omnithought_level1_cg_val": {
-    "file_name": "/mnt/moonfs/luoyashuo-m2/research/cdad/data/omnithought_level1_cg/val.jsonl",
+    "file_name": "/mnt/moonfs/luoyashuo-ksyun/research/cdad/data/omnithought_level1_cg/val.jsonl",
     "formatting": "sharegpt",
     "columns": {
       "messages": "conversations"
@@ -766,7 +766,7 @@
     }
   },
   "omnithought_level1_rv_train": {
-    "file_name": "/mnt/moonfs/luoyashuo-m2/research/cdad/data/omnithought_level1_rv/train.jsonl",
+    "file_name": "/mnt/moonfs/luoyashuo-ksyun/research/cdad/data/omnithought_level1_rv/train.jsonl",
     "formatting": "sharegpt",
     "columns": {
       "messages": "conversations"
@@ -779,7 +779,7 @@
     }
   },
   "omnithought_level1_rv_val": {
-    "file_name": "/mnt/moonfs/luoyashuo-m2/research/cdad/data/omnithought_level1_rv/val.jsonl",
+    "file_name": "/mnt/moonfs/luoyashuo-ksyun/research/cdad/data/omnithought_level1_rv/val.jsonl",
     "formatting": "sharegpt",
     "columns": {
       "messages": "conversations"
@@ -792,7 +792,7 @@
     }
   },
   "omnithought_level1_fsf_train": {
-    "file_name": "/mnt/moonfs/luoyashuo-m2/research/cdad/data/omnithought_level1_fsf/train.jsonl",
+    "file_name": "/mnt/moonfs/luoyashuo-ksyun/research/cdad/data/omnithought_level1_fsf/train.jsonl",
     "formatting": "sharegpt",
     "columns": {
       "messages": "conversations"
@@ -805,7 +805,111 @@
     }
   },
   "omnithought_level1_fsf_val": {
-    "file_name": "/mnt/moonfs/luoyashuo-m2/research/cdad/data/omnithought_level1_fsf/val.jsonl",
+    "file_name": "/mnt/moonfs/luoyashuo-ksyun/research/cdad/data/omnithought_level1_fsf/val.jsonl",
+    "formatting": "sharegpt",
+    "columns": {
+      "messages": "conversations"
+    },
+    "tags": {
+      "role_tag": "role",
+      "content_tag": "content",
+      "user_tag": "user",
+      "assistant_tag": "assistant"
+    }
+  },
+  "omnithought_cd_optimal_train": {
+    "file_name": "/mnt/moonfs/luoyashuo-ksyun/research/cdad/data/omnithought_cd_optimal/train.jsonl",
+    "formatting": "sharegpt",
+    "columns": {
+      "messages": "conversations"
+    },
+    "tags": {
+      "role_tag": "role",
+      "content_tag": "content",
+      "user_tag": "user",
+      "assistant_tag": "assistant"
+    }
+  },
+  "omnithought_cd_optimal_val": {
+    "file_name": "/mnt/moonfs/luoyashuo-ksyun/research/cdad/data/omnithought_cd_optimal/val.jsonl",
+    "formatting": "sharegpt",
+    "columns": {
+      "messages": "conversations"
+    },
+    "tags": {
+      "role_tag": "role",
+      "content_tag": "content",
+      "user_tag": "user",
+      "assistant_tag": "assistant"
+    }
+  },
+  "omnithought_rv_optimal_train": {
+    "file_name": "/mnt/moonfs/luoyashuo-ksyun/research/cdad/data/omnithought_rv_optimal/train.jsonl",
+    "formatting": "sharegpt",
+    "columns": {
+      "messages": "conversations"
+    },
+    "tags": {
+      "role_tag": "role",
+      "content_tag": "content",
+      "user_tag": "user",
+      "assistant_tag": "assistant"
+    }
+  },
+  "omnithought_rv_optimal_val": {
+    "file_name": "/mnt/moonfs/luoyashuo-ksyun/research/cdad/data/omnithought_rv_optimal/val.jsonl",
+    "formatting": "sharegpt",
+    "columns": {
+      "messages": "conversations"
+    },
+    "tags": {
+      "role_tag": "role",
+      "content_tag": "content",
+      "user_tag": "user",
+      "assistant_tag": "assistant"
+    }
+  },
+  "omnithought_combined_train": {
+    "file_name": "/mnt/moonfs/luoyashuo-ksyun/research/cdad/data/omnithought_combined/train.jsonl",
+    "formatting": "sharegpt",
+    "columns": {
+      "messages": "conversations"
+    },
+    "tags": {
+      "role_tag": "role",
+      "content_tag": "content",
+      "user_tag": "user",
+      "assistant_tag": "assistant"
+    }
+  },
+  "omnithought_combined_val": {
+    "file_name": "/mnt/moonfs/luoyashuo-ksyun/research/cdad/data/omnithought_combined/val.jsonl",
+    "formatting": "sharegpt",
+    "columns": {
+      "messages": "conversations"
+    },
+    "tags": {
+      "role_tag": "role",
+      "content_tag": "content",
+      "user_tag": "user",
+      "assistant_tag": "assistant"
+    }
+  },
+  "omnithought_combined_fsf_train": {
+    "file_name": "/mnt/moonfs/luoyashuo-ksyun/research/cdad/data/omnithought_combined_fsf/train.jsonl",
+    "formatting": "sharegpt",
+    "columns": {
+      "messages": "conversations"
+    },
+    "tags": {
+      "role_tag": "role",
+      "content_tag": "content",
+      "user_tag": "user",
+      "assistant_tag": "assistant"
+    }
+  },
+  "omnithought_combined_fsf_val": {
+    "file_name": "/mnt/moonfs/luoyashuo-ksyun/research/cdad/data/omnithought_combined_fsf/val.jsonl",
     "formatting": "sharegpt",
     "columns": {
       "messages": "conversations"

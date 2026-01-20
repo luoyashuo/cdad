@@ -87,7 +87,7 @@ def create_math_dataset(output_jsonl):
     import pyarrow.parquet as pq
     import numpy as np
 
-    data_path = "/mnt/moonfs/luoyashuo-m2/hf_home/dataset/alibaba-pai/OmniThought/data"
+    data_path = "/mnt/moonfs/luoyashuo-ksyun/hf_home/dataset/alibaba-pai/OmniThought/data"
     parquet_files = list(Path(data_path).glob("*.parquet"))
 
     print(f"Processing {len(parquet_files)} parquet files...")
@@ -161,8 +161,8 @@ def main():
     import argparse
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("--input_jsonl", default="/mnt/moonfs/luoyashuo-m2/research/cdad/data/omnithought_math_30k_v2/train.jsonl")
-    parser.add_argument("--output_dir", default="/mnt/moonfs/luoyashuo-m2/research/cdad/data/omnithought_math_30k_final")
+    parser.add_argument("--input_jsonl", default="/mnt/moonfs/luoyashuo-ksyun/research/cdad/data/omnithought_math_30k_v2/train.jsonl")
+    parser.add_argument("--output_dir", default="/mnt/moonfs/luoyashuo-ksyun/research/cdad/data/omnithought_math_30k_final")
     parser.add_argument("--create_from_parquet", action="store_true", help="Create from parquet files directly")
 
     args = parser.parse_args()

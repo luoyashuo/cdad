@@ -902,8 +902,8 @@ if __name__ == "__main__":
 """
 # Filter math problems with sample size limit
 python /home/luoyashuo/research/graph_kd/cdad/data_preprocess/filter_math_simple_multiprocess.py \
-    --input_path /mnt/moonfs/luoyashuo-m2/hf_home/dataset/alibaba-pai/OmniThought/data \
-    -o /mnt/moonfs/luoyashuo-m2/research/cdad/data/omnithought_math_20k_2 \
+    --input_path /mnt/moonfs/luoyashuo-ksyun/hf_home/dataset/alibaba-pai/OmniThought/data \
+    -o /mnt/moonfs/luoyashuo-ksyun/research/cdad/data/omnithought_math_20k_2 \
     --problem_type math \
     --sample_size 50000 \
     --test_ratio 0.01 \
@@ -916,8 +916,8 @@ python /home/luoyashuo/research/graph_kd/cdad/data_preprocess/filter_math_simple
 
 # Filter code problems without sample size limit (process all data)
 python /home/luoyashuo/research/graph_kd/cdad/data_preprocess/filter_math_simple_multiprocess.py \
-    --input_path /mnt/moonfs/luoyashuo-m2/hf_home/dataset/alibaba-pai/OmniThought/data \
-    -o /mnt/moonfs/luoyashuo-m2/research/cdad/data/omnithought_code_all \
+    --input_path /mnt/moonfs/luoyashuo-ksyun/hf_home/dataset/alibaba-pai/OmniThought/data \
+    -o /mnt/moonfs/luoyashuo-ksyun/research/cdad/data/omnithought_code_all \
     --problem_type code \
     --test_ratio 0.01 \
     --seed 307 \
