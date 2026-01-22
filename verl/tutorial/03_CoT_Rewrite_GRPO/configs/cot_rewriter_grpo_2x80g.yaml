@@ -1,0 +1,148 @@
+# CoT Rewriter GRPO 训练配置
+# 硬件：2 × A100-80G
+# 模型：8B (LoRA)
+# 上下文：8K
+#
+# 关键优化：
+#   1. 必须使用 LoRA（全参数微调显存不够）
+#   2. 降低 GRPO 采样数 n=4（而非8）
+#   3. 降低 batch size
+#   4. 使用 gradient checkpointing
+#   5. 合理分配 KV Cache 显存
+
+hydra:
+  searchpath:
+    - file://verl/trainer/config
+
+defaults:
+  - ppo_trainer
+  - _self_
+
+# ============ 实验配置 ============
+trainer:
+  project_name: cot_rewriter_grpo
+  experiment_name: 8b_lora_8k_2xA100_80G
+  total_epochs: 3
+  save_freq: 100
+  val_freq: 50
+  device: cuda
+  log_freq: 10
+
+# ============ 数据配置 ============
+data:
+  train_files: data/processed/train.parquet
+  val_files: data/processed/val.parquet
+  # 关键：降低 batch size
+  train_batch_size: 16       # 降低（原64）
+  val_batch_size: 8
+  gen_batch_size: 16         # 降低
+  max_prompt_length: 2048    # prompt 部分
+  max_response_length: 6144  # response 部分，总计 8K
+  return_raw_chat: true
+  dataloader_num_workers: 4
+  reward_fn_key: reward_model
+
+# ============ Actor/Rollout 配置 ============
+actor_rollout_ref:
+  hybrid_engine: true  # 关键：Actor 和 Rollout 共享显存
+
+  model:
+    path: ./models/Qwen2.5-7B-Instruct  # 或其他 8B 模型
+    trust_remote_code: true
+    dtype: bfloat16
+
+    # 关键：必须使用 LoRA
+    lora:
+      rank: 32              # 降低 rank 节省显存（原64）
+      alpha: 64
+      target_modules:
+        - q_proj
+        - k_proj
+        - v_proj
+        - o_proj
+        # 可选：移除 gate/up/down 进一步节省
+        # - gate_proj
+        # - up_proj
+        # - down_proj
+      dropout: 0.05
+
+  actor:
+    ppo_epochs: 1
+    clip_ratio: 0.2
+    entropy_coeff: 0.01
+    # 关键：启用 gradient checkpointing
+    gradient_checkpointing: true
+    grad_clip: 1.0
+
+    optim:
+      lr: 2e-5
+      weight_decay: 0.01
+      lr_scheduler: cosine
+      warmup_ratio: 0.03
+      min_lr_ratio: 0.1
+
+  rollout:
+    name: vllm              # vLLM 显存效率更高
+    tensor_model_parallel_size: 2  # 关键：2卡 TP
+    # 关键：控制 KV Cache 显存占用
+    gpu_memory_utilization: 0.4    # 降低（原0.5），给训练留空间
+    mem_fraction_static: 0.7
+    # 关键：降低 GRPO 采样数
+    n: 4                    # 降低（原8），减少 KV Cache
+    temperature: 0.7
+    top_p: 0.95
+    max_new_tokens: 6144    # 8K - prompt
+
+  ref:
+    enable: false  # LoRA 模式下 Ref 复用基座，无额外显存
+
+# ============ 算法配置 ============
+algorithm:
+  adv_estimator: grpo
+  norm_adv_by_std_in_grpo: true
+  gamma: 1.0
+  lam: 1.0
+  use_kl_in_reward: false
+
+# ============ Critic 配置 ============
+critic:
+  enable: false  # GRPO 不需要 Critic
+
+# ============ 奖励模型配置 ============
+reward_model:
+  enable: true
+  use_reward_loop: false
+
+  # 选项 1：使用外部 vLLM 服务（推荐，避免显存竞争）
+  # 需要在另一台机器或用 CPU 部署 Student Model
+  custom_reward_function:
+    path: src/reward/vllm_student_reward.py
+    name: compute_vllm_student_reward
+    reward_kwargs:
+      vllm_base_url: http://localhost:8100/v1  # 外部服务
+      lambda_logic: 0.5
+      use_logic_reward: false  # 关闭 FSF，节省计算
+
+  # 选项 2：使用时分复用（如果不部署外部服务）
+  # custom_reward_function:
+  #   path: src/reward/student_reward_worker.py
+  #   name: compute_student_reward
+  #   reward_kwargs:
+  #     student_model_path: ./models/Qwen2.5-1.5B-Instruct  # 用更小的模型
+  #     offload_to_cpu: true
+  #     lambda_logic: 0.0  # 关闭 FSF
+
+# ============ 奖励管理器配置 ============
+reward_manager:
+  source: register
+  name: naive
+
+# ============ 资源配置 ============
+trainer:
+  n_gpus_per_node: 2
+  nnodes: 1
+
+# ============ DeepSpeed 配置（可选，进一步优化） ============
+# deepspeed:
+#   stage: 2  # ZeRO-2
+#   offload_optimizer: false  # 80G 通常不需要 offload

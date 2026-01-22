@@ -1,0 +1,147 @@
+# CoT Rewriter GRPO Training Configuration (LoRA Mode)
+# Hardware: 2 x A100-80G
+# Model: Qwen3-8B with LoRA (PEFT)
+#
+# Usage:
+#   bash scripts/run_train.sh examples/qwen3_8b_grpo_2gpu_lora.yaml
+#
+# Architecture:
+#   GPU 0:   Actor Model (Qwen3-8B LoRA) + Rollout Engine
+#   GPU 1:   vLLM Services (Student + FSF Judge, started separately)
+#
+# Key Optimizations for 2-GPU Setup:
+#   1. LoRA (rank=32) to reduce trainable parameters
+#   2. Lower batch size and GRPO samples
+#   3. Gradient checkpointing enabled
+#   4. Single GPU for training, single GPU for inference services
+
+hydra:
+  searchpath:
+    - file://../verl/verl/trainer/config
+
+defaults:
+  - ppo_trainer
+  - _self_
+
+# ============ Experiment Configuration ============
+trainer:
+  project_name: cot_rewriter_grpo
+  experiment_name: qwen3_8b_lora_2xA100
+  total_epochs: 3
+  total_training_steps: null
+  save_freq: 100
+  val_freq: 50
+  device: cuda
+  log_freq: 10
+  # Output directory with timestamp
+  default_local_dir: outputs/${trainer.project_name}/${trainer.experiment_name}/version_${now:%Y%m%d_%H%M%S}
+
+# ============ Data Configuration ============
+data:
+  train_files: data/train.parquet
+  val_files: data/val.parquet
+  train_batch_size: 8        # Reduced for memory
+  val_batch_size: 4
+  gen_batch_size: 8
+  max_prompt_length: 1024
+  max_response_length: 2048
+  return_raw_chat: true
+  dataloader_num_workers: 2
+  reward_fn_key: reward_model
+
+# ============ Actor/Rollout/Ref Configuration ============
+actor_rollout_ref:
+  hybrid_engine: true
+
+  model:
+    path: ./models/Qwen3-8B
+    trust_remote_code: true
+    dtype: bfloat16
+
+    # LoRA Configuration (Critical for 2-GPU setup)
+    lora:
+      rank: 32               # Lower rank for memory efficiency
+      alpha: 64
+      target_modules:
+        - q_proj
+        - k_proj
+        - v_proj
+        - o_proj
+        # Optionally add for better performance (may increase memory):
+        # - gate_proj
+        # - up_proj
+        # - down_proj
+      dropout: 0.05
+      bias: "none"
+      task_type: "CAUSAL_LM"
+
+  actor:
+    ppo_epochs: 1
+    clip_ratio: 0.2
+    entropy_coeff: 0.01
+    gradient_checkpointing: true  # Critical for memory
+    grad_clip: 1.0
+
+    optim:
+      lr: 2e-5              # Slightly higher LR for LoRA
+      weight_decay: 0.01
+      lr_scheduler: cosine
+      warmup_ratio: 0.03
+      min_lr_ratio: 0.1
+      total_training_steps: null
+
+  rollout:
+    name: vllm
+    tensor_model_parallel_size: 1
+    gpu_memory_utilization: 0.35   # Lower for training headroom
+    mem_fraction_static: 0.7
+    n: 4                           # Reduced GRPO samples
+    temperature: 0.7
+    top_p: 0.95
+    max_new_tokens: 2048
+
+  ref:
+    enable: false  # LoRA mode uses base model as reference
+
+# ============ Algorithm Configuration ============
+algorithm:
+  adv_estimator: grpo
+  norm_adv_by_std_in_grpo: true
+  gamma: 1.0
+  lam: 1.0
+  use_kl_in_reward: false
+
+# ============ Critic Configuration ============
+critic:
+  enable: false
+
+# ============ Reward Model Configuration ============
+reward_model:
+  enable: true
+  use_reward_loop: false
+
+  custom_reward_function:
+    path: src/reward/combined_reward.py
+    name: compute_cot_rewriter_reward
+    reward_kwargs:
+      # vLLM Student Service
+      student_vllm_url: http://localhost:8100/v1
+      student_model_name: Qwen2.5-3B-Instruct
+      # vLLM FSF Judge Service
+      fsf_vllm_url: http://localhost:8101/v1
+      fsf_model_name: Qwen2.5-7B-Instruct
+      # Reward weights
+      lambda_logic: 0.5
+      use_logic_reward: true
+      max_concurrent: 16
+      timeout: 60.0
+
+# ============ Reward Manager Configuration ============
+reward_manager:
+  source: register
+  name: naive
+
+# ============ Resource Configuration ============
+trainer:
+  n_gpus_per_node: 1  # Only GPU 0 for training
+  nnodes: 1
