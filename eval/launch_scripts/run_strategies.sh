@@ -43,3 +43,4 @@ echo ""
 echo "=============================================="
 echo "  所有评测完成！"
 echo "=============================================="
+# nohup bash /mnt/moonfs/luoyashuo-ksyun/code/graphkd/cdad/eval/launch_scripts/run_strategies.sh > /mnt/moonfs/luoyashuo-ksyun/code/graphkd/cdad/eval/vllm_logs/run_strategies.log 2>&1 &
