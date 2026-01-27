@@ -49,29 +49,101 @@ R_logic = 1 if FSF(Rewrite_CoT) < FSF(Original_CoT) else 0
 - 使用 LLM-as-a-Judge 分析推理过程中的失败分支
 - 目的：鼓励减少无效的推理分支
 
-## 环境要求
+## 环境配置
 
-- Python >= 3.10
-- PyTorch >= 2.6.0
-- CUDA >= 12.4
-- 4 x A100-80G (推荐) 或 2 x A100-80G (LoRA 模式)
+### 硬件要求
+| 配置模式 | GPU 要求 | 显存需求 | 说明 |
+|---------|---------|---------|------|
+| 全参数微调 | 4 × A100-80G | ~64GB/卡 | 推荐配置，训练速度快 |
+| LoRA 微调 | 2 × A100-80G | ~40GB/卡 | 资源受限情况下的选择 |
+| 轻量级训练 | 1 × A100-80G | ~70GB/卡 | 需要进一步降低 batch size 和 rollout 数 |
 
-## 安装
+### 软件要求
+- **Python**: >= 3.10 (推荐 3.11)
+- **PyTorch**: >= 2.6.0 (推荐 2.6.1)
+- **CUDA**: >= 12.4 (推荐 12.4 或 12.5)
+- **CUDA Toolkit**: 需与 PyTorch 版本匹配
 
-使用 `uv` 管理依赖:
+### 安装步骤
+
+本项目使用 `uv` 进行依赖管理，提供一致、快速的包安装体验。
 
 ```bash
-# 安装 uv
+# 1. 安装 uv 工具（如果尚未安装）
 pip install uv
 
-# 创建虚拟环境并安装依赖
+# 2. 进入项目目录
 cd cot_rewriter_grpo
+
+# 3. 创建并激活虚拟环境
 uv venv
 source .venv/bin/activate
+
+# 4. 安装项目依赖（包括 torch、transformers、vLLM 等核心库）
 uv pip install -e .
 
-# 安装 verl (editable mode)
+# 5. 安装 VERL 框架 (editable mode，本地开发模式)
 uv pip install -e ../verl
+```
+
+### 依赖验证
+安装完成后，验证关键依赖是否正常工作：
+```bash
+# 检查 Python 版本
+python --version  # 应 >= 3.10
+
+# 检查 PyTorch 和 CUDA
+python -c "import torch; print(f'Torch: {torch.__version__}'); print(f'CUDA: {torch.cuda.is_available()}')"
+
+# 检查 VERL 框架
+python -c "import verl; print(f'Verl: {verl.__version__}')"
+
+# 检查 vLLM
+python -c "import vllm; print(f'vLLM: {vllm.__version__}')"
+```
+
+### uv 使用技巧
+```bash
+# 查看已安装的包
+uv pip list
+
+# 更新所有依赖
+uv pip upgrade
+
+# 冻结依赖到 requirements.txt
+uv pip freeze > requirements.txt
+
+# 安装特定版本的包
+uv pip install torch==2.6.1
+
+# 运行 Python 脚本（使用虚拟环境）
+uv run python src/data/dataset.py
+```
+
+### 常见问题
+**Q: uv 安装失败？**
+A: 检查网络连接，或尝试使用国内镜像：
+```bash
+pip install uv -i https://pypi.tuna.tsinghua.edu.cn/simple
+```
+
+**Q: 虚拟环境激活问题？**
+A: Windows 用户使用：
+```cmd
+.venv\Scripts\activate
+```
+
+**Q: PyTorch 与 CUDA 版本不匹配？**
+A: 可以通过以下命令重新安装匹配版本：
+```bash
+uv pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
+```
+
+**Q: 缺少系统依赖？**
+A: 在 Ubuntu/Debian 上安装编译依赖：
+```bash
+sudo apt-get update
+sudo apt-get install -y build-essential libssl-dev libffi-dev python3-dev
 ```
 
 ## 数据格式

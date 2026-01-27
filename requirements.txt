@@ -7,3 +7,9 @@ graphviz>=0.20.0
 evalscope>=0.3.0
 openpyxl>=3.1.0
 pyyaml>=6.0
+rich
+loguru
+colorlog
+setuptools
+packaging
+ninja
