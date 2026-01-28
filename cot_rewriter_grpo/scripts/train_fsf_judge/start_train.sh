@@ -1,12 +1,27 @@
 #!/bin/bash
 
-# 占卡脚本 - 循环执行训练并删除ckpt，实现无缝占卡
+# 防止重复执行检测
+PID_FILE="/tmp/train_fsf_judge.pid"
+if [ -f "$PID_FILE" ]; then
+    PID=$(cat "$PID_FILE")
+    if ps -p "$PID" > /dev/null 2>&1; then
+        echo "脚本已经在运行中，进程ID: $PID"
+        exit 1
+    else
+        echo "PID 文件存在但进程不存在，删除旧的PID文件"
+        rm -f "$PID_FILE"
+    fi
+fi
+# 写入当前进程ID到PID文件
+echo $$ > "$PID_FILE"
+# 退出时删除PID文件
+trap 'rm -f "$PID_FILE"' EXIT
 
 # 配置
 USER=$(whoami)
 VENV_PATH="/data-share/yeesuanAI08/lihaitao/luoys/projects/cdad/.venv/bin/activate"
 LLAMAFACTORY_PATH="/data-share/yeesuanAI08/lihaitao/luoys/projects/cdad/LlamaFactory"
-LOG_PATH="/home/luoyashuo/research/graph_kd/cdad/logs/train_fsf_judge.log"
+LOG_PATH="/data-share/yeesuanAI08/lihaitao/luoys/projects/cdad/cot_rewriter_grpo/logs/judge/train_fsf_judge.log"
 
     # 训练配置
     SINGLE_CARD_YAML="examples/fsf_judge/qwen3_1_7b_judge.yaml"
@@ -21,25 +36,27 @@ trap 'stop_flag=1; echo "收到停止信号，等待当前训练完成后退出.
 # 函数：获取用户进程占用的GPU
 get_user_gpus() {
     local gpus=()
-    # 使用nvidia-smi获取用户进程的GPU信息
-    while IFS= read -r line; do
-        # 跳过表头和空行
-        if [[ "$line" == *"PID"* ]] || [[ -z "$line" ]]; then
+    # 使用nvidia-smi pmon获取进程和GPU的对应关系
+    while read -r gpu_id pid; do
+        # 跳过空行和表头
+        [[ -z "$gpu_id" ]] && continue
+        [[ "$gpu_id" == "#" ]] && continue
+        [[ "$gpu_id" == "Idx" ]] && continue
+        [[ "$gpu_id" == "gpu" ]] && continue
+        
+        # 检查PID是否是数字
+        if ! [[ "$pid" =~ ^[0-9]+$ ]]; then
             continue
         fi
         
-        # 提取GPU ID
-        gpu_id=$(echo "$line" | awk '{print $1}')
+        # 检查进程所属用户
+        process_user=$(ps -o user= -p "$pid" 2>/dev/null)
         
-        # 提取PID和用户
-        pid=$(echo "$line" | awk '{print $3}')
-        user=$(ps -o user= -p "$pid" 2>/dev/null)
-        
-        # 检查是否是当前用户的进程
-        if [[ "$user" == "$USER" ]]; then
+        # 如果是当前用户的进程，记录GPU ID
+        if [[ "$process_user" == "$USER" ]]; then
             gpus+=("$gpu_id")
         fi
-    done < <(nvidia-smi | grep -A 100 "Processes:")
+    done < <(nvidia-smi pmon -c 1 2>/dev/null | awk '{print $1, $2}')
     
     # 去重
     local unique_gpus=()
@@ -54,10 +71,9 @@ get_user_gpus() {
     echo "${unique_gpus[@]}"
 }
 
-# 函数：获取空闲GPU
+# 函数：获取空闲GPU（返回第一个空闲GPU）
 get_free_gpus() {
-    local free_gpus=()
-    # 使用nvidia-smi获取所有GPU的使用情况
+    # 使用nvidia-smi获取所有GPU的使用情况，返回第一个空闲的GPU
     while IFS= read -r line; do
         # 跳过表头和空行
         if [[ "$line" == *"index"* ]] || [[ -z "$line" ]]; then
@@ -70,11 +86,10 @@ get_free_gpus() {
         
         # 判断GPU是否空闲：GPU利用率 < 10% 且 显存利用率 < 10%
         if [[ "$gpu_util" -lt 10 && "$mem_util" -lt 10 ]]; then
-            free_gpus+=("$gpu_id")
+            echo "$gpu_id"
+            return  # 只返回第一个空闲GPU
         fi
     done < <(nvidia-smi --query-gpu=index,utilization.gpu,utilization.memory --format=csv,noheader)
-    
-    echo "${free_gpus[@]}"
 }
 
 # 函数：kill用户进程
@@ -82,20 +97,33 @@ kill_user_processes() {
     local gpus=($1)
     echo "正在kill用户 $USER 在GPU ${gpus[*]} 上的进程..."
     
-    while IFS= read -r line; do
-        if [[ "$line" == *"PID"* ]] || [[ -z "$line" ]]; then
+    while read -r gpu_id pid; do
+        # 跳过空行和表头
+        [[ -z "$gpu_id" ]] && continue
+        [[ "$gpu_id" == "#" ]] && continue
+        [[ "$gpu_id" == "Idx" ]] && continue
+        [[ "$gpu_id" == "gpu" ]] && continue
+        
+        # 检查PID是否是数字
+        if ! [[ "$pid" =~ ^[0-9]+$ ]]; then
             continue
         fi
         
-        gpu_id=$(echo "$line" | awk '{print $1}')
-        pid=$(echo "$line" | awk '{print $3}')
-        user=$(ps -o user= -p "$pid" 2>/dev/null)
+        # 检查进程所属用户
+        process_user=$(ps -o user= -p "$pid" 2>/dev/null)
         
-        if [[ "$user" == "$USER" ]] && [[ " ${gpus[*]} " == *" $gpu_id "* ]]; then
+        # 如果是当前用户的进程，且在指定的GPU上，则kill
+        if [[ "$process_user" == "$USER" ]] && [[ " ${gpus[*]} " == *" $gpu_id "* ]]; then
             echo "Killing process $pid (GPU $gpu_id)..."
             kill -9 "$pid" 2>/dev/null
+            # 检查kill是否成功
+            if [ $? -eq 0 ]; then
+                echo "Successfully killed process $pid"
+            else
+                echo "Failed to kill process $pid (already terminated or permission denied)"
+            fi
         fi
-    done < <(nvidia-smi | grep -A 100 "Processes:")
+    done < <(nvidia-smi pmon -c 1 2>/dev/null | awk '{print $1, $2}')
 }
 
 # 函数：执行单卡训练
@@ -109,12 +137,6 @@ run_single_card_training() {
     source "$VENV_PATH"
     cd "$LLAMAFACTORY_PATH"
     
-    # 检查是否有旧的ckpt，先备份再启动新训练
-    if [ -d "$SINGLE_CARD_CKPT" ]; then
-        echo "检测到旧的ckpt，先备份..."
-        mv "$SINGLE_CARD_CKPT" "${SINGLE_CARD_CKPT}_old" 2>/dev/null
-    fi
-    
     # 执行训练（使用 overwrite_output_dir 确保覆盖）
     nohup llamafactory-cli train "$SINGLE_CARD_YAML" 2>&1 > "$LOG_PATH" &
     TRAIN_PID=$!
@@ -122,13 +144,7 @@ run_single_card_training() {
     
     # 等待训练进程稳定运行（确保GPU已经被占用）
     echo "等待训练进程稳定运行..."
-    sleep 60
-    
-    # 删除旧的ckpt备份
-    if [ -d "${SINGLE_CARD_CKPT}_old" ]; then
-        echo "删除旧的ckpt备份..."
-        rm -rf "${SINGLE_CARD_CKPT}_old" 2>/dev/null
-    fi
+    sleep 180
     
     # 等待训练完成
     wait "$TRAIN_PID"
@@ -143,20 +159,14 @@ run_multi_card_training() {
     export CUDA_VISIBLE_DEVICES="$cuda_visible_devices"
     source "$VENV_PATH"
     cd "$LLAMAFACTORY_PATH"
-
-    nohup llamafactory-cli train "$MULTI_CARD_YAML" 2>&1 > "$LOG_PATH" &
+    
+    nohup llamafactory-cli train "$MULTI_CARD_YAML" 2>&1 > "${LOG_PATH%.log}_multi.log" &
     TRAIN_PID=$!
     echo "训练进程PID: $TRAIN_PID"
     
     # 等待训练进程稳定运行（确保GPU已经被占用）
     echo "等待训练进程稳定运行..."
-    sleep 60
-    
-    # 删除旧的ckpt备份
-    if [ -d "${MULTI_CARD_CKPT}_old" ]; then
-        echo "删除旧的ckpt备份..."
-        rm -rf "${MULTI_CARD_CKPT}_old" 2>/dev/null
-    fi
+    sleep 180
     
     # 等待训练完成
     wait "$TRAIN_PID"
@@ -208,25 +218,17 @@ main() {
         echo "自动检测用户 $USER 占用的GPU..."
         target_gpus=$(get_user_gpus)
         if [ -z "$target_gpus" ]; then
-            echo "未检测到用户 $USER 占用的GPU，寻找空闲GPU..."
-            # 获取空闲GPU
-            target_gpus=$(get_free_gpus)
-            if [ -z "$target_gpus" ]; then
-                echo "未检测到空闲GPU，使用所有可用GPU"
-                target_gpus=$(nvidia-smi --query-gpu=index --format=csv,noheader)
-            fi
+            echo "未检测到用户 $USER 占用的GPU，直接退出"
+            exit 0
         fi
         echo "检测到的GPU: $target_gpus"
         
-        # kill用户进程并准备占卡
         kill_user_processes "$target_gpus"
     fi
     
     # 确保训练目录存在
     mkdir -p "$(dirname "$LOG_PATH")"
     
-    # 循环执行训练
-    echo "开始循环训练，按 Ctrl+C 停止..."
     while [ $stop_flag -eq 0 ]; do
         if is_multi_card "$target_gpus"; then
             run_multi_card_training "$target_gpus"
@@ -244,7 +246,7 @@ main() {
         sleep 3
     done
     
-    echo "占卡程序已停止"
+    echo "程序已停止"
 }
 
 # 执行主函数

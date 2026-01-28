@@ -8,15 +8,14 @@ USER=$(whoami)
 stop_all_user_processes() {
     echo "正在停止所有GPU上用户 $USER 的进程..."
     
-    # 使用nvidia-smi的query命令获取结构化的进程信息
-    # 格式: GPU index, PID
-    while IFS=',' read -r gpu_id pid; do
-        # 跳过空行
-        [ -z "$pid" ] && continue
-        
-        # 去除可能存在的空格
-        gpu_id=$(echo "$gpu_id" | tr -d '[:space:]')
-        pid=$(echo "$pid" | tr -d '[:space:]')
+    # 使用nvidia-smi pmon获取结构化的进程信息
+    # 格式: gpu_id pid
+    while read -r gpu_id pid; do
+        # 跳过空行和表头
+        [[ -z "$gpu_id" ]] && continue
+        [[ "$gpu_id" == "#" ]] && continue
+        [[ "$gpu_id" == "gpu" ]] && continue
+        [[ "$gpu_id" == "Idx" ]] && continue
         
         # 检查PID是否是数字
         if ! [[ "$pid" =~ ^[0-9]+$ ]]; then
@@ -37,7 +36,7 @@ stop_all_user_processes() {
                 echo "Failed to kill process $pid (already terminated or permission denied)"
             fi
         fi
-    done < <(nvidia-smi --query-compute-apps=pid,gpu_index --format=csv,noheader,nounits | awk -F',' '{print $2 "," $1}')
+    done < <(nvidia-smi pmon -c 1 2>/dev/null | awk 'NR>2 && $2 != "-" {print $1, $2}')
 }
 
 # 函数：检查GPU状态
