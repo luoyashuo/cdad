@@ -16,7 +16,7 @@ import pyarrow.parquet as pq
 from datasets import Dataset, load_dataset
 
 
-# Prompt template for CoT rewriting
+# Default prompt template for CoT rewriting (used when 'problem' field is not available)
 REWRITE_PROMPT_TEMPLATE = """You are an expert at improving reasoning processes. Your task is to rewrite the given Chain-of-Thought (CoT) reasoning to make it clearer, more logical, and easier to follow.
 
 Requirements:
@@ -90,49 +90,66 @@ class CoTRewriterDataset:
         """
         Format data for VERL training.
 
+        Data format expected:
+            - problem: Complete input prompt (directly used as model input)
+            - question: Original question
+            - thought: Original reasoning process (CoT)
+            - solution: Ground truth answer
+            - fsf: (optional) FSF score
+
         Returns:
             List of formatted examples with:
-                - prompt: The formatted rewrite prompt
-                - reward_model: Dictionary with ground_truth, original_cot, question
+                - prompt: The input prompt (from 'problem' field or constructed)
+                - reward_model: Dictionary with question, original_cot, ground_truth
         """
         formatted = []
 
         for item in self.data:
-            # Support multiple field names for compatibility
-            question = (
-                item.get("question", "")
-                or item.get("problem", "")
-                or item.get("input", "")
-                or item.get("query", "")
-            )
-            original_cot = (
-                item.get("original_cot", "")
-                or item.get("reasoning", "")
-                or item.get("cot", "")
-                or item.get("chain_of_thought", "")
-                or item.get("solution", "")
-            )
-            answer = (
-                item.get("answer", "")
-                or item.get("ground_truth", "")
-                or item.get("target", "")
-                or item.get("output", "")
-                or item.get("label", "")
-            )
+            # Check if 'problem' field exists (new format)
+            if "problem" in item:
+                # Use 'problem' field directly as prompt
+                prompt = item["problem"]
+                
+                # Extract question, original_cot, ground_truth from respective fields
+                question = item.get("question", "")
+                original_cot = item.get("thought", "")
+                ground_truth = item.get("solution", "")
+            else:
+                # Fallback to old format: construct prompt from individual fields
+                question = (
+                    item.get("question", "")
+                    or item.get("input", "")
+                    or item.get("query", "")
+                )
+                original_cot = (
+                    item.get("original_cot", "")
+                    or item.get("thought", "")
+                    or item.get("reasoning", "")
+                    or item.get("cot", "")
+                    or item.get("chain_of_thought", "")
+                )
+                ground_truth = (
+                    item.get("solution", "")
+                    or item.get("answer", "")
+                    or item.get("ground_truth", "")
+                    or item.get("target", "")
+                    or item.get("output", "")
+                    or item.get("label", "")
+                )
 
-            # Build prompt
-            prompt = REWRITE_PROMPT_TEMPLATE.format(
-                question=question,
-                original_cot=original_cot,
-                answer=answer,
-            )
+                # Build prompt from template
+                prompt = REWRITE_PROMPT_TEMPLATE.format(
+                    question=question,
+                    original_cot=original_cot,
+                    answer=ground_truth,
+                )
 
             formatted.append({
                 "prompt": prompt,
                 "reward_model": {
                     "question": question,
                     "original_cot": original_cot,
-                    "ground_truth": answer,
+                    "ground_truth": ground_truth,
                 },
             })
 
@@ -159,6 +176,8 @@ class CoTRewriterDataset:
             records.append(record)
 
         df = pd.DataFrame(records)
+        output_path = Path(output_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
         df.to_parquet(output_path, index=False)
         print(f"Saved {len(df)} examples to {output_path}")
 
@@ -169,11 +188,44 @@ class CoTRewriterDataset:
         return self.data[idx]
 
 
+def _save_as_jsonl(data: List[Dict[str, Any]], output_path: Path) -> None:
+    """Save data as JSONL file."""
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(output_path, "w", encoding="utf-8") as f:
+        for item in data:
+            # Build record with reward_model field for VERL
+            record = {
+                "prompt": item["prompt"],
+                "reward_model": {
+                    "question": item["reward_model"]["question"],
+                    "original_cot": item["reward_model"]["original_cot"],
+                    "ground_truth": item["reward_model"]["ground_truth"],
+                },
+            }
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
+def _save_as_parquet(data: List[Dict[str, Any]], output_path: Path) -> None:
+    """Save data as Parquet file."""
+    records = []
+    for item in data:
+        records.append({
+            "prompt": item["prompt"],
+            "question": item["reward_model"]["question"],
+            "original_cot": item["reward_model"]["original_cot"],
+            "ground_truth": item["reward_model"]["ground_truth"],
+        })
+    df = pd.DataFrame(records)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    df.to_parquet(output_path, index=False)
+
+
 def prepare_dataset(
     input_path: Union[str, Path],
     output_dir: Union[str, Path],
     train_ratio: float = 0.9,
     seed: int = 42,
+    output_format: str = "jsonl",  # "jsonl" or "parquet"
 ) -> Dict[str, str]:
     """
     Prepare train/val splits from raw data.
@@ -183,9 +235,10 @@ def prepare_dataset(
         output_dir: Directory to save processed files
         train_ratio: Ratio for training split
         seed: Random seed for splitting
+        output_format: Output format, either "jsonl" or "parquet"
 
     Returns:
-        Dictionary with paths to train and val parquet files
+        Dictionary with paths to train and val files
     """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -203,24 +256,17 @@ def prepare_dataset(
     train_data = formatted[:n_train]
     val_data = formatted[n_train:]
 
-    # Save
-    train_path = output_dir / "train.parquet"
-    val_path = output_dir / "val.parquet"
+    # Save with appropriate format
+    ext = ".jsonl" if output_format == "jsonl" else ".parquet"
+    train_path = output_dir / f"train{ext}"
+    val_path = output_dir / f"val{ext}"
 
-    # Convert to DataFrames
-    def to_df(data):
-        records = []
-        for item in data:
-            records.append({
-                "prompt": item["prompt"],
-                "question": item["reward_model"]["question"],
-                "original_cot": item["reward_model"]["original_cot"],
-                "ground_truth": item["reward_model"]["ground_truth"],
-            })
-        return pd.DataFrame(records)
-
-    to_df(train_data).to_parquet(train_path, index=False)
-    to_df(val_data).to_parquet(val_path, index=False)
+    if output_format == "jsonl":
+        _save_as_jsonl(train_data, train_path)
+        _save_as_jsonl(val_data, val_path)
+    else:
+        _save_as_parquet(train_data, train_path)
+        _save_as_parquet(val_data, val_path)
 
     print(f"Created train split: {len(train_data)} examples -> {train_path}")
     print(f"Created val split: {len(val_data)} examples -> {val_path}")

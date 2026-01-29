@@ -76,6 +76,21 @@ def validate_config_local(config: DictConfig) -> None:
         print(f"Warning: Actor model not found: {model_path}")
         print("Please download the model or update the path in config.")
 
+    # Check reward model paths
+    custom_reward_fn = config.get("custom_reward_function")
+    if custom_reward_fn and custom_reward_fn.get("reward_kwargs"):
+        reward_kwargs = custom_reward_fn.reward_kwargs
+        if reward_kwargs.get("use_logic_reward", True):
+            fsf_model_path = reward_kwargs.get("fsf_model_path")
+            if fsf_model_path and not os.path.exists(fsf_model_path):
+                print(f"Warning: FSF judge model not found: {fsf_model_path}")
+                print("Please download the model or update the path in config.")
+
+        student_model_path = reward_kwargs.get("student_model_path")
+        if student_model_path and not os.path.exists(student_model_path):
+            print(f"Warning: Student model not found: {student_model_path}")
+            print("Please download the model or update the path in config.")
+
     # Check data paths
     train_files = config.data.train_files
     if not os.path.exists(train_files):
@@ -101,9 +116,11 @@ def print_config_summary(config: DictConfig) -> None:
     print(f"Output Dir: {config.trainer.default_local_dir}")
     print("-" * 60)
     print(f"Model: {config.actor_rollout_ref.model.path}")
-    lora_config = config.actor_rollout_ref.model.get('lora', None)
+    lora_config = config.actor_rollout_ref.model.get("lora", None)
     if lora_config:
-        print(f"LoRA: rank={lora_config.get('rank', 'N/A')}, alpha={lora_config.get('alpha', 'N/A')}")
+        print(
+            f"LoRA: rank={lora_config.get('rank', 'N/A')}, alpha={lora_config.get('alpha', 'N/A')}"
+        )
     else:
         print("LoRA: disabled (full parameter training)")
     print(f"Train Batch Size: {config.data.train_batch_size}")
@@ -169,6 +186,7 @@ def main(config: DictConfig):
     except Exception as e:
         print(f"\nTraining failed with error: {e}")
         import traceback
+
         traceback.print_exc()
         raise
 

@@ -1,7 +1,7 @@
 # Reward functions module
-from .combined_reward import compute_cot_rewriter_reward
-from .student_reward import HFStudentRewardClient
-from .fsf_reward import HFFSFJudge
+from src.reward.combined_reward import compute_cot_rewriter_reward
+from src.reward.student_reward import HFStudentRewardClient
+from src.reward.fsf_reward import HFFSFJudge
 
 __all__ = [
     "compute_cot_rewriter_reward",

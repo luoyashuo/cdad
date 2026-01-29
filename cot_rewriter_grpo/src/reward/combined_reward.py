@@ -24,8 +24,8 @@ if PROJECT_ROOT not in sys.path:
 
 from verl import DataProto
 
-from .student_reward import HFStudentRewardClient
-from .fsf_reward import HFFSFJudge
+from src.reward.student_reward import HFStudentRewardClient
+from src.reward.fsf_reward import HFFSFJudge
 
 
 class CombinedRewardComputer:
@@ -38,7 +38,7 @@ class CombinedRewardComputer:
     def __init__(
         self,
         student_model_path: str = "./models/Qwen3-1.7B",
-        fsf_model_path: str = "./models/Qwen3-8B",
+        fsf_model_path: Optional[str] = None,
         device: str = "cuda:3",
         lambda_logic: float = 0.5,
         use_logic_reward: bool = True,
@@ -48,7 +48,7 @@ class CombinedRewardComputer:
 
         Args:
             student_model_path: Path to Student Model
-            fsf_model_path: Path to FSF Judge Model
+            fsf_model_path: Path to FSF Judge Model (only required if use_logic_reward=True)
             device: Device to run reward models on (should be a single GPU)
             lambda_logic: Weight for logic reward
             use_logic_reward: Whether to use logic reward
@@ -64,6 +64,8 @@ class CombinedRewardComputer:
 
         # Initialize FSF Judge client (if needed)
         if use_logic_reward:
+            if not fsf_model_path:
+                raise ValueError("fsf_model_path must be provided when use_logic_reward=True")
             self.fsf_judge = HFFSFJudge(
                 model_path=fsf_model_path,
                 device=device,
@@ -153,10 +155,11 @@ def compute_cot_rewriter_reward(
     data: DataProto,
     tokenizer: Any,
     student_model_path: str = "./models/Qwen3-1.7B",
-    fsf_model_path: str = "./models/Qwen3-8B",
+    fsf_model_path: Optional[str] = None,
     device: str = "cuda:3",
     lambda_logic: float = 0.5,
     use_logic_reward: bool = True,
+    field_mapping: Optional[Dict[str, str]] = None,
     **kwargs,
 ) -> Dict[str, Any]:
     """
@@ -172,12 +175,38 @@ def compute_cot_rewriter_reward(
         device: Device to run reward models on
         lambda_logic: Weight for logic reward
         use_logic_reward: Whether to use logic reward
+        field_mapping: Optional dict to customize field names in data.
+            Keys: "prompt_key", "reward_model_key", "question_key",
+                  "original_cot_key", "ground_truth_key"
+            Example: {"prompt_key": "problem", "ground_truth_key": "solution"}
 
     Returns:
         Dictionary with:
             - reward_tensor: Token-level reward tensor [batch_size, seq_len]
             - reward_extra_info: Additional metrics for logging
     """
+    # Default field mapping
+    default_mapping = {
+        "prompt_key": "prompt",
+        "reward_model_key": "reward_model",
+        "question_key": "question",
+        "original_cot_key": "original_cot",
+        "ground_truth_key": "ground_truth",
+    }
+
+    # Merge with user-provided mapping
+    if field_mapping:
+        default_mapping.update(field_mapping)
+
+    prompt_key = default_mapping["prompt_key"]
+    reward_model_key = default_mapping.get("reward_model_key", "reward_model")
+    question_key = default_mapping["question_key"]
+    original_cot_key = default_mapping["original_cot_key"]
+    ground_truth_key = default_mapping["ground_truth_key"]
+
+    # Handle case where reward_model_key is None or empty (flat structure)
+    use_flat_structure = not reward_model_key or reward_model_key == "null"
+
     batch_size = data.batch.batch_size[0]
 
     # Decode prompts and responses
@@ -197,28 +226,49 @@ def compute_cot_rewriter_reward(
 
     for i in range(batch_size):
         # Get reward info from non_tensor_batch
-        reward_info = data.non_tensor_batch.get("reward_model", {})
-        if isinstance(reward_info, list):
-            reward_info = reward_info[i] if i < len(reward_info) else {}
+        if use_flat_structure:
+            # Use flat structure: read directly from non_tensor_batch
+            reward_info = {}
+        else:
+            # Use nested structure: read from reward_model_key
+            reward_info = data.non_tensor_batch.get(reward_model_key, {})
+            if isinstance(reward_info, list):
+                reward_info = reward_info[i] if i < len(reward_info) else {}
 
-        # Extract ground truth answer
-        answer = reward_info.get("ground_truth", "")
+        # Extract ground truth answer (try mapped key first, then fallbacks)
+        answer = reward_info.get(ground_truth_key, "")
+        if not answer:
+            answer = reward_info.get("ground_truth", "")
         if not answer:
             answer = reward_info.get("answer", "")
+        # Also check top-level non_tensor_batch
+        if not answer and ground_truth_key in data.non_tensor_batch:
+            gt_list = data.non_tensor_batch[ground_truth_key]
+            if isinstance(gt_list, list) and i < len(gt_list):
+                answer = gt_list[i]
         answers.append(answer)
 
         # Extract original CoT
         orig_cot = ""
-        if "original_cot" in data.non_tensor_batch:
-            orig_cots_list = data.non_tensor_batch["original_cot"]
+        # Check top-level non_tensor_batch first
+        if original_cot_key in data.non_tensor_batch:
+            orig_cots_list = data.non_tensor_batch[original_cot_key]
             if isinstance(orig_cots_list, list) and i < len(orig_cots_list):
                 orig_cot = orig_cots_list[i]
-        elif "original_cot" in reward_info:
+        # Then check reward_info
+        elif original_cot_key in reward_info:
+            orig_cot = reward_info.get(original_cot_key, "")
+        # Fallback to default keys
+        elif not orig_cot:
             orig_cot = reward_info.get("original_cot", "")
         original_cots.append(orig_cot)
 
         # Extract question (from prompt or metadata)
-        question = reward_info.get("question", prompts[i])
+        question = reward_info.get(question_key, "")
+        if not question:
+            question = reward_info.get("question", "")
+        if not question:
+            question = prompts[i]
         questions.append(question)
 
     # Get or create reward computer

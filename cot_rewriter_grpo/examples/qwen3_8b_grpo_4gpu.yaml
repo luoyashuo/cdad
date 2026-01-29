@@ -11,7 +11,7 @@
 
 hydra:
   searchpath:
-    - file://../verl/verl/trainer/config
+    - file://verl/verl/trainer/config
 
 defaults:
   - ppo_trainer
@@ -27,36 +27,27 @@ trainer:
   val_freq: 50
   device: cuda
   log_freq: 10
-  # Output directory with timestamp
-  default_local_dir: outputs/${trainer.project_name}/${trainer.experiment_name}/version_${now:%Y%m%d_%H%M%S}
+  # Output directory (timestamp will be added by code)
+  default_local_dir: /data-share/yeesuanAI08/lihaitao/luoys/checkpoints/cdad/rewrite/qwen3_8b_grpo_4gpu/${trainer.project_name}/${trainer.experiment_name}
   # 训练使用 3 张 GPU (GPU 1,2,3)
   n_gpus_per_node: 3
   nnodes: 1
+  # Logger configuration: console, swanlab, wandb, tensorboard
+  logger: ["console", "swanlab"]
 
-# ============ Data Configuration ============
-# NOTE: VERL requires Parquet format for training data.
-# If you have JSON/JSONL data, convert it first:
-#   bash scripts/grpo/convert_data.sh <input.jsonl> [output_dir] [train_ratio]
-#
-# Example:
-#   bash scripts/grpo/convert_data.sh data/raw/my_data.jsonl data/processed 0.9
-#
-# Expected JSONL format per line:
-#   {"question": "...", "original_cot": "...", "answer": "..."}
-#
-# See data/DATA_FORMAT.md for detailed format specification.
-# ===========================================
 data:
-  train_files: data/train.parquet
-  val_files: data/val.parquet
-  train_batch_size: 32
+  # Use original JSONL directly (field names will be auto-mapped by custom reward function):
+  train_files: /data-share/yeesuanAI08/lihaitao/luoys/data/cdad/cot_rewrite_max_fsf/train.jsonl
+  val_files: /data-share/yeesuanAI08/lihaitao/luoys/data/cdad/cot_rewrite_max_fsf/val.jsonl
+  train_batch_size: 33
   val_batch_size: 16
   gen_batch_size: 32
   max_prompt_length: 1024
-  max_response_length: 2048
+  max_response_length: 8192
   return_raw_chat: true
   dataloader_num_workers: 4
   reward_fn_key: reward_model
+  prompt_key: problem  # Specify that 'problem' field contains the prompt (not 'prompt')
 
 # ============ Actor/Rollout/Ref Configuration ============
 actor_rollout_ref:
@@ -66,34 +57,37 @@ actor_rollout_ref:
     # Actor Model 路径 (参与 GRPO 训练的主模型)
     path: /data-share/yeesuanAI08/lihaitao/luoys/hf_home/models/Qwen/Qwen3-8B
     trust_remote_code: true
-    dtype: bfloat16
-    # LoRA Configuration (set to null for full parameter training)
-    lora: null
+    # Enable gradient checkpointing for memory efficiency
+    enable_gradient_checkpointing: true
+    # LoRA Configuration (empty dict for full parameter training)
+    lora: {}
 
   actor:
     ppo_epochs: 1
     clip_ratio: 0.2
     entropy_coeff: 0.01
-    gradient_checkpointing: true
     grad_clip: 1.0
+    ppo_mini_batch_size: 33  # Mini-batch size for PPO training (should match train_batch_size)
+    ppo_micro_batch_size_per_gpu: 4  # Micro batch size per GPU for PPO training
 
     optim:
       lr: 1e-5
       weight_decay: 0.01
-      lr_scheduler: cosine
-      warmup_ratio: 0.03
+      lr_scheduler_type: cosine
+      lr_warmup_steps_ratio: 0.03
       min_lr_ratio: 0.1
-      total_training_steps: null
+      total_training_steps: -1
 
   rollout:
     name: vllm
     tensor_model_parallel_size: 1
-    gpu_memory_utilization: 0.45
-    mem_fraction_static: 0.8
+    gpu_memory_utilization: 0.7
+    dtype: bfloat16
+    log_prob_micro_batch_size_per_gpu: 4  # Micro batch size for log prob computation
     n: 8  # GRPO requires multiple samples per prompt
     temperature: 0.7
     top_p: 0.95
-    max_new_tokens: 2048
+    response_length: 8192
 
   ref:
     enable: false
@@ -111,30 +105,32 @@ critic:
   enable: false
 
 # ============ Reward Model Configuration ============
+# Set to false when using custom reward function
 reward_model:
-  enable: true
-  use_reward_loop: false
-  # 启用奖励模型独立资源池
-  enable_resource_pool: true
-  # 奖励模型使用 1 张 GPU (GPU 5)
-  n_gpus_per_node: 1
-  nnodes: 1
-  # 奖励模型并行策略
-  strategy: null
+  enable: false
 
-  custom_reward_function:
-    path: src/reward/combined_reward.py
-    name: compute_cot_rewriter_reward
-    reward_kwargs:
-      # Student Model (for cognitive reward)
-      student_model_path: /data-share/LLM/Qwen3-1.7B
-      # FSF Judge Model (for logic reward)
-      fsf_model_path: /data-share/yeesuanAI08/lihaitao/luoys/checkpoints/cdad/fsf_judge/qwen3_8b_fsf_judge/checkpoint-12000
-      # Device for reward models (single GPU)
-      device: cuda:5
-      # Reward weights
-      lambda_logic: 0.5
-      use_logic_reward: true
+# ============ Custom Reward Function Configuration ============
+# Define custom reward function at root level (not under reward_model)
+custom_reward_function:
+  path: /mnt/yeesuanAI08/lihaitao/luoys/projects/cdad/cot_rewriter_grpo/src/reward/combined_reward.py
+  name: compute_cot_rewriter_reward
+  reward_kwargs:
+    # Student Model (for cognitive reward)
+    student_model_path: /data-share/LLM/Qwen3-1.7B
+    # FSF Judge Model (for logic reward)
+    fsf_model_path: /data-share/yeesuanAI08/lihaitao/luoys/checkpoints/cdad/fsf_judge/qwen3_8b_fsf_judge/checkpoint-12000
+    # Device for reward models (single GPU)
+    device: cuda:5
+    # Reward weights
+    lambda_logic: 0.5
+    use_logic_reward: false
+    # Field mapping to adapt to raw data format (without data_source and reward_model wrapper)
+    field_mapping:
+      prompt_key: problem      # Use 'problem' field as prompt
+      reward_model_key: null   # No nested reward_model structure, read directly from top level
+      question_key: question   # Question field name
+      original_cot_key: thought  # Original CoT field name (your data uses 'thought')
+      ground_truth_key: solution  # Ground truth field name (your data uses 'solution')
 
 # ============ Reward Manager Configuration ============
 reward_manager:

@@ -948,5 +948,23 @@
       "assistant_tag": "assistant",
       "system_tag": "system"
     }
+  },
+  "fsf_reward_train": {
+    "file_name": "/data-share/yeesuanAI08/lihaitao/luoys/data/cdad/fsf_reward/train.jsonl",
+    "ranking": true,
+    "columns": {
+      "prompt": "instruction",
+      "chosen": "chosen",
+      "rejected": "rejected"
+    }
+  },
+  "fsf_reward_val": {
+    "file_name": "/data-share/yeesuanAI08/lihaitao/luoys/data/cdad/fsf_reward/val.jsonl",
+    "ranking": true,
+    "columns": {
+      "prompt": "instruction",
+      "chosen": "chosen",
+      "rejected": "rejected"
+    }
   }
 }

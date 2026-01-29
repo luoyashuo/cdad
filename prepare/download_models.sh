@@ -11,7 +11,7 @@ huggingface-cli download \
 
 export HF_ENDPOINT=https://hf-mirror.com
 export HF_HOME=/data-share/yeesuanAI08/lihaitao/luoys/hf_home
-model_name=Qwen/Qwen3-1.7B
+model_name=Qwen/Qwen3-4B
 local_dir=/data-share/yeesuanAI08/lihaitao/luoys/hf_home/models/${model_name}
 
 huggingface-cli download \
