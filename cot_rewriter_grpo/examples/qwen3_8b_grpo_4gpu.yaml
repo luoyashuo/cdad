@@ -133,6 +133,10 @@ custom_reward_function:
       ground_truth_key: solution  # Ground truth field name (your data uses 'solution')
 
 # ============ Reward Manager Configuration ============
+# Use custom CoT Rewriter reward manager via importlib
+# This manager properly interfaces with compute_cot_rewriter_reward (data, tokenizer) interface
 reward_manager:
-  source: register
-  name: naive
+  source: importlib
+  name: CoTRewriterRewardManager
+  module:
+    path: /mnt/yeesuanAI08/lihaitao/luoys/projects/cdad/cot_rewriter_grpo/src/reward/cot_rewriter_reward_manager.py
