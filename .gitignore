@@ -171,6 +171,11 @@ pyrightconfig.json
 
 # End of https://www.toptal.com/developers/gitignore/api/python,jupyternotebooks
 .venv/
+# 子文件的.venv也不追踪
+*/.venv/*
+*/logs/*
+
+
 ckpts/
 datasets/
 outputs/

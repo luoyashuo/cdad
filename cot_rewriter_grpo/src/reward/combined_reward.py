@@ -24,59 +24,49 @@ if PROJECT_ROOT not in sys.path:
 
 from verl import DataProto
 
-from .student_reward import VLLMStudentRewardClient
-from .fsf_reward import VLLMFSFJudge
+from .student_reward import HFStudentRewardClient
+from .fsf_reward import HFFSFJudge
 
 
 class CombinedRewardComputer:
     """
     Combined Reward Computer
 
-    Computes R = R_cog + lambda * R_logic using external vLLM services.
+    Computes R = R_cog + lambda * R_logic using HuggingFace Transformers directly.
     """
 
     def __init__(
         self,
-        student_vllm_url: str = "http://localhost:8100/v1",
-        student_model_name: str = "Qwen2.5-3B-Instruct",
-        fsf_vllm_url: str = "http://localhost:8101/v1",
-        fsf_model_name: str = "Qwen2.5-7B-Instruct",
+        student_model_path: str = "./models/Qwen3-1.7B",
+        fsf_model_path: str = "./models/Qwen3-8B",
+        device: str = "cuda:3",
         lambda_logic: float = 0.5,
         use_logic_reward: bool = True,
-        max_concurrent: int = 32,
-        timeout: float = 60.0,
     ):
         """
         Initialize Combined Reward Computer.
 
         Args:
-            student_vllm_url: URL for Student Model vLLM service
-            student_model_name: Name of Student Model
-            fsf_vllm_url: URL for FSF Judge vLLM service
-            fsf_model_name: Name of FSF Judge Model
+            student_model_path: Path to Student Model
+            fsf_model_path: Path to FSF Judge Model
+            device: Device to run reward models on (should be a single GPU)
             lambda_logic: Weight for logic reward
             use_logic_reward: Whether to use logic reward
-            max_concurrent: Maximum concurrent requests
-            timeout: Request timeout
         """
         self.lambda_logic = lambda_logic
         self.use_logic_reward = use_logic_reward
 
         # Initialize Student Reward client
-        self.student_client = VLLMStudentRewardClient(
-            vllm_base_url=student_vllm_url,
-            model_name=student_model_name,
-            timeout=timeout,
-            max_concurrent=max_concurrent,
+        self.student_client = HFStudentRewardClient(
+            model_path=student_model_path,
+            device=device,
         )
 
         # Initialize FSF Judge client (if needed)
         if use_logic_reward:
-            self.fsf_judge = VLLMFSFJudge(
-                vllm_base_url=fsf_vllm_url,
-                model_name=fsf_model_name,
-                timeout=timeout,
-                max_concurrent=max_concurrent,
+            self.fsf_judge = HFFSFJudge(
+                model_path=fsf_model_path,
+                device=device,
             )
         else:
             self.fsf_judge = None
@@ -114,7 +104,12 @@ class CombinedRewardComputer:
         )
 
         # Compute logic reward (if enabled)
-        if self.use_logic_reward and original_cots and all(c for c in original_cots):
+        if (
+            self.use_logic_reward
+            and self.fsf_judge
+            and original_cots
+            and all(c for c in original_cots)
+        ):
             logic_result = self.fsf_judge.compute_logic_reward(
                 original_cots=original_cots,
                 rewrite_cots=rewrite_cots,
@@ -128,10 +123,7 @@ class CombinedRewardComputer:
             rewrite_fsfs = [0.0] * batch_size
 
         # Combine rewards: R = R_cog + lambda * R_logic
-        total_rewards = [
-            c + self.lambda_logic * l
-            for c, l in zip(r_cog, r_logic)
-        ]
+        total_rewards = [c + self.lambda_logic * l for c, l in zip(r_cog, r_logic)]
 
         return {
             "cognitive_rewards": r_cog,
@@ -160,14 +152,11 @@ def get_reward_computer(**kwargs) -> CombinedRewardComputer:
 def compute_cot_rewriter_reward(
     data: DataProto,
     tokenizer: Any,
-    student_vllm_url: str = "http://localhost:8100/v1",
-    student_model_name: str = "Qwen2.5-3B-Instruct",
-    fsf_vllm_url: str = "http://localhost:8101/v1",
-    fsf_model_name: str = "Qwen2.5-7B-Instruct",
+    student_model_path: str = "./models/Qwen3-1.7B",
+    fsf_model_path: str = "./models/Qwen3-8B",
+    device: str = "cuda:3",
     lambda_logic: float = 0.5,
     use_logic_reward: bool = True,
-    max_concurrent: int = 32,
-    timeout: float = 60.0,
     **kwargs,
 ) -> Dict[str, Any]:
     """
@@ -178,14 +167,11 @@ def compute_cot_rewriter_reward(
     Args:
         data: VERL DataProto containing batch data
         tokenizer: Tokenizer for decoding
-        student_vllm_url: URL for Student Model service
-        student_model_name: Name of Student Model
-        fsf_vllm_url: URL for FSF Judge service
-        fsf_model_name: Name of FSF Judge Model
+        student_model_path: Path to Student Model
+        fsf_model_path: Path to FSF Judge Model
+        device: Device to run reward models on
         lambda_logic: Weight for logic reward
         use_logic_reward: Whether to use logic reward
-        max_concurrent: Maximum concurrent requests
-        timeout: Request timeout
 
     Returns:
         Dictionary with:
@@ -237,14 +223,11 @@ def compute_cot_rewriter_reward(
 
     # Get or create reward computer
     reward_computer = get_reward_computer(
-        student_vllm_url=student_vllm_url,
-        student_model_name=student_model_name,
-        fsf_vllm_url=fsf_vllm_url,
-        fsf_model_name=fsf_model_name,
+        student_model_path=student_model_path,
+        fsf_model_path=fsf_model_path,
+        device=device,
         lambda_logic=lambda_logic,
         use_logic_reward=use_logic_reward,
-        max_concurrent=max_concurrent,
-        timeout=timeout,
     )
 
     # Compute rewards
@@ -297,7 +280,8 @@ def compute_cot_rewriter_reward(
             "cognitive_rewards": result["cognitive_rewards"],
             "logic_rewards": result["logic_rewards"],
             "total_rewards": result["total_rewards"],
-            "mean_cognitive_reward": sum(result["cognitive_rewards"]) / len(result["cognitive_rewards"]),
+            "mean_cognitive_reward": sum(result["cognitive_rewards"])
+            / len(result["cognitive_rewards"]),
             "mean_logic_reward": sum(result["logic_rewards"]) / len(result["logic_rewards"]),
             "mean_total_reward": sum(result["total_rewards"]) / len(result["total_rewards"]),
             **result["extra_info"],

@@ -120,31 +120,6 @@ uv pip install torch==2.6.1
 uv run python src/data/dataset.py
 ```
 
-### 常见问题
-**Q: uv 安装失败？**
-A: 检查网络连接，或尝试使用国内镜像：
-```bash
-pip install uv -i https://pypi.tuna.tsinghua.edu.cn/simple
-```
-
-**Q: 虚拟环境激活问题？**
-A: Windows 用户使用：
-```cmd
-.venv\Scripts\activate
-```
-
-**Q: PyTorch 与 CUDA 版本不匹配？**
-A: 可以通过以下命令重新安装匹配版本：
-```bash
-uv pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
-```
-
-**Q: 缺少系统依赖？**
-A: 在 Ubuntu/Debian 上安装编译依赖：
-```bash
-sudo apt-get update
-sudo apt-get install -y build-essential libssl-dev libffi-dev python3-dev
-```
 
 ## 数据格式
 

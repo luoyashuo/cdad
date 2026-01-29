@@ -98,9 +98,27 @@ class CoTRewriterDataset:
         formatted = []
 
         for item in self.data:
-            question = item.get("question", "")
-            original_cot = item.get("original_cot", item.get("reasoning", ""))
-            answer = item.get("answer", item.get("ground_truth", ""))
+            # Support multiple field names for compatibility
+            question = (
+                item.get("question", "")
+                or item.get("problem", "")
+                or item.get("input", "")
+                or item.get("query", "")
+            )
+            original_cot = (
+                item.get("original_cot", "")
+                or item.get("reasoning", "")
+                or item.get("cot", "")
+                or item.get("chain_of_thought", "")
+                or item.get("solution", "")
+            )
+            answer = (
+                item.get("answer", "")
+                or item.get("ground_truth", "")
+                or item.get("target", "")
+                or item.get("output", "")
+                or item.get("label", "")
+            )
 
             # Build prompt
             prompt = REWRITE_PROMPT_TEMPLATE.format(

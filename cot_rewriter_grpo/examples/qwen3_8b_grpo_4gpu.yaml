@@ -1,13 +1,13 @@
 # CoT Rewriter GRPO Training Configuration
-# Hardware: 4 x A100-80G
+# Hardware: 4 x GPU (1,2,3,5)
 # Model: Qwen3-8B (Full Parameter or LoRA)
 #
 # Usage:
-#   bash scripts/run_train.sh examples/qwen3_8b_grpo_4gpu.yaml
+#   CUDA_VISIBLE_DEVICES=1,2,3,5 bash scripts/run_train.sh examples/qwen3_8b_grpo_4gpu.yaml
 #
 # Architecture:
-#   GPU 0-2: Actor Model (Qwen3-8B) + Rollout Engine
-#   GPU 3:   vLLM Services (Student + FSF Judge, started separately)
+#   GPU 1-3: Actor Model (Qwen3-8B) + Rollout Engine (训练过程)
+#   GPU 5:   Reward Models (Student + FSF Judge, 独立资源池)
 
 hydra:
   searchpath:
@@ -20,7 +20,7 @@ defaults:
 # ============ Experiment Configuration ============
 trainer:
   project_name: cot_rewriter_grpo
-  experiment_name: qwen3_8b_4xA100
+  experiment_name: qwen3_8b_4gpu
   total_epochs: 3
   total_training_steps: null
   save_freq: 100
@@ -29,8 +29,23 @@ trainer:
   log_freq: 10
   # Output directory with timestamp
   default_local_dir: outputs/${trainer.project_name}/${trainer.experiment_name}/version_${now:%Y%m%d_%H%M%S}
+  # 训练使用 3 张 GPU (GPU 1,2,3)
+  n_gpus_per_node: 3
+  nnodes: 1
 
 # ============ Data Configuration ============
+# NOTE: VERL requires Parquet format for training data.
+# If you have JSON/JSONL data, convert it first:
+#   bash scripts/grpo/convert_data.sh <input.jsonl> [output_dir] [train_ratio]
+#
+# Example:
+#   bash scripts/grpo/convert_data.sh data/raw/my_data.jsonl data/processed 0.9
+#
+# Expected JSONL format per line:
+#   {"question": "...", "original_cot": "...", "answer": "..."}
+#
+# See data/DATA_FORMAT.md for detailed format specification.
+# ===========================================
 data:
   train_files: data/train.parquet
   val_files: data/val.parquet
@@ -48,7 +63,8 @@ actor_rollout_ref:
   hybrid_engine: true
 
   model:
-    path: ./models/Qwen3-8B
+    # Actor Model 路径 (参与 GRPO 训练的主模型)
+    path: /data-share/yeesuanAI08/lihaitao/luoys/hf_home/models/Qwen/Qwen3-8B
     trust_remote_code: true
     dtype: bfloat16
     # LoRA Configuration (set to null for full parameter training)
@@ -98,30 +114,29 @@ critic:
 reward_model:
   enable: true
   use_reward_loop: false
+  # 启用奖励模型独立资源池
+  enable_resource_pool: true
+  # 奖励模型使用 1 张 GPU (GPU 5)
+  n_gpus_per_node: 1
+  nnodes: 1
+  # 奖励模型并行策略
+  strategy: null
 
   custom_reward_function:
     path: src/reward/combined_reward.py
     name: compute_cot_rewriter_reward
     reward_kwargs:
-      # vLLM Student Service (for cognitive reward)
-      student_vllm_url: http://localhost:8100/v1
-      student_model_name: Qwen2.5-3B-Instruct
-      # vLLM FSF Judge Service (for logic reward)
-      fsf_vllm_url: http://localhost:8101/v1
-      fsf_model_name: Qwen2.5-7B-Instruct
+      # Student Model (for cognitive reward)
+      student_model_path: /data-share/LLM/Qwen3-1.7B
+      # FSF Judge Model (for logic reward)
+      fsf_model_path: /data-share/yeesuanAI08/lihaitao/luoys/checkpoints/cdad/fsf_judge/qwen3_8b_fsf_judge/checkpoint-12000
+      # Device for reward models (single GPU)
+      device: cuda:5
       # Reward weights
       lambda_logic: 0.5
       use_logic_reward: true
-      # Async settings
-      max_concurrent: 32
-      timeout: 60.0
 
 # ============ Reward Manager Configuration ============
 reward_manager:
   source: register
   name: naive
-
-# ============ Resource Configuration ============
-trainer:
-  n_gpus_per_node: 3  # GPU 0-2 for training, GPU 3 for vLLM
-  nnodes: 1
