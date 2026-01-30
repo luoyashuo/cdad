@@ -62,11 +62,22 @@ export RAY_memory_monitor_refresh_ms=0
 export NCCL_DEBUG=WARN
 export TOKENIZERS_PARALLELISM=false
 
+# CRITICAL: Disable Ray Dashboard to avoid OpenTelemetry version conflicts
+export RAY_DASHBOARD_HOST=""
+export RAY_enable_dashboard=0
+
 # 强制 Ray 创建新的本地集群，不连接现有集群（避免权限问题）
 export RAY_ADDRESS=local
 
-# 可选: 设置 Python 路径
-export PYTHONPATH="${PROJECT_ROOT}:${PROJECT_ROOT}/src:${PYTHONPATH}"
+# 获取虚拟环境的 Python 路径，确保 Ray worker 使用正确的环境
+VENV_PATH="${PROJECT_ROOT}/.venv"
+if [ -d "$VENV_PATH" ]; then
+    export PYTHONPATH="${VENV_PATH}/lib/python3.12/site-packages:${PROJECT_ROOT}:${PROJECT_ROOT}/src:${PYTHONPATH}"
+    # 设置 Ray 使用的 Python 解释器
+    export RAY_PYTHON_HOME="${VENV_PATH}/bin/python"
+else
+    export PYTHONPATH="${PROJECT_ROOT}:${PROJECT_ROOT}/src:${PYTHONPATH}"
+fi
 
 echo ""
 echo "Environment:"
@@ -93,6 +104,14 @@ echo ""
 echo "Starting training..."
 echo "  Config: ${CONFIG_FILE}"
 echo "  Output log: ${LOG_FILE}"
+echo ""
+
+# 清理残留的 Ray 进程（避免冲突和权限问题）
+echo "Cleaning up any existing Ray processes..."
+ray stop --force 2>/dev/null || true
+pkill -f "ray::" 2>/dev/null || true
+sleep 2
+echo "Ray cleanup complete."
 echo ""
 
 # 进入项目目录

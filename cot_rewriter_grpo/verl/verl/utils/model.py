@@ -24,26 +24,19 @@ from typing import Optional
 
 import numpy as np
 import torch
-from tensordict.tensorclass import NonTensorData
 from torch import nn
 from transformers import (
     AutoConfig,
     AutoModel,
     AutoModelForCausalLM,
-    AutoModelForImageTextToText,
     AutoModelForSequenceClassification,
     AutoModelForTokenClassification,
+    AutoModelForVision2Seq,
     GenerationConfig,
     MistralForSequenceClassification,
     PretrainedConfig,
     PreTrainedModel,
 )
-
-# AutoModelForVision2Seq was removed in transformers 5.0.0, use AutoModelForImageTextToText instead
-try:
-    from transformers import AutoModelForVision2Seq
-except ImportError:
-    AutoModelForVision2Seq = AutoModelForImageTextToText
 from transformers.modeling_outputs import CausalLMOutputWithPast
 
 from verl.models.registry import ModelRegistry
@@ -538,7 +531,7 @@ def pad_packed_inputs(unpad_tokens: torch.Tensor, cu_seqlens, max_seqlen_in_batc
     return unpad_tokens, cu_seqlens, max_seqlen_in_batch
 
 
-def load_mcore_dist_weights(parallel_model, dist_weight_path, is_value_model=False, prefix=""):
+def load_mcore_dist_weights(parallel_model, dist_weight_path, is_value_model=False):
     from megatron.core import dist_checkpointing
     from megatron.core.dist_checkpointing.serialization import StrictHandling
 
@@ -547,7 +540,7 @@ def load_mcore_dist_weights(parallel_model, dist_weight_path, is_value_model=Fal
     # strict = StrictHandling.IGNORE_ALL if is_value_model else StrictHandling.ASSUME_OK_UNEXPECTED
     strict = StrictHandling.ASSUME_OK_UNEXPECTED
     for model in parallel_model:
-        ssd = unwrap_model(model).sharded_state_dict(prefix=prefix)
+        ssd = unwrap_model(model).sharded_state_dict()
         if is_value_model:
             for k in list(ssd.keys()):
                 if "output_layer" in k:
@@ -624,11 +617,7 @@ def patch_valuehead_model(model) -> None:
 
 
 def load_valuehead_model(local_path, torch_dtype, model_config, trust_remote_code):
-    from transformers import AutoModelForCausalLM, AutoModelForTokenClassification
-    try:
-        from transformers import AutoModelForVision2Seq
-    except ImportError:
-        AutoModelForVision2Seq = AutoModelForImageTextToText
+    from transformers import AutoModelForCausalLM, AutoModelForTokenClassification, AutoModelForVision2Seq
 
     try:
         model = AutoModelForTokenClassification.from_pretrained(
@@ -649,7 +638,7 @@ def load_valuehead_model(local_path, torch_dtype, model_config, trust_remote_cod
 
     from trl import AutoModelForCausalLMWithValueHead
 
-    if hasattr(AutoModelForVision2Seq, '_model_mapping') and type(model_config) in AutoModelForVision2Seq._model_mapping.keys():
+    if type(model_config) in AutoModelForVision2Seq._model_mapping.keys():
         module_class = AutoModelForVision2Seq
     else:
         module_class = AutoModelForCausalLM
@@ -667,7 +656,7 @@ def load_valuehead_model(local_path, torch_dtype, model_config, trust_remote_cod
 
 _architecture_to_auto_class = {
     "ForCausalLM": AutoModelForCausalLM,
-    "ForVision2Seq": AutoModelForImageTextToText,
+    "ForVision2Seq": AutoModelForVision2Seq,
     "ForTokenClassification": AutoModelForTokenClassification,
     "ForSequenceClassification": AutoModelForSequenceClassification,
 }
@@ -681,23 +670,17 @@ def get_hf_auto_model_class(hf_config):
         auto_class = next(k for k, v in hf_config.auto_map.items() if hf_config.architectures[0] in v)
         match auto_class:
             case "AutoModelForVision2Seq":
-                actor_module_class = AutoModelForImageTextToText
+                actor_module_class = AutoModelForVision2Seq
             case "AutoModelForCausalLM":
                 actor_module_class = AutoModelForCausalLM
-            case "AutoModelForImageTextToText":
-                actor_module_class = AutoModelForImageTextToText
             case _:
                 actor_module_class = AutoModel
     else:
         actor_module_class = AutoModel
-        # For VLM models, we use type to check instead of architecture
-        if type(hf_config) in AutoModelForImageTextToText._model_mapping.keys():
-            actor_module_class = AutoModelForImageTextToText
-        else:
-            for key, cls in _architecture_to_auto_class.items():
-                if key in hf_config.architectures[0]:
-                    actor_module_class = cls
-                    break
+        for key, cls in _architecture_to_auto_class.items():
+            if key in hf_config.architectures[0]:
+                actor_module_class = cls
+                break
 
     return actor_module_class
 
@@ -726,10 +709,6 @@ def extract_multi_modal_inputs(
         selected_batch_data = [batch_data[i] for i in indices if i < len(batch_data)]
 
     for inputs in selected_batch_data:
-        inputs = inputs.data if isinstance(inputs, NonTensorData) else inputs
-        # Mixed pure text and multi-modal dataset.
-        if inputs is None:
-            continue
         if "image_bound" in inputs:
             has_image_bound = True
         for key, value in inputs.items():

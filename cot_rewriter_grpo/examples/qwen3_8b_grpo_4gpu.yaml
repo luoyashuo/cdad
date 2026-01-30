@@ -25,6 +25,7 @@ trainer:
   total_training_steps: null
   save_freq: 100
   val_freq: 50
+  val_before_train: false  # Skip initial validation to speed up startup
   device: cuda
   log_freq: 10
   # Output directory (timestamp will be added by code)
@@ -33,21 +34,39 @@ trainer:
   n_gpus_per_node: 3
   nnodes: 1
   # Logger configuration: console, swanlab, wandb, tensorboard
-  logger: ["console", "swanlab"]
+  # Note: swanlab is temporarily disabled due to Ray worker environment issue
+  # To enable swanlab, make sure swanlab is installed in the Ray runtime environment
+  logger: ["swanlab","console"]
+
+  # ========== Rollout Data Logging (for human review) ==========
+  # Save rollout data to JSONL files for manual inspection
+  # Each step will create a separate file: {rollout_data_dir}/{step}.jsonl
+  # Contains: input (prompt), output (response), gts (ground truth), score, reward_extra_info
+  rollout_data_dir: /data-share/yeesuanAI08/lihaitao/luoys/checkpoints/cdad/rewrite/qwen3_8b_grpo_4gpu/rollout_data
+  # Optional: Also save validation data
+  validation_data_dir: /data-share/yeesuanAI08/lihaitao/luoys/checkpoints/cdad/rewrite/qwen3_8b_grpo_4gpu/validation_data
 
 data:
   # Use original JSONL directly (field names will be auto-mapped by custom reward function):
   train_files: /data-share/yeesuanAI08/lihaitao/luoys/data/cdad/cot_rewrite_max_fsf/train.jsonl
   val_files: /data-share/yeesuanAI08/lihaitao/luoys/data/cdad/cot_rewrite_max_fsf/val.jsonl
-  train_batch_size: 33
-  val_batch_size: 16
-  gen_batch_size: 32
-  max_prompt_length: 1024
-  max_response_length: 8192
+  # IMPORTANT: total samples = train_batch_size × rollout.n must be divisible by n_gpus_per_node
+  # With 3 GPUs and rollout.n=8: 18 × 8 = 144, 144 / 3 = 48 ✓
+  # Reduced from 30 to 18 for memory efficiency
+  train_batch_size: 18
+  val_batch_size: 9   # Also adjust to be divisible by 3
+  gen_batch_size: 18
+  max_prompt_length: 8192
+  max_response_length: 16384
   return_raw_chat: true
   dataloader_num_workers: 4
   reward_fn_key: reward_model
   prompt_key: problem  # Specify that 'problem' field contains the prompt (not 'prompt')
+  
+  # Custom dataset class to support JSONL files
+  custom_cls:
+    path: /mnt/yeesuanAI08/lihaitao/luoys/projects/cdad/cot_rewriter_grpo/src/data/rl_dataset_jsonl.py
+    name: RLHFDatasetJSONL
 
 # ============ Actor/Rollout/Ref Configuration ============
 actor_rollout_ref:
@@ -59,6 +78,8 @@ actor_rollout_ref:
     trust_remote_code: true
     # Enable gradient checkpointing for memory efficiency
     enable_gradient_checkpointing: true
+    # Disable remove_padding to avoid flash_attn dependency (flash_attn has version incompatibility)
+    use_remove_padding: false
     # LoRA Configuration (empty dict for full parameter training)
     lora: {}
 
@@ -67,8 +88,8 @@ actor_rollout_ref:
     clip_ratio: 0.2
     entropy_coeff: 0.01
     grad_clip: 1.0
-    ppo_mini_batch_size: 33  # Mini-batch size for PPO training (should match train_batch_size)
-    ppo_micro_batch_size_per_gpu: 4  # Micro batch size per GPU for PPO training
+    ppo_mini_batch_size: 18  # Mini-batch size for PPO training (should match train_batch_size)
+    ppo_micro_batch_size_per_gpu: 1  # Micro batch size per GPU (1 for max memory efficiency)
 
     optim:
       lr: 1e-5
@@ -81,13 +102,18 @@ actor_rollout_ref:
   rollout:
     name: vllm
     tensor_model_parallel_size: 1
-    gpu_memory_utilization: 0.7
+    # Reduced to 0.40 for maximum safety with Actor model
+    # Actor占用 ~30 GiB, vLLM需要 79.25 × 0.40 = 31.7 GiB
+    # Total: ~62 GiB < 79.25 GiB (留17 GiB buffer)
+    gpu_memory_utilization: 0.40
     dtype: bfloat16
-    log_prob_micro_batch_size_per_gpu: 4  # Micro batch size for log prob computation
+    log_prob_micro_batch_size_per_gpu: 1  # Match ppo_micro_batch_size for consistency
     n: 8  # GRPO requires multiple samples per prompt
     temperature: 0.7
     top_p: 0.95
     response_length: 8192
+    agent:
+      num_workers: 1  # Reduce to 1 to save GPU resources for reward computation
 
   ref:
     enable: false
@@ -108,6 +134,13 @@ critic:
 # Set to false when using custom reward function
 reward_model:
   enable: false
+  # Enable reward loop for custom reward function computation
+  use_reward_loop: true
+  num_workers: 1
+  # For RewardLoopWorker to use custom reward manager (used during validation)
+  reward_loop_source: importlib
+  reward_loop_module_path: /mnt/yeesuanAI08/lihaitao/luoys/projects/cdad/cot_rewriter_grpo/src/reward/cot_rewriter_reward_manager.py
+  reward_loop_class_name: CoTRewriterRewardManager
 
 # ============ Custom Reward Function Configuration ============
 # Define custom reward function at root level (not under reward_model)
@@ -119,8 +152,23 @@ custom_reward_function:
     student_model_path: /data-share/LLM/Qwen3-1.7B
     # FSF Judge Model (for logic reward)
     fsf_model_path: /data-share/yeesuanAI08/lihaitao/luoys/checkpoints/cdad/fsf_judge/qwen3_8b_fsf_judge/checkpoint-12000
-    # Device for reward models (single GPU)
-    device: cuda:5
+    # Device for reward models
+    # Note: RewardLoopWorker runs on CPU, actual GPU computation is done by remote Reward Server
+    # With CUDA_VISIBLE_DEVICES=1,2,3, only cuda:0, cuda:1, cuda:2 are available
+    # But we use remote student server on separate GPU, so this device setting is for FSF Judge only
+    device: cpu
+    # Allow CPU fallback when CUDA is not available in Ray workers
+    # This is needed because RewardLoopWorker may not have GPU assigned
+    allow_cpu: true
+    # ========== Remote Student Server Mode (Recommended for GPU) ==========
+    # Set use_remote_student=true to use a separate GPU server for student reward
+    # This allows Student Model to run on GPU even though RewardLoopWorker doesn't have GPU
+    # Before training, start the server:
+    #   CUDA_VISIBLE_DEVICES=5 python -m src.reward.student_reward_server --port 8765
+    # Or use the script:
+    #   bash scripts/grpo/start_reward_server.sh 5 8765
+    use_remote_student: true  # Use remote Reward Server on separate GPU
+    student_server_url: "http://localhost:8765"
     # Reward weights
     lambda_logic: 0.5
     use_logic_reward: false
@@ -140,3 +188,49 @@ reward_manager:
   name: CoTRewriterRewardManager
   module:
     path: /mnt/yeesuanAI08/lihaitao/luoys/projects/cdad/cot_rewriter_grpo/src/reward/cot_rewriter_reward_manager.py
+
+# ============ Ray Configuration ============
+# Configuration for Ray distributed training runtime environment
+ray_kwargs:
+  ray_init:
+    # CRITICAL: Disable Ray Dashboard to avoid OpenTelemetry version conflicts
+    # This prevents: TypeError: Meter.create_histogram() got an unexpected keyword argument
+    include_dashboard: false
+    # Disable dashboard host (belt and suspenders approach)
+    dashboard_host: ""
+    dashboard_port: null
+    # Ignore Ray version mismatch warnings
+    ignore_reinit_error: true
+    # Disable logging to reduce overhead
+    logging_level: "warning"
+    # Local mode configuration
+    local_mode: false
+    # Set object store memory (optional, let Ray decide automatically)
+    # object_store_memory: 10737418240  # 10 GB
+    # Namespace for this Ray cluster (optional, helps avoid conflicts)
+    namespace: "cot_rewriter_grpo"
+    # ========== Advanced Ray System Configuration ==========
+    # _system_config provides low-level control over Ray internals
+    # Used here to completely disable dashboard/metrics that cause OpenTelemetry conflicts
+    _system_config:
+      # Disable metrics collection at the system level
+      # This prevents the dashboard agent from attempting to use OpenTelemetry
+      # which causes: TypeError: Meter.create_histogram() got an unexpected keyword
+      # argument 'explicit_bucket_boundaries_advisory'
+      enable_metrics_collection: false
+      # Reduce agent registration timeout to fail fast if dashboard still tries to start
+      agent_register_timeout_ms: 100
+    runtime_env:
+      # Ensure Ray workers use the correct Python environment
+      # This helps resolve module import issues in distributed training
+      env_vars:
+        PYTHONPATH: "/mnt/yeesuanAI08/lihaitao/luoys/projects/cdad/cot_rewriter_grpo/.venv/lib/python3.12/site-packages:/mnt/yeesuanAI08/lihaitao/luoys/projects/cdad/cot_rewriter_grpo:/mnt/yeesuanAI08/lihaitao/luoys/projects/cdad/cot_rewriter_grpo/src"
+        TOKENIZERS_PARALLELISM: "false"
+        RAY_DEDUP_LOGS: "1"
+        # CRITICAL: Disable dashboard via environment variables (multiple methods for robustness)
+        RAY_DASHBOARD_HOST: ""
+        RAY_enable_dashboard: "0"
+        # GRPO 训练只使用 3 张卡，Reward Server 在独立 GPU 上运行
+        # 不需要把 Reward GPU 暴露给 Ray workers
+        CUDA_VISIBLE_DEVICES: "1,2,3"
+  timeline_json_file: null

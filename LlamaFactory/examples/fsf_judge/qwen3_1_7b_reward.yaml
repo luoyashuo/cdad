@@ -6,7 +6,7 @@ trust_remote_code: true
 stage: rm
 do_train: true
 finetuning_type: full
-deepspeed: examples/deepspeed/ds_z2_config.json  # choices: [ds_z0_config.json, ds_z2_config.json, ds_z3_config.json]
+deepspeed: examples/deepspeed/ds_z3_config.json  # choices: [ds_z0_config.json, ds_z2_config.json, ds_z3_config.json]
 
 ### dataset
 dataset: fsf_reward_train
@@ -20,25 +20,27 @@ dataloader_num_workers: 4
 output_dir: /data-share/yeesuanAI08/lihaitao/luoys/checkpoints/cdad/fsf_reward/qwen3_1_7b_reward
 logging_steps: 10
 save_strategy: steps
-save_steps: 6000
+save_steps: 4000
 plot_loss: true
-overwrite_output_dir: true
+overwrite_output_dir: false
 save_only_model: false
+save_safetensors: false  # Use torch format to avoid shared tensor error with Qwen
+save_total_limit: 3  # Keep only the most recent 3 checkpoints
 report_to: swanlab  # choices: [none, wandb, tensorboard, swanlab, mlflow]
 
 ### train
-per_device_train_batch_size: 4
+per_device_train_batch_size: 1
 gradient_accumulation_steps: 1
 learning_rate: 2.0e-5
-num_train_epochs: 1.0
+num_train_epochs: 2.0
 lr_scheduler_type: cosine
 warmup_ratio: 0.1
 bf16: true
 ddp_timeout: 180000000
-resume_from_checkpoint: null
+resume_from_checkpoint: last
 
 ### eval
 eval_dataset: fsf_reward_val
-per_device_eval_batch_size: 2
+per_device_eval_batch_size: 1
 eval_strategy: steps
 eval_steps: 2000

@@ -201,8 +201,17 @@ class FSDPCheckpointManager(BaseCheckpointManager):
         # record the previous global step
         self.previous_global_step = global_step
 
-        if self.rank == 0:
-            self.ensure_checkpoint_capacity(max_ckpt_to_keep)
+        # remove previous local_path, only rank 0 should do this
+        if (
+            self.rank == 0
+            and max_ckpt_to_keep
+            and isinstance(max_ckpt_to_keep, int)
+            and max_ckpt_to_keep > 0
+            and len(self.previous_saved_paths) >= max_ckpt_to_keep
+        ):
+            keep_start = len(self.previous_saved_paths) - max_ckpt_to_keep + 1
+            self.remove_previous_save_local_path(self.previous_saved_paths[:keep_start])
+            self.previous_saved_paths = self.previous_saved_paths[keep_start:]
 
         local_path = local_mkdir_safe(local_path)
         torch.distributed.barrier()
@@ -267,9 +276,6 @@ class FSDPCheckpointManager(BaseCheckpointManager):
                     # if the generation config isn't available, we don't save it
                     pass
 
-            if hasattr(model_config, "auto_map") and None in model_config.auto_map:
-                model_config.auto_map = {k: v for k, v in model_config.auto_map.items() if k is not None}
-
             model_config.save_pretrained(hf_config_tokenizer_path)
             if self.processing_class is not None:
                 self.processing_class.save_pretrained(hf_config_tokenizer_path)
@@ -325,13 +331,10 @@ class FSDPCheckpointManager(BaseCheckpointManager):
 
                         auto_model_cls = AutoModelForImageTextToText
                     else:
-                        # transformers < 4.54.0 uses AutoModelForVision2Seq (removed in 5.0.0)
-                        try:
-                            from transformers import AutoModelForVision2Seq
-                            auto_model_cls = AutoModelForVision2Seq
-                        except ImportError:
-                            from transformers import AutoModelForImageTextToText
-                            auto_model_cls = AutoModelForImageTextToText
+                        # transformers < 4.54.0 uses AutoModelForVision2Seq
+                        from transformers import AutoModelForVision2Seq
+
+                        auto_model_cls = AutoModelForVision2Seq
                 else:
                     raise NotImplementedError(f"Unknown architecture {model_config['architectures']}")
 
@@ -361,5 +364,4 @@ class FSDPCheckpointManager(BaseCheckpointManager):
             # wait for rank0 to dump hf_model to local
             torch.distributed.barrier()
 
-        if self.rank == 0:
-            self.register_checkpoint(local_path, max_ckpt_to_keep)
+        self.previous_saved_paths.append(local_path)

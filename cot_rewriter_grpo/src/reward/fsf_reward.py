@@ -17,6 +17,55 @@ import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM
 
 
+def get_available_device(preferred_device: str = "cuda:3", allow_cpu: bool = True) -> torch.device:
+    """
+    Get available device for model loading.
+    
+    Args:
+        preferred_device: Preferred CUDA device (e.g., "cuda:3", "cuda:0")
+        allow_cpu: If True, fallback to CPU when CUDA is not available.
+                  If False, raise RuntimeError when CUDA is not available.
+    
+    Returns:
+        torch.device: Available device (CUDA or CPU)
+    
+    Raises:
+        RuntimeError: If CUDA is not available and allow_cpu is False
+    """
+    if not torch.cuda.is_available():
+        if allow_cpu:
+            print(f"[HFFSFJudge] CUDA is not available. Using CPU as fallback.")
+            return torch.device("cpu")
+        else:
+            raise RuntimeError(
+                "[HFFSFJudge] CUDA is not available. "
+                "FSF Judge model requires GPU to run. "
+                "Please ensure CUDA_VISIBLE_DEVICES is set correctly in ray_kwargs.ray_init.runtime_env.env_vars "
+                "Or set reward_kwargs.allow_cpu=true to allow CPU fallback (slower)."
+            )
+    
+    try:
+        device = torch.device(preferred_device)
+        # Test if device is accessible by creating a small tensor
+        _ = torch.tensor([1.0], device=device)
+        return device
+    except RuntimeError as e:
+        # Preferred device not available, try cuda:0
+        try:
+            device = torch.device("cuda:0")
+            _ = torch.tensor([1.0], device=device)
+            print(f"[HFFSFJudge] Preferred device {preferred_device} not available, using cuda:0")
+            return device
+        except RuntimeError:
+            if allow_cpu:
+                print(f"[HFFSFJudge] No CUDA device available, using CPU as fallback")
+                return torch.device("cpu")
+            raise RuntimeError(
+                f"[HFFSFJudge] No CUDA device available. "
+                f"Preferred device {preferred_device} failed with: {e}"
+            ) from e
+
+
 class HFFSFJudge:
     """
     HuggingFace FSF (Failed Step Fraction) Judge
@@ -55,26 +104,51 @@ Output JSON only:"""
         model_path: str = "./models/Qwen3-8B",
         device: str = "cuda:3",
         dtype: torch.dtype = torch.bfloat16,
+        allow_cpu: bool = True,
     ):
         """
         Initialize FSF Judge client.
 
         Args:
             model_path: Path to FSF Judge Model
-            device: Device to run model on
-            dtype: Precision (bfloat16 recommended for GPU)
+            device: Preferred device to run model on (will fall back to CPU if not available)
+            dtype: Precision (bfloat16 recommended for GPU, float32 for CPU)
+            allow_cpu: If True, allow fallback to CPU when CUDA is not available
         """
-        self.device = torch.device(device)
-        self.dtype = dtype
+        # Get available device (fallback to CPU if CUDA not available and allow_cpu=True)
+        self.device = get_available_device(device, allow_cpu=allow_cpu)
+        
+        # Use float32 for CPU (bfloat16 not well supported on CPU)
+        if self.device.type == "cpu":
+            self.dtype = torch.float32
+            print(f"[HFFSFJudge] Using float32 for CPU")
+        else:
+            self.dtype = dtype
 
-        print(f"Loading FSF Judge Model from {model_path}...")
+        print(f"Loading FSF Judge Model from {model_path} on {self.device}...")
         self.tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
-        self.model = AutoModelForCausalLM.from_pretrained(
-            model_path,
-            trust_remote_code=True,
-            torch_dtype=dtype,
-            device_map=self.device,
-        )
+        
+        # Set pad_token if not set (important for batch processing)
+        if self.tokenizer.pad_token is None:
+            self.tokenizer.pad_token = self.tokenizer.eos_token
+        
+        # Load model with appropriate device mapping
+        if self.device.type == "cpu":
+            # For CPU, don't use device_map, load to CPU directly
+            self.model = AutoModelForCausalLM.from_pretrained(
+                model_path,
+                trust_remote_code=True,
+                torch_dtype=self.dtype,
+            )
+            self.model = self.model.to(self.device)
+        else:
+            # For GPU, use device_map
+            self.model = AutoModelForCausalLM.from_pretrained(
+                model_path,
+                trust_remote_code=True,
+                torch_dtype=self.dtype,
+                device_map=self.device,
+            )
         self.model.eval()
 
     def _parse_fsf(self, text: str) -> float:

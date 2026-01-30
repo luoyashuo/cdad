@@ -1,5 +1,5 @@
 #!/bin/bash
-
+export DISABLE_VERSION_CHECK=1
 # 防止重复执行检测
 PID_FILE="/tmp/train_fsf_judge.pid"
 if [ -f "$PID_FILE" ]; then
@@ -21,13 +21,11 @@ trap 'rm -f "$PID_FILE"' EXIT
 USER=$(whoami)
 VENV_PATH="/data-share/yeesuanAI08/lihaitao/luoys/projects/cdad/.venv/bin/activate"
 LLAMAFACTORY_PATH="/data-share/yeesuanAI08/lihaitao/luoys/projects/cdad/LlamaFactory"
-LOG_PATH="/data-share/yeesuanAI08/lihaitao/luoys/projects/cdad/cot_rewriter_grpo/logs/judge/train_fsf_judge.log"
 
-    # 训练配置
-    SINGLE_CARD_YAML="examples/fsf_judge/qwen3_1_7b_judge.yaml"
-    SINGLE_CARD_CKPT="/data-share/yeesuanAI08/lihaitao/luoys/checkpoints/cdad/judge/qwen3_1_7b_fsf_judge"  # 与yaml中的output_dir一致
-    MULTI_CARD_YAML="examples/fsf_judge/qwen3_8b_judge.yaml"
-    MULTI_CARD_CKPT="/data-share/yeesuanAI08/lihaitao/luoys/checkpoints/cdad/judge/qwen3_8b_judge"
+# 训练配置
+TRAIN_YAML="examples/fsf_judge/qwen3_1_7b_judge.yaml"
+TRAIN_CKPT="/data-share/yeesuanAI08/lihaitao/luoys/checkpoints/cdad/judge/qwen3_1_7b_fsf_judge"  # 与yaml中的output_dir一致
+LOG_DIR="/data-share/yeesuanAI08/lihaitao/luoys/projects/cdad/cot_rewriter_grpo/logs/judge"
 
 # 信号处理
 stop_flag=0
@@ -126,62 +124,54 @@ kill_user_processes() {
     done < <(nvidia-smi pmon -c 1 2>/dev/null | awk '{print $1, $2}')
 }
 
+# 函数：删除指定GPU的旧日志文件
+clean_old_logs() {
+    local gpu_id="$1"
+    local old_logs="${LOG_DIR}/train_fsf_judge_*_gpu_${gpu_id}.log"
+    if ls $old_logs 1> /dev/null 2>&1; then
+        echo "删除GPU $gpu_id 的旧日志文件..."
+        rm -f $old_logs
+    fi
+}
+
+# 函数：生成带时间戳的日志文件路径
+generate_log_path() {
+    local gpu_id="$1"
+    local timestamp=$(date +"%Y%m%d_%H%M%S")
+    local log_file="${LOG_DIR}/train_fsf_judge_${timestamp}_gpu_${gpu_id}.log"
+    echo "$log_file"
+}
+
 # 函数：执行单卡训练
 run_single_card_training() {
     local cuda_visible_devices="$1"
+
+    # 删除该GPU的旧日志
+    clean_old_logs "$cuda_visible_devices"
+
+    local log_path=$(generate_log_path "$cuda_visible_devices")
+
     echo "执行单卡训练，CUDA_VISIBLE_DEVICES=$cuda_visible_devices"
-    
+    echo "日志文件: $log_path"
+
     export CUDA_VISIBLE_DEVICES="$cuda_visible_devices"
     export DISABLE_VERSION_CHECK=1
     export FORCE_TORCHRUN=1
     source "$VENV_PATH"
     cd "$LLAMAFACTORY_PATH"
-    
+
     # 执行训练（使用 overwrite_output_dir 确保覆盖）
-    nohup llamafactory-cli train "$SINGLE_CARD_YAML" 2>&1 > "$LOG_PATH" &
+    nohup llamafactory-cli train "$TRAIN_YAML" 2>&1 > "$log_path" &
     TRAIN_PID=$!
     echo "训练进程PID: $TRAIN_PID"
-    
+
     # 等待训练进程稳定运行（确保GPU已经被占用）
     echo "等待训练进程稳定运行..."
     sleep 180
-    
+
     # 等待训练完成
     wait "$TRAIN_PID"
     echo "训练完成"
-}
-
-# 函数：执行多卡训练
-run_multi_card_training() {
-    local cuda_visible_devices="$1"
-    echo "执行多卡训练，CUDA_VISIBLE_DEVICES=$cuda_visible_devices"
-    
-    export CUDA_VISIBLE_DEVICES="$cuda_visible_devices"
-    source "$VENV_PATH"
-    cd "$LLAMAFACTORY_PATH"
-    
-    nohup llamafactory-cli train "$MULTI_CARD_YAML" 2>&1 > "${LOG_PATH%.log}_multi.log" &
-    TRAIN_PID=$!
-    echo "训练进程PID: $TRAIN_PID"
-    
-    # 等待训练进程稳定运行（确保GPU已经被占用）
-    echo "等待训练进程稳定运行..."
-    sleep 180
-    
-    # 等待训练完成
-    wait "$TRAIN_PID"
-    echo "训练完成"
-}
-
-# 函数：判断是否是多卡配置
-is_multi_card() {
-    local cuda_visible_devices="$1"
-    # 如果包含多个GPU ID（用逗号分隔），则认为是多卡
-    if [[ "$cuda_visible_devices" == *","* ]]; then
-        return 0  # 多卡
-    else
-        return 1  # 单卡
-    fi
 }
 
 # 主函数
@@ -226,22 +216,39 @@ main() {
         kill_user_processes "$target_gpus"
     fi
     
-    # 确保训练目录存在
-    mkdir -p "$(dirname "$LOG_PATH")"
-    
+    # 确保日志目录存在
+    mkdir -p "$LOG_DIR"
+
+    # 将GPU列表转换为数组（支持逗号分隔或空格分隔）
+    IFS=', ' read -ra gpu_array <<< "$target_gpus"
+    echo "将在以下GPU上分别启动单卡训练: ${gpu_array[*]}"
+
     while [ $stop_flag -eq 0 ]; do
-        if is_multi_card "$target_gpus"; then
-            run_multi_card_training "$target_gpus"
-        else
-            run_single_card_training "$target_gpus"
-        fi
-        
+        # 存储所有训练进程的PID
+        declare -a train_pids=()
+
+        # 为每个GPU启动单独的单卡训练
+        for gpu_id in "${gpu_array[@]}"; do
+            run_single_card_training "$gpu_id" &
+            train_pids+=($!)
+            echo "GPU $gpu_id 训练后台进程PID: ${train_pids[-1]}"
+            # 稍等一下避免日志文件时间戳冲突
+            sleep 1
+        done
+
+        # 等待所有训练进程完成
+        echo "等待所有GPU训练完成..."
+        for pid in "${train_pids[@]}"; do
+            wait "$pid" 2>/dev/null
+        done
+        echo "本轮所有训练完成"
+
         # 检查是否需要停止
         if [ $stop_flag -eq 1 ]; then
             echo "退出循环训练"
             break
         fi
-        
+
         echo "等待3秒后开始下一轮训练..."
         sleep 3
     done

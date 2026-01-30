@@ -40,6 +40,11 @@ def setup_environment():
     os.environ.setdefault("RAY_DEDUP_LOGS", "1")
     os.environ.setdefault("RAY_memory_monitor_refresh_ms", "0")
 
+    # CRITICAL: Disable Ray Dashboard to avoid OpenTelemetry version conflicts
+    # This prevents: TypeError: Meter.create_histogram() got an unexpected keyword argument
+    os.environ["RAY_DASHBOARD_HOST"] = ""  # Empty string disables dashboard
+    os.environ["RAY_enable_dashboard"] = "0"
+
     # NCCL configuration
     os.environ.setdefault("NCCL_DEBUG", "WARN")
 
@@ -173,13 +178,21 @@ def main(config: DictConfig):
     # IMPORTANT: Use run_ppo() instead of main()
     # main() is decorated with @hydra.main and can't be called with config directly
     from verl.trainer.main_ppo import run_ppo
+    import ray
 
     print("\nStarting VERL GRPO training...")
     print("Note: Ray will be initialized by run_ppo() internally")
     print("-" * 60)
 
+    # CRITICAL: Stop any existing Ray instances to avoid conflicts
+    # This prevents "Failed to register worker to Raylet" errors
+    if ray.is_initialized():
+        print("Ray is already initialized, shutting it down first...")
+        ray.shutdown()
+
     try:
         # run_ppo handles Ray initialization internally
+        # The ray_kwargs in config will be used for initialization
         run_ppo(config)
         print("\nTraining completed successfully!")
 

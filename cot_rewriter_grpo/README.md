@@ -112,17 +112,17 @@ uv venv --python 3.12
 # 激活虚拟环境
 source .venv/bin/activate
 
-uv pip install torch==2.6.0 torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
 
 # 安装 VERL 框架（在父目录的 verl 中）
 cd verl
 uv pip install -e .
-uv pip install vllm==0.10.2
 uv pip install transformers==4.55.0
 uv pip install zmq
 uv pip install swanlab
 
-
+uv pip install torch==2.6.0 torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
+uv pip install https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.3/flash_attn-2.7.3+cu12torch2.6cxx11abiFALSE-cp312-cp312-linux_x86_64.whl
+uv pip install vllm==0.8.5.post1
 ```
 
 **主要依赖说明：**

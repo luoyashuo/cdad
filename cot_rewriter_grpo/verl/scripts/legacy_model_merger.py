@@ -54,16 +54,11 @@ from torch.distributed._tensor import Placement, Shard
 from transformers import (
     AutoConfig,
     AutoModelForCausalLM,
-    AutoModelForImageTextToText,
     AutoModelForTokenClassification,
+    AutoModelForVision2Seq,
     GenerationConfig,
     PretrainedConfig,
 )
-
-try:
-    from transformers import AutoModelForVision2Seq
-except ImportError:
-    AutoModelForVision2Seq = AutoModelForImageTextToText
 
 try:
     # for torch 2.5+
@@ -137,7 +132,7 @@ class BaseModelMerger(ABC):
         elif "ForCausalLM" in architecture:
             return AutoModelForCausalLM
         elif "ForConditionalGeneration" in architecture:
-            return AutoModelForImageTextToText
+            return AutoModelForVision2Seq
 
         raise NotImplementedError(f"Unknown architecture {self.model_config.architectures}")
 

@@ -6,17 +6,35 @@ which expects (data, tokenizer, ...) arguments instead of the standard
 (data_source, solution_str, ground_truth, extra_info) interface.
 """
 
+import asyncio
 import inspect
 from typing import Any, Optional
 
+import torch
 from omegaconf import DictConfig
 from verl.experimental.reward_loop.reward_manager import register
-
 from verl import DataProto
 from verl.experimental.reward_loop.reward_manager.base import RewardManagerBase
 
 
-@register("cot_rewriter_reward_manager")  # 注册名称，用于配置文件引用
+# 修改注册装饰器，允许重复注册相同的类
+def safe_register(name):
+    def decorator(cls):
+        try:
+            from verl.experimental.reward_loop.reward_manager.registry import (
+                REWARD_LOOP_MANAGER_REGISTRY,
+            )
+
+            # 允许重复注册相同的类
+            REWARD_LOOP_MANAGER_REGISTRY[name] = cls
+        except Exception:
+            pass
+        return cls
+
+    return decorator
+
+
+@safe_register("cot_rewriter_reward_manager")
 class CoTRewriterRewardManager(RewardManagerBase):
     """Reward manager specifically designed for CoT Rewriter GRPO training.
 
@@ -70,6 +88,68 @@ class CoTRewriterRewardManager(RewardManagerBase):
         self.num_examine = num_examine
         self.reward_fn_key = reward_fn_key
 
+    def __call__(self, data: DataProto, return_dict: bool = False):
+        """Make the manager callable like traditional reward managers.
+
+        This method provides compatibility with the existing reward manager interface
+        by wrapping the async run_single method in a synchronous call.
+
+        Args:
+            data: DataProto object containing the batch data
+            return_dict: Whether to return a dictionary with reward_tensor and reward_extra_info
+
+        Returns:
+            If return_dict=True: dict with "reward_tensor" and "reward_extra_info"
+            If return_dict=False: torch.Tensor of rewards
+        """
+        batch_size = len(data)
+
+        # Process each item in the batch
+        all_rewards = []
+        all_extra_infos = {}
+
+        for i in range(batch_size):
+            data_item = data[
+                i : i + 1
+            ]  # Get single item as DataProto with batch_size=1
+
+            # Run the async run_single method
+            result = self.loop.run_until_complete(self.run_single(data_item))
+
+            all_rewards.append(result["reward_score"])
+
+            # Collect extra info
+            for key, value in result.get("reward_extra_info", {}).items():
+                if key not in all_extra_infos:
+                    all_extra_infos[key] = []
+                all_extra_infos[key].append(value)
+
+        # Build reward_tensor
+        response_length = data.batch["responses"].shape[1]
+        device = data.batch["responses"].device
+        reward_tensor = torch.zeros(batch_size, response_length, device=device)
+
+        # Get actual sequence lengths
+        response_mask = data.batch.get("response_mask", None)
+        if response_mask is not None:
+            seq_lengths = response_mask.sum(dim=1).long() - 1
+            seq_lengths = seq_lengths.clamp(min=0, max=response_length - 1)
+        else:
+            seq_lengths = torch.full(
+                (batch_size,), response_length - 1, dtype=torch.long, device=device
+            )
+
+        # Assign reward to last valid token of each sequence
+        for i in range(batch_size):
+            reward_tensor[i, seq_lengths[i]] = all_rewards[i]
+
+        if return_dict:
+            return {
+                "reward_tensor": reward_tensor,
+                "reward_extra_info": all_extra_infos,
+            }
+        return reward_tensor
+
     async def run_single(self, data: DataProto) -> dict:
         """Run reward computation for a single data item.
 
@@ -119,9 +199,19 @@ class CoTRewriterRewardManager(RewardManagerBase):
                 extra_info = result.get("reward_extra_info", {})
                 score = extra_info.get("mean_total_reward", 0.0)
 
-            # Copy all extra info
+            # Copy extra info, but unwrap single-element lists to scalars
+            # because compute_cot_rewriter_reward returns batch-level lists (batch_size=1)
+            # and VERL's agent_loop.py:778 expects scalar values per sample
             for key, value in result.get("reward_extra_info", {}).items():
-                reward_extra_info[key] = value
+                # Unwrap single-element lists to scalars
+                if isinstance(value, (list, tuple)) and len(value) == 1:
+                    reward_extra_info[key] = value[0]
+                elif isinstance(value, (list, tuple)) and len(value) > 1:
+                    # Skip variable-length lists (like token_log_probs)
+                    # as they break numpy array conversion
+                    continue
+                else:
+                    reward_extra_info[key] = value
         else:
             # Scalar result
             score = float(result)

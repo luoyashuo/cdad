@@ -108,6 +108,13 @@ Examples:
         default="LlamaFactory/data/dataset_info.json",
         help="dataset_info.json 的路径（默认: LlamaFactory/data/dataset_info.json）",
     )
+    parser.add_argument(
+        "--min-fsf-gap",
+        "-g",
+        type=float,
+        default=0.0,
+        help="FSF 差值的最小值（默认: 0.0）。只有当 rejected 和 chosen 的 FSF 差值大于等于此值时才会保留该条目",
+    )
 
     return parser.parse_args()
 
@@ -133,7 +140,9 @@ def get_fsf_from_thought(thought: Dict[str, Any]) -> Optional[float]:
     return first_graph.get("fsf", 0.0)
 
 
-def build_dpo_entry(question: str, chosen_thought: Dict[str, Any], rejected_thought: Dict[str, Any]) -> Dict[str, Any]:
+def build_dpo_entry(
+    question: str, chosen_thought: Dict[str, Any], rejected_thought: Dict[str, Any]
+) -> Dict[str, Any]:
     """
     构建 DPO 训练数据条目
 
@@ -145,11 +154,11 @@ def build_dpo_entry(question: str, chosen_thought: Dict[str, Any], rejected_thou
     Returns:
         DPO 格式的数据条目
     """
-    # 构建 chosen 内容：thought + full_response
-    chosen_content = f"{chosen_thought.get('thought', '')}\n\n{chosen_thought.get('full_response', '')}".strip()
-    
-    # 构建 rejected 内容：thought + full_response
-    rejected_content = f"{rejected_thought.get('thought', '')}\n\n{rejected_thought.get('full_response', '')}".strip()
+    # 构建 chosen 内容：thought
+    chosen_content = f"{chosen_thought.get('thought', '')}".strip()
+
+    # 构建 rejected 内容：thought
+    rejected_content = f"{rejected_thought.get('thought', '')}".strip()
 
     return {
         "instruction": question.strip(),
@@ -161,12 +170,15 @@ def build_dpo_entry(question: str, chosen_thought: Dict[str, Any], rejected_thou
     }
 
 
-def process_single_file(input_path: str) -> List[Dict[str, Any]]:
+def process_single_file(
+    input_path: str, min_fsf_gap: float = 0.0
+) -> List[Dict[str, Any]]:
     """
     处理单个输入文件，生成 DPO 训练数据
 
     Args:
         input_path: 输入 JSONL 文件路径
+        min_fsf_gap: FSF 差值的最小值。只有当 rejected 和 chosen 的 FSF 差值大于等于此值时才会保留该条目
 
     Returns:
         DPO 训练数据条目列表
@@ -210,9 +222,20 @@ def process_single_file(input_path: str) -> List[Dict[str, Any]]:
 
             # 按 FSF 排序，找到最低和最高的
             thoughts_with_fsf.sort(key=lambda x: x[1])
-            
+
             chosen_thought = thoughts_with_fsf[0][0]  # FSF 最低的
             rejected_thought = thoughts_with_fsf[-1][0]  # FSF 最高的
+
+            # 检查 FSF 差值是否满足最小要求
+            chosen_fsf = get_fsf_from_thought(chosen_thought)
+            rejected_fsf = get_fsf_from_thought(rejected_thought)
+
+            if (
+                chosen_fsf is None
+                or rejected_fsf is None
+                or (rejected_fsf - chosen_fsf) < min_fsf_gap
+            ):
+                continue
 
             # 构建 DPO 条目
             entry = build_dpo_entry(question, chosen_thought, rejected_thought)
@@ -251,7 +274,7 @@ def split_train_val(
 def print_statistics(entries: List[Dict[str, Any]], name: str = "Dataset"):
     """打印数据统计信息"""
     total = len(entries)
-    
+
     if total == 0:
         print(f"\n{name} Statistics: 0 entries")
         return
@@ -274,7 +297,9 @@ def save_jsonl(entries: List[Dict[str, Any]], output_path: str):
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
 
-def register_to_dataset_info(dataset_info_path: str, dataset_name: str, file_path: str) -> bool:
+def register_to_dataset_info(
+    dataset_info_path: str, dataset_name: str, file_path: str
+) -> bool:
     """
     将数据集注册到 dataset_info.json
 
@@ -288,38 +313,25 @@ def register_to_dataset_info(dataset_info_path: str, dataset_name: str, file_pat
     """
     try:
         # 读取 dataset_info.json
-        with open(dataset_info_path, 'r', encoding='utf-8') as f:
+        with open(dataset_info_path, "r", encoding="utf-8") as f:
             dataset_info = json.load(f)
 
-        # 计算相对路径（相对于 LlamaFactory/data 目录）
-        llama_data_dir = Path(dataset_info_path).parent
-        try:
-            relative_path = str(Path(file_path).relative_to(llama_data_dir))
-        except ValueError:
-            # 如果文件不在 LlamaFactory/data 目录下，使用绝对路径
-            relative_path = str(Path(file_path).resolve())
-            logger.warning(f"文件不在 LlamaFactory/data 目录下，使用绝对路径: {relative_path}")
+        # 使用绝对路径
+        absolute_path = str(Path(file_path).resolve())
 
-        # 添加到 dataset_info
+        # 添加到 dataset_info - 使用标准 ranking 格式
         dataset_info[dataset_name] = {
-            "file_name": relative_path,
+            "file_name": absolute_path,
             "ranking": True,
-            "formatting": "sharegpt",
             "columns": {
-                "messages": "conversations",
+                "prompt": "instruction",
                 "chosen": "chosen",
-                "rejected": "rejected"
+                "rejected": "rejected",
             },
-            "tags": {
-                "role_tag": "role",
-                "content_tag": "content",
-                "user_tag": "user",
-                "assistant_tag": "assistant"
-            }
         }
 
         # 写回 dataset_info.json
-        with open(dataset_info_path, 'w', encoding='utf-8') as f:
+        with open(dataset_info_path, "w", encoding="utf-8") as f:
             json.dump(dataset_info, f, indent=2, ensure_ascii=False)
 
         logger.info(f"✅ 数据集 '{dataset_name}' 已注册到 {dataset_info_path}")
@@ -333,14 +345,15 @@ def register_to_dataset_info(dataset_info_path: str, dataset_name: str, file_pat
 def main():
     args = parse_arguments()
 
-    logger.info("="*70)
+    logger.info("=" * 70)
     logger.info("  构建 FSF-based DPO 数据集")
-    logger.info("="*70)
+    logger.info("=" * 70)
     logger.info(f"📁 输入文件: {args.input}")
     logger.info(f"📁 输出目录: {args.output}")
     logger.info(f"📊 训练集比例: {args.train_ratio}")
     logger.info(f"🎲 随机种子: {args.seed}")
-    logger.info("="*70)
+    logger.info(f"📏 最小 FSF 差值: {args.min_fsf_gap}")
+    logger.info("=" * 70)
 
     # 处理所有输入文件
     all_entries = []
@@ -349,7 +362,7 @@ def main():
             logger.warning(f"输入文件 {input_path} 不存在，跳过...")
             continue
 
-        entries = process_single_file(input_path)
+        entries = process_single_file(input_path, args.min_fsf_gap)
         all_entries.extend(entries)
         logger.info(f"处理 {input_path}: {len(entries)} 条数据")
 
@@ -389,6 +402,7 @@ def main():
         "input_files": args.input,
         "train_ratio": args.train_ratio,
         "seed": args.seed,
+        "min_fsf_gap": args.min_fsf_gap,
         "total_count": len(all_entries),
         "train_count": len(train_entries),
         "val_count": len(val_entries),
@@ -407,15 +421,11 @@ def main():
     val_dataset_name = f"{dataset_base_name}_val"
 
     train_registered = register_to_dataset_info(
-        args.dataset_info,
-        train_dataset_name,
-        str(train_path)
+        args.dataset_info, train_dataset_name, str(train_path)
     )
 
     val_registered = register_to_dataset_info(
-        args.dataset_info,
-        val_dataset_name,
-        str(val_path)
+        args.dataset_info, val_dataset_name, str(val_path)
     )
 
     if train_registered and val_registered:
@@ -438,5 +448,6 @@ python3 build_fsf_reward.py \
     -o /data-share/yeesuanAI08/lihaitao/luoys/data/cdad/fsf_reward \
     --train-ratio 0.98 \
     --seed 42 \
+    --min-fsf-gap 0.2 \
     -r ../LlamaFactory/data/dataset_info.json
 """

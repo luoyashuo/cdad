@@ -1,12 +1,11 @@
 """
 Combined Reward Function for CoT Rewriter GRPO
 
-Implements the composite reward: R = R_cog + lambda * R_logic
-
-Where:
-- R_cog (Cognitive Reward): log P_student(Answer | Question, Rewrite_CoT)
-- R_logic (Logic Reward): 1 if FSF(Rewrite) < FSF(Original) else 0
-- lambda: Weight for logic reward (default 0.5)
+Reward 计算逻辑:
+- 使用 Qwen3 chat template 格式计算 Student Model 的 log prob
+- 比较 rewrite_cot 和 original_cot 条件下 answer 的 mean log prob
+- 如果 rewrite_mean > original_mean → R_cog = 1，否则 R_cog = 0
+- (可选) R_logic: FSF Judge 比较失败分支比例
 
 This module provides the VERL-compatible interface for reward computation.
 """
@@ -24,7 +23,7 @@ if PROJECT_ROOT not in sys.path:
 
 from verl import DataProto
 
-from src.reward.student_reward import HFStudentRewardClient
+from src.reward.student_reward import HFStudentRewardClient, RemoteStudentRewardClient
 from src.reward.fsf_reward import HFFSFJudge
 
 
@@ -33,6 +32,10 @@ class CombinedRewardComputer:
     Combined Reward Computer
 
     Computes R = R_cog + lambda * R_logic using HuggingFace Transformers directly.
+
+    Supports two modes for Student Reward:
+    1. Local mode (use_remote_student=False): Load model directly in this process
+    2. Remote mode (use_remote_student=True): Call separate GPU server via HTTP
     """
 
     def __init__(
@@ -42,25 +45,39 @@ class CombinedRewardComputer:
         device: str = "cuda:3",
         lambda_logic: float = 0.5,
         use_logic_reward: bool = True,
+        allow_cpu: bool = True,
+        use_remote_student: bool = False,
+        student_server_url: str = "http://localhost:8765",
     ):
         """
         Initialize Combined Reward Computer.
 
         Args:
-            student_model_path: Path to Student Model
+            student_model_path: Path to Student Model (for local mode)
             fsf_model_path: Path to FSF Judge Model (only required if use_logic_reward=True)
             device: Device to run reward models on (should be a single GPU)
             lambda_logic: Weight for logic reward
             use_logic_reward: Whether to use logic reward
+            allow_cpu: If True, allow fallback to CPU when CUDA is not available
+            use_remote_student: If True, use remote HTTP server for student reward
+            student_server_url: URL of the student reward server (only used if use_remote_student=True)
         """
         self.lambda_logic = lambda_logic
         self.use_logic_reward = use_logic_reward
+        self.use_remote_student = use_remote_student
 
         # Initialize Student Reward client
-        self.student_client = HFStudentRewardClient(
-            model_path=student_model_path,
-            device=device,
-        )
+        if use_remote_student:
+            print(f"[CombinedRewardComputer] Using remote student server at {student_server_url}")
+            self.student_client = RemoteStudentRewardClient(
+                server_url=student_server_url,
+            )
+        else:
+            self.student_client = HFStudentRewardClient(
+                model_path=student_model_path,
+                device=device,
+                allow_cpu=allow_cpu,
+            )
 
         # Initialize FSF Judge client (if needed)
         if use_logic_reward:
@@ -69,6 +86,7 @@ class CombinedRewardComputer:
             self.fsf_judge = HFFSFJudge(
                 model_path=fsf_model_path,
                 device=device,
+                allow_cpu=allow_cpu,
             )
         else:
             self.fsf_judge = None
@@ -83,27 +101,37 @@ class CombinedRewardComputer:
         """
         Compute combined reward.
 
+        Reward 逻辑:
+        - 比较 rewrite_cot 和 original_cot 条件下 answer 的 mean log prob
+        - 如果 rewrite_mean > original_mean → R_cog = 1，否则 R_cog = 0
+        - (可选) R_logic = 1 if FSF(rewrite) < FSF(original) else 0
+        - Total = R_cog + lambda * R_logic
+
         Args:
             questions: List of questions
             original_cots: List of original CoT reasonings
-            rewrite_cots: List of rewritten CoT reasonings
+            rewrite_cots: List of rewritten CoT reasonings (Actor 生成)
             answers: List of ground truth answers
 
         Returns:
-            Dictionary with:
-                - cognitive_rewards: List of R_cog values
-                - logic_rewards: List of R_logic values
-                - total_rewards: List of R = R_cog + lambda * R_logic
-                - extra_info: Additional information for logging
+            Dictionary with reward info and extra metrics
         """
         batch_size = len(questions)
 
-        # Compute cognitive reward
-        r_cog = self.student_client.compute_cognitive_reward_batch(
+        # Compute cognitive reward (比较 rewrite vs original)
+        cog_result = self.student_client.compute_cognitive_reward_batch(
             questions=questions,
             rewrite_cots=rewrite_cots,
             answers=answers,
+            original_cots=original_cots,  # 传入 original_cots 进行比较
         )
+
+        # 使用比较后的 reward (0 或 1)
+        r_cog = cog_result["rewards"]
+        rewrite_mean_log_probs = cog_result["rewrite_mean_log_probs"]
+        original_mean_log_probs = cog_result["original_mean_log_probs"]
+        token_log_probs = cog_result["rewrite_token_log_probs"]
+        token_ids = cog_result["rewrite_token_ids"]
 
         # Compute logic reward (if enabled)
         if (
@@ -128,9 +156,13 @@ class CombinedRewardComputer:
         total_rewards = [c + self.lambda_logic * l for c, l in zip(r_cog, r_logic)]
 
         return {
-            "cognitive_rewards": r_cog,
+            "cognitive_rewards": r_cog,  # 0 或 1 的比较 reward
+            "rewrite_mean_log_probs": rewrite_mean_log_probs,
+            "original_mean_log_probs": original_mean_log_probs,
             "logic_rewards": r_logic,
             "total_rewards": total_rewards,
+            "token_log_probs": token_log_probs,
+            "token_ids": token_ids,
             "extra_info": {
                 "original_fsfs": original_fsfs,
                 "rewrite_fsfs": rewrite_fsfs,
@@ -147,6 +179,9 @@ def get_reward_computer(**kwargs) -> CombinedRewardComputer:
     """Get or create Combined Reward Computer singleton."""
     global _reward_computer
     if _reward_computer is None:
+        # Set default allow_cpu to True for Ray worker compatibility
+        if "allow_cpu" not in kwargs:
+            kwargs["allow_cpu"] = True
         _reward_computer = CombinedRewardComputer(**kwargs)
     return _reward_computer
 
@@ -156,9 +191,12 @@ def compute_cot_rewriter_reward(
     tokenizer: Any,
     student_model_path: str = "./models/Qwen3-1.7B",
     fsf_model_path: Optional[str] = None,
-    device: str = "cuda:3",
+    device: str = "cuda:5",
     lambda_logic: float = 0.5,
     use_logic_reward: bool = True,
+    allow_cpu: bool = True,
+    use_remote_student: bool = False,
+    student_server_url: str = "http://localhost:8765",
     field_mapping: Optional[Dict[str, str]] = None,
     **kwargs,
 ) -> Dict[str, Any]:
@@ -172,9 +210,13 @@ def compute_cot_rewriter_reward(
         tokenizer: Tokenizer for decoding
         student_model_path: Path to Student Model
         fsf_model_path: Path to FSF Judge Model
-        device: Device to run reward models on
+        device: Device to run reward models on. Default is cuda:5.
         lambda_logic: Weight for logic reward
         use_logic_reward: Whether to use logic reward
+        allow_cpu: If True, allow fallback to CPU when CUDA is not available (for Ray workers)
+        use_remote_student: If True, use remote HTTP server for student reward computation
+            (recommended for GPU usage since RewardLoopWorker doesn't have GPU access)
+        student_server_url: URL of the student reward server
         field_mapping: Optional dict to customize field names in data.
             Keys: "prompt_key", "reward_model_key", "question_key",
                   "original_cot_key", "ground_truth_key"
@@ -207,7 +249,7 @@ def compute_cot_rewriter_reward(
     # Handle case where reward_model_key is None or empty (flat structure)
     use_flat_structure = not reward_model_key or reward_model_key == "null"
 
-    batch_size = data.batch.batch_size[0]
+    batch_size = data.batch["responses"].shape[0]
 
     # Decode prompts and responses
     prompts = tokenizer.batch_decode(
@@ -278,6 +320,9 @@ def compute_cot_rewriter_reward(
         device=device,
         lambda_logic=lambda_logic,
         use_logic_reward=use_logic_reward,
+        allow_cpu=allow_cpu,
+        use_remote_student=use_remote_student,
+        student_server_url=student_server_url,
     )
 
     # Compute rewards
@@ -288,10 +333,11 @@ def compute_cot_rewriter_reward(
         answers=answers,
     )
 
-    # Convert to tensor
+    # Convert to tensor - use the same device as the input data
+    device = data.batch["responses"].device
     total_rewards = torch.tensor(
         result["total_rewards"],
-        device="cuda",
+        device=device,
         dtype=torch.bfloat16,
     )
 
@@ -304,7 +350,7 @@ def compute_cot_rewriter_reward(
     token_level_rewards = torch.zeros(
         batch_size,
         response_length,
-        device=total_rewards.device,
+        device=device,
         dtype=total_rewards.dtype,
     )
 
@@ -318,18 +364,27 @@ def compute_cot_rewriter_reward(
             (batch_size,),
             response_length - 1,
             dtype=torch.long,
+            device=device,
         )
 
     # Assign reward to the last valid token of each sequence
     for i in range(batch_size):
         token_level_rewards[i, seq_lengths[i]] = total_rewards[i]
 
+    # Note: Do NOT include variable-length fields (token_log_probs, token_ids) in reward_extra_info
+    # VERL's agent_loop.py:778 tries to convert all extra_info values to numpy arrays,
+    # which fails for variable-length lists (different samples have different token counts).
+    # Error: "ValueError: setting an array element with a sequence. The requested array
+    # has an inhomogeneous shape after 2 dimensions."
     return {
         "reward_tensor": token_level_rewards,
         "reward_extra_info": {
-            "cognitive_rewards": result["cognitive_rewards"],
+            "cognitive_rewards": result["cognitive_rewards"],  # 0 或 1 的比较 reward
+            "rewrite_mean_log_probs": result["rewrite_mean_log_probs"],
+            "original_mean_log_probs": result["original_mean_log_probs"],
             "logic_rewards": result["logic_rewards"],
             "total_rewards": result["total_rewards"],
+            # Removed: "token_log_probs" and "token_ids" - variable length, breaks numpy conversion
             "mean_cognitive_reward": sum(result["cognitive_rewards"])
             / len(result["cognitive_rewards"]),
             "mean_logic_reward": sum(result["logic_rewards"]) / len(result["logic_rewards"]),
