@@ -30,6 +30,7 @@ from verl.utils.reward_score import default_compute_score
 from verl.utils.transferqueue_utils import tqbridge
 from verl.workers.reward_manager import get_reward_manager_cls
 from verl.workers.reward_manager.abstract import AbstractRewardManager, RawRewardFn
+from verl.workers.reward_manager.registry import REWARD_MANAGER_REGISTRY
 
 
 def _call_with_kwargs(raw_fn, extra_kwargs, *args, **kwargs):
@@ -137,6 +138,45 @@ def load_reward_manager(
     # registered via `verl.workers.reward_manager.register`
     # By default reward_manager is set to naive (NaiveRewardManager)
     reward_manager_name = config.reward_model.get("reward_manager", "naive")
+
+    # Auto-import custom reward manager module if specified in config
+    # This allows custom reward managers to be registered before get_reward_manager_cls is called
+    # Skip if the reward manager is already registered (e.g., via package __init__.py import)
+    reward_manager_config = config.get("reward_manager")
+    if reward_manager_config is not None and reward_manager_name not in REWARD_MANAGER_REGISTRY:
+        reward_manager_module = reward_manager_config.get("module") if hasattr(reward_manager_config, "get") else None
+        if reward_manager_module is not None:
+            module_path = reward_manager_module.get("path") if hasattr(reward_manager_module, "get") else None
+            if module_path and os.path.exists(module_path):
+                module_name = f"custom_reward_manager_{reward_manager_name}"
+                if module_name not in sys.modules:
+                    spec = importlib.util.spec_from_file_location(module_name, module_path)
+                    if spec and spec.loader:
+                        module = importlib.util.module_from_spec(spec)
+                        sys.modules[module_name] = module
+                        spec.loader.exec_module(module)
+                        print(f"Loaded custom reward manager module from '{module_path}'")
+
+    # Also try to auto-import if the reward manager name matches a known pattern
+    # and the custom_reward_function path is in the same directory
+    # Skip if the reward manager is already registered (e.g., via package __init__.py import)
+    if reward_manager_name not in ["naive", "prime", "batch", "dapo"] and reward_manager_name not in REWARD_MANAGER_REGISTRY:
+        reward_fn_config = config.get("custom_reward_function")
+        reward_fn_path = reward_fn_config.get("path") if reward_fn_config and hasattr(reward_fn_config, "get") else None
+        if reward_fn_path:
+            # Try to find reward_manager.py in the same directory
+            reward_fn_dir = os.path.dirname(reward_fn_path)
+            reward_manager_path = os.path.join(reward_fn_dir, "reward_manager.py")
+            if os.path.exists(reward_manager_path):
+                module_name = f"custom_reward_manager_{reward_manager_name}"
+                if module_name not in sys.modules:
+                    spec = importlib.util.spec_from_file_location(module_name, reward_manager_path)
+                    if spec and spec.loader:
+                        module = importlib.util.module_from_spec(spec)
+                        sys.modules[module_name] = module
+                        spec.loader.exec_module(module)
+                        print(f"Auto-loaded custom reward manager module from '{reward_manager_path}'")
+
     reward_manager_cls = get_reward_manager_cls(reward_manager_name)
 
     if compute_score is None:

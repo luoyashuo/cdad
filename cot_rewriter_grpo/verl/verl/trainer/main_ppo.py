@@ -69,12 +69,31 @@ def run_ppo(config, task_runner_class=None) -> None:
             runtime_env_kwargs["env_vars"] = runtime_env_vars
 
         runtime_env = OmegaConf.merge(default_runtime_env, runtime_env_kwargs)
-        ray_init_kwargs = OmegaConf.create({**ray_init_kwargs, "runtime_env": runtime_env})
-        print(f"ray init kwargs: {ray_init_kwargs}")
-        ray.init(**OmegaConf.to_container(ray_init_kwargs))
+
+        # Convert to container first to preserve all nested configs (including _system_config)
+        ray_init_dict = OmegaConf.to_container(ray_init_kwargs, resolve=True) if OmegaConf.is_config(ray_init_kwargs) else dict(ray_init_kwargs)
+        ray_init_dict["runtime_env"] = OmegaConf.to_container(runtime_env, resolve=True) if OmegaConf.is_config(runtime_env) else dict(runtime_env)
+
+        # CRITICAL: Ensure dashboard is disabled to avoid OpenTelemetry version conflicts
+        # This prevents: TypeError: Meter.create_histogram() got an unexpected keyword argument
+        ray_init_dict.setdefault("include_dashboard", False)
+
+        # Remove None values from ray_init_dict (e.g., _temp_dir: null in YAML)
+        # ray.init() doesn't accept None for certain parameters
+        ray_init_dict = {k: v for k, v in ray_init_dict.items() if v is not None}
+
+        print(f"ray init kwargs: {ray_init_dict}")
+        ray.init(**ray_init_dict)
 
     if task_runner_class is None:
-        task_runner_class = ray.remote(num_cpus=1)(TaskRunner)  # please make sure main_task is not scheduled on head
+        # Configure TaskRunner GPU resources for reward computation
+        # When offload_rollout_for_reward is enabled, TaskRunner needs GPU access
+        # to run reward models after vLLM memory is released
+        task_runner_num_gpus = config.reward_model.get("task_runner_num_gpus", 0)
+        if task_runner_num_gpus > 0:
+            task_runner_class = ray.remote(num_cpus=1, num_gpus=task_runner_num_gpus)(TaskRunner)
+        else:
+            task_runner_class = ray.remote(num_cpus=1)(TaskRunner)  # please make sure main_task is not scheduled on head
 
     # Create a remote instance of the TaskRunner class, and
     # Execute the `run` method of the TaskRunner instance remotely and wait for it to complete
@@ -195,7 +214,15 @@ class TaskRunner:
         self.mapping[Role.Critic] = global_pool_id
         from verl.trainer.ppo.ray_trainer import ResourcePoolManager
 
-        resource_pool_manager = ResourcePoolManager(resource_pool_spec=resource_pool_spec, mapping=self.mapping)
+        # Get TaskRunner GPU resources for resource check adjustment
+        # TaskRunner GPUs are time-shared with training (used after vLLM offload for reward computation)
+        task_runner_num_gpus = config.reward_model.get("task_runner_num_gpus", 0)
+
+        resource_pool_manager = ResourcePoolManager(
+            resource_pool_spec=resource_pool_spec,
+            mapping=self.mapping,
+            task_runner_num_gpus=task_runner_num_gpus
+        )
         return resource_pool_manager
 
     def add_reward_model_worker(self, config):

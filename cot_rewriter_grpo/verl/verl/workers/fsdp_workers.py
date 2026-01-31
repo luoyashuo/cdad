@@ -1108,6 +1108,68 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             offload_fsdp_optimizer(self.actor_optimizer)
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def offload_for_reward(self, offload_actor: bool = False):
+        """Offload vLLM to free GPU memory for reward computation.
+
+        This method should be called before reward computation when reward models
+        need GPU memory. It releases vLLM's KV cache and weights.
+
+        Note: Actor model is NOT offloaded by default because compute_log_prob
+        needs it immediately after reward computation.
+
+        Args:
+            offload_actor: If True, also offload actor model to CPU (default: False)
+
+        Returns:
+            bool: True if offload was successful
+        """
+        log_gpu_memory_usage("Before offload_for_reward", logger=logger)
+
+        # Release vLLM memory if rollout is configured
+        if self._is_rollout and hasattr(self, 'rollout') and self.config.rollout.free_cache_engine:
+            loop = get_event_loop()
+            loop.run_until_complete(self.rollout.release())
+            logger.info("[offload_for_reward] Released vLLM memory for reward computation")
+
+        # Optionally offload actor model to CPU (not recommended unless you know what you're doing)
+        if offload_actor and self._is_actor and hasattr(self, 'actor_module_fsdp'):
+            offload_fsdp_model_to_cpu(self.actor_module_fsdp)
+            logger.info("[offload_for_reward] Offloaded actor model to CPU")
+
+        # Clear GPU cache
+        aggressive_empty_cache(force_sync=True)
+        log_gpu_memory_usage("After offload_for_reward", logger=logger)
+
+        return True
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def reload_after_reward(self, reload_actor: bool = False):
+        """Reload models after reward computation.
+
+        This method can be called after reward computation if actor model was offloaded.
+        Note: vLLM will be reloaded automatically in the next rollout_mode() call.
+
+        Args:
+            reload_actor: If True, reload actor model to GPU (default: False)
+
+        Returns:
+            bool: True if reload was successful
+        """
+        log_gpu_memory_usage("Before reload_after_reward", logger=logger)
+
+        # Reload actor model to GPU if it was offloaded
+        if reload_actor and self._is_actor and hasattr(self, 'actor_module_fsdp'):
+            load_fsdp_model_to_gpu(self.actor_module_fsdp)
+            logger.info("[reload_after_reward] Reloaded actor model to GPU")
+
+        # Note: vLLM will be reloaded automatically in the next rollout_mode() call
+        # which happens before generate_sequences()
+
+        log_gpu_memory_usage("After reload_after_reward", logger=logger)
+
+        return True
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def start_profile(self, **kwargs) -> None:
         """Start profiling for the current rank in the current training step."""
         self.profiler.start(**kwargs)

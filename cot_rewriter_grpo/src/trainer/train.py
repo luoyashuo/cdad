@@ -18,6 +18,22 @@ Key Points:
 
 import os
 import sys
+
+# CRITICAL: Set Ray environment variables BEFORE any imports that might import ray
+# This prevents OpenTelemetry version conflicts that cause:
+# TypeError: Meter.create_histogram() got an unexpected keyword argument 'explicit_bucket_boundaries_advisory'
+os.environ["RAY_DASHBOARD_HOST"] = ""
+os.environ["RAY_enable_dashboard"] = "0"
+os.environ["RAY_DISABLE_DASHBOARD_AGENT"] = "1"
+
+# CRITICAL: Use short path for Ray temp directory to avoid Unix socket path length exceeding 107 bytes
+# This prevents: OSError: validate_socket_filename failed: AF_UNIX path length cannot exceed 107 bytes
+# Also avoid conflicts with other users' Ray clusters
+_user = os.environ.get("USER", os.environ.get("USERNAME", "default"))
+_ray_tmpdir = f"/tmp/ray_{_user}"
+os.makedirs(_ray_tmpdir, exist_ok=True)
+os.environ["RAY_TMPDIR"] = _ray_tmpdir
+
 from datetime import datetime
 
 # Add project root to path
@@ -26,7 +42,8 @@ sys.path.insert(0, PROJECT_ROOT)
 sys.path.insert(0, os.path.join(PROJECT_ROOT, "src"))
 
 # Add verl to path
-VERL_ROOT = os.path.join(os.path.dirname(PROJECT_ROOT), "verl")
+# verl repo is inside PROJECT_ROOT, not sibling to it
+VERL_ROOT = os.path.join(PROJECT_ROOT, "verl")
 if os.path.exists(VERL_ROOT):
     sys.path.insert(0, VERL_ROOT)
 
@@ -40,10 +57,16 @@ def setup_environment():
     os.environ.setdefault("RAY_DEDUP_LOGS", "1")
     os.environ.setdefault("RAY_memory_monitor_refresh_ms", "0")
 
-    # CRITICAL: Disable Ray Dashboard to avoid OpenTelemetry version conflicts
+    # CRITICAL: Disable Ray Dashboard and metrics to avoid OpenTelemetry version conflicts
     # This prevents: TypeError: Meter.create_histogram() got an unexpected keyword argument
+    # These environment variables MUST be set BEFORE importing ray
     os.environ["RAY_DASHBOARD_HOST"] = ""  # Empty string disables dashboard
     os.environ["RAY_enable_dashboard"] = "0"
+
+    # Additional environment variables to completely disable dashboard agent and metrics
+    # This is needed because even with include_dashboard=False, the dashboard agent
+    # may still try to start for metrics collection
+    os.environ["RAY_DISABLE_DASHBOARD_AGENT"] = "1"
 
     # NCCL configuration
     os.environ.setdefault("NCCL_DEBUG", "WARN")

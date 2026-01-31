@@ -22,8 +22,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
 # 默认配置
-DEFAULT_CONFIG="qwen3_8b_grpo_4gpu"
-DEFAULT_GPUS="1,2,3,5"
+DEFAULT_CONFIG="qwen3_4b_grpo_4gpu"
+DEFAULT_GPUS="2,3"
 
 # 解析参数
 CONFIG_NAME="${1:-$DEFAULT_CONFIG}"
@@ -61,22 +61,37 @@ export RAY_DEDUP_LOGS=1
 export RAY_memory_monitor_refresh_ms=0
 export NCCL_DEBUG=WARN
 export TOKENIZERS_PARALLELISM=false
+# PyTorch CUDA memory config
+# Note: expandable_segments:True is NOT compatible with vLLM's CuMem memory pool
+# See: https://github.com/pytorch/pytorch/issues/147851
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:False
 
 # CRITICAL: Disable Ray Dashboard to avoid OpenTelemetry version conflicts
+# This prevents: TypeError: Meter.create_histogram() got an unexpected keyword argument
 export RAY_DASHBOARD_HOST=""
 export RAY_enable_dashboard=0
+# Completely disable dashboard agent to avoid OpenTelemetry metrics initialization
+export RAY_DISABLE_DASHBOARD_AGENT=1
 
 # 强制 Ray 创建新的本地集群，不连接现有集群（避免权限问题）
 export RAY_ADDRESS=local
 
+# CRITICAL: 使用短路径的 Ray 临时目录，避免 Unix socket 路径长度超过 107 字节限制
+# 这样可以防止 "OSError: validate_socket_filename failed: AF_UNIX path length cannot exceed 107 bytes"
+# 同时避免与其他用户的 Ray 集群冲突，防止 "Failed to register worker to Raylet" 错误
+export RAY_TMPDIR="/tmp/ray_${USER:-$(whoami)}"
+mkdir -p "$RAY_TMPDIR"
+
 # 获取虚拟环境的 Python 路径，确保 Ray worker 使用正确的环境
 VENV_PATH="${PROJECT_ROOT}/.venv"
+# verl repo is inside PROJECT_ROOT
+VERL_PATH="${PROJECT_ROOT}/verl"
 if [ -d "$VENV_PATH" ]; then
-    export PYTHONPATH="${VENV_PATH}/lib/python3.12/site-packages:${PROJECT_ROOT}:${PROJECT_ROOT}/src:${PYTHONPATH}"
+    export PYTHONPATH="${VENV_PATH}/lib/python3.12/site-packages:${PROJECT_ROOT}:${PROJECT_ROOT}/src:${VERL_PATH}:${PYTHONPATH}"
     # 设置 Ray 使用的 Python 解释器
     export RAY_PYTHON_HOME="${VENV_PATH}/bin/python"
 else
-    export PYTHONPATH="${PROJECT_ROOT}:${PROJECT_ROOT}/src:${PYTHONPATH}"
+    export PYTHONPATH="${PROJECT_ROOT}:${PROJECT_ROOT}/src:${VERL_PATH}:${PYTHONPATH}"
 fi
 
 echo ""
@@ -106,10 +121,16 @@ echo "  Config: ${CONFIG_FILE}"
 echo "  Output log: ${LOG_FILE}"
 echo ""
 
-# 清理残留的 Ray 进程（避免冲突和权限问题）
-echo "Cleaning up any existing Ray processes..."
-ray stop --force 2>/dev/null || true
-pkill -f "ray::" 2>/dev/null || true
+# 清理残留的 Ray 进程（只清理当前用户的，避免权限问题）
+echo "Cleaning up current user's Ray processes..."
+# 不使用 ray stop，因为它会尝试停止所有用户的 Ray 进程导致权限错误
+# 只杀死当前用户拥有的 ray 相关进程
+pkill -u "$(whoami)" -f "ray::" 2>/dev/null || true
+pkill -u "$(whoami)" -f "raylet" 2>/dev/null || true
+pkill -u "$(whoami)" -f "gcs_server" 2>/dev/null || true
+pkill -u "$(whoami)" -f "ray._private" 2>/dev/null || true
+# 清理当前用户的 Ray 临时目录中的旧会话
+rm -rf "$RAY_TMPDIR"/session_* 2>/dev/null || true
 sleep 2
 echo "Ray cleanup complete."
 echo ""

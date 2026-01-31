@@ -17,7 +17,7 @@ preprocessing_num_workers: 16
 dataloader_num_workers: 4
 
 ### output
-output_dir: /data-share/yeesuanAI08/lihaitao/luoys/checkpoints/cdad/judge/qwen3_1_7b_fsf_judge
+output_dir: /data-share/yeesuanAI08/lihaitao/luoys/checkpoints/cdad/judge/qwen3_1_7b_judge
 logging_steps: 10
 save_strategy: epoch
 plot_loss: true

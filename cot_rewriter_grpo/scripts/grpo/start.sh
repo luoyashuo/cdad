@@ -1,39 +1,34 @@
 #!/bin/bash
-# GRPO 训练一键启动脚本
+# GRPO 训练一键启动脚本 (Offload 模式)
+# Model: Qwen3-4B
 #
 # GPU 分配策略：
-#   - REWARD_GPU: 1张卡运行 Reward Server (Student Model)
-#   - GRPO_GPUS: 其余卡运行 GRPO 训练
+#   - 全部 2 张 GPU 用于 GRPO 训练
+#   - Reward 模型使用 offload 模式：计算时临时加载到 GPU，计算完释放显存
 #
 # 启动顺序（最小化被抢卡风险）：
 #   0. [防抢卡] 清理 Ray 后，先用 fsf_judge 占住所有卡
-#   1. 释放 REWARD_GPU → 启动 Reward Server → 等待 ready
-#   2. 释放 GRPO_GPUS → 启动 GRPO 训练
-#   3. 等待 GRPO 完成 → 停止 Reward Server
-#   4. 启动 fsf_judge 占卡（无论成功失败）
+#   1. 释放所有 GPU → 启动 GRPO 训练
+#   2. 等待 GRPO 完成
+#   3. 启动 fsf_judge 占卡（无论成功失败）
 #
 # 全程保证：任何时刻都有进程占住 GPU，防止被抢
 
 set -e
 
 # ============== 配置区域 ==============
-# 所有可用的 GPU
-ALL_GPUS="1,2,3,5"
-# Reward Server 使用的 GPU（单张卡）
-REWARD_GPU="5"
-# GRPO 训练使用的 GPU（其余卡）
-GRPO_GPUS="1,2,3"
-# Reward Server 端口
-REWARD_PORT="8765"
-# Student Model 路径
-STUDENT_MODEL_PATH="/data-share/LLM/Qwen3-1.7B"
-# Reward Server 健康检查超时（秒）
-HEALTH_CHECK_TIMEOUT=300
-# 健康检查间隔（秒）
-HEALTH_CHECK_INTERVAL=5
+# 所有可用的 GPU（全部用于 GRPO 训练）
+ALL_GPUS="0,5"
+# GPU 数量
+NUM_GPUS=2
 # ======================================
 
 export DISABLE_VERSION_CHECK=1
+
+# CRITICAL: 使用短路径的 Ray 临时目录，避免 Unix socket 路径长度超过 107 字节限制
+# 同时避免与其他用户的 Ray 集群冲突
+export RAY_TMPDIR="/tmp/ray_${USER:-$(whoami)}"
+mkdir -p "$RAY_TMPDIR"
 
 # SwanLab 配置
 export SWANLAB_MODE=cloud
@@ -45,24 +40,30 @@ PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
 # 创建日志目录
 mkdir -p "${PROJECT_ROOT}/logs/grpo"
-mkdir -p "${PROJECT_ROOT}/logs/reward_server"
 mkdir -p "${PROJECT_ROOT}/logs/judge"
 
 echo "============================================================"
-echo "GRPO 训练一键启动"
+echo "GRPO 训练一键启动 (Offload 模式)"
 echo "============================================================"
-echo "Reward Server GPU: ${REWARD_GPU}"
-echo "GRPO Training GPUs: ${GRPO_GPUS}"
+echo "Model: Qwen3-4B"
+echo "Training GPUs: ${ALL_GPUS} (${NUM_GPUS} GPUs)"
+echo "Reward Mode: Offload (临时加载到 GPU，计算完释放)"
 echo "============================================================"
 
-# 清理残留的 Ray 进程（避免权限问题和端口冲突）
+# 清理残留的 Ray 进程（只清理当前用户的，避免权限问题）
 echo ""
-echo "[准备] 清理残留的 Ray 进程..."
-ray stop --force 2>/dev/null || true
-pkill -f "ray::" 2>/dev/null || true
+echo "[准备] 清理当前用户的 Ray 进程..."
+# 不使用 ray stop，因为它会尝试停止所有用户的 Ray 进程导致权限错误
+# 只杀死当前用户拥有的 ray 相关进程
+pkill -u "$(whoami)" -f "ray::" 2>/dev/null || true
+pkill -u "$(whoami)" -f "raylet" 2>/dev/null || true
+pkill -u "$(whoami)" -f "gcs_server" 2>/dev/null || true
+pkill -u "$(whoami)" -f "ray._private" 2>/dev/null || true
+# 清理当前用户的 Ray 临时目录中的旧会话
+rm -rf "$RAY_TMPDIR"/session_* 2>/dev/null || true
 
-# 停止可能存在的旧 reward server
-echo "[准备] 停止旧的 Reward Server..."
+# 停止可能存在的旧 reward server（offload 模式不需要，但清理以防万一）
+echo "[准备] 停止旧的 Reward Server（如果有）..."
 pkill -f "student_reward_server" 2>/dev/null || true
 sleep 2
 
@@ -92,86 +93,30 @@ fi
 pkill -f "llamafactory-cli train" 2>/dev/null || true
 sleep 2
 
-# ============ 关键：先用 fsf_judge 占住所有卡，防止被抢 ============
+# ============ 步骤 1: 释放所有 GPU ============
 echo ""
-echo "[防抢卡] 启动 fsf_judge 占住所有 GPU (${ALL_GPUS})..."
-# 后台启动 fsf_judge 占卡（会自动循环训练）
-nohup bash scripts/train_fsf_judge/start_train.sh --gpus ${ALL_GPUS} \
-    > "${PROJECT_ROOT}/logs/judge/fsf_judge_placeholder.log" 2>&1 &
-FSF_PLACEHOLDER_PID=$!
-echo "fsf_judge 占位进程 PID: ${FSF_PLACEHOLDER_PID}"
-
-# 等待 fsf_judge 启动并占住 GPU
-echo "等待 fsf_judge 占住 GPU..."
-sleep 30  # 等待训练进程启动并加载模型
-
-# ============ 步骤 1: 只释放 Reward GPU ============
-echo ""
-echo "[Step 1/4] 释放 GPU ${REWARD_GPU} 用于 Reward Server..."
-bash scripts/train_fsf_judge/stop_all_train.sh --gpus ${REWARD_GPU}
+echo "[Step 1/2] 释放所有 GPUs (${ALL_GPUS}) 用于 GRPO 训练..."
+bash scripts/train_fsf_judge/stop_all_train.sh --gpus ${ALL_GPUS}
 sleep 2
 
-# ============ 步骤 2: 启动 Reward Server 并等待 ready ============
+# ============ 步骤 2: 启动 GRPO 训练 ============
 echo ""
-echo "[Step 2/4] 启动 Reward Server (GPU ${REWARD_GPU})..."
-nohup bash scripts/grpo/start_reward_server.sh ${REWARD_GPU} ${REWARD_PORT} ${STUDENT_MODEL_PATH} \
-    > "${PROJECT_ROOT}/logs/reward_server/student_reward_server.log" 2>&1 &
-REWARD_PID=$!
-echo "Reward Server PID: ${REWARD_PID}"
-
-# 等待 Reward Server ready
-echo "等待 Reward Server 启动..."
-HEALTH_URL="http://localhost:${REWARD_PORT}/health"
-elapsed=0
-while [ $elapsed -lt $HEALTH_CHECK_TIMEOUT ]; do
-    # 检查进程是否还在运行
-    if ! kill -0 $REWARD_PID 2>/dev/null; then
-        echo "错误: Reward Server 进程已退出！"
-        echo "查看日志: ${PROJECT_ROOT}/logs/reward_server/student_reward_server.log"
-        exit 1
-    fi
-
-    # 尝试健康检查
-    if curl -s --connect-timeout 2 "${HEALTH_URL}" > /dev/null 2>&1; then
-        echo "Reward Server 已就绪！(耗时 ${elapsed}s)"
-        break
-    fi
-
-    echo "  等待中... (${elapsed}s/${HEALTH_CHECK_TIMEOUT}s)"
-    sleep $HEALTH_CHECK_INTERVAL
-    elapsed=$((elapsed + HEALTH_CHECK_INTERVAL))
-done
-
-if [ $elapsed -ge $HEALTH_CHECK_TIMEOUT ]; then
-    echo "错误: Reward Server 启动超时 (${HEALTH_CHECK_TIMEOUT}s)！"
-    echo "查看日志: ${PROJECT_ROOT}/logs/reward_server/student_reward_server.log"
-    kill $REWARD_PID 2>/dev/null || true
-    exit 1
-fi
-
-# ============ 步骤 3: 释放 GRPO GPU ============
-echo ""
-echo "[Step 3/4] 释放 GPUs ${GRPO_GPUS} 用于 GRPO 训练..."
-bash scripts/train_fsf_judge/stop_all_train.sh --gpus ${GRPO_GPUS}
-sleep 2
-
-# ============ 步骤 4: 启动 GRPO 训练 ============
-echo ""
-echo "[Step 4/4] 启动 GRPO 训练 (GPUs ${GRPO_GPUS})..."
-nohup bash scripts/grpo/run_train.sh qwen3_8b_grpo_4gpu ${GRPO_GPUS} \
-    > "${PROJECT_ROOT}/logs/grpo/qwen3_8b_grpo_4gpu.log" 2>&1 &
+echo "[Step 2/2] 启动 GRPO 训练 (GPUs ${ALL_GPUS}, Offload 模式)..."
+nohup bash scripts/grpo/run_train.sh qwen3_4b_grpo_2gpu ${ALL_GPUS} \
+    > "${PROJECT_ROOT}/logs/grpo/qwen3_4b_grpo_2gpu.log" 2>&1 &
 GRPO_PID=$!
 echo "GRPO Training PID: ${GRPO_PID}"
 
 echo ""
 echo "============================================================"
 echo "启动完成！"
-echo "  Reward Server: GPU ${REWARD_GPU}, PID ${REWARD_PID}"
-echo "  GRPO Training: GPUs ${GRPO_GPUS}, PID ${GRPO_PID}"
+echo "  GRPO Training: GPUs ${ALL_GPUS}, PID ${GRPO_PID}"
 echo ""
 echo "日志文件:"
-echo "  Reward: ${PROJECT_ROOT}/logs/reward_server/student_reward_server.log"
-echo "  GRPO:   ${PROJECT_ROOT}/logs/grpo/qwen3_8b_grpo_4gpu.log"
+echo "  GRPO: ${PROJECT_ROOT}/logs/grpo/qwen3_4b_grpo_2gpu.log"
+echo ""
+echo "实时查看日志:"
+echo "  tail -f ${PROJECT_ROOT}/logs/grpo/qwen3_4b_grpo_2gpu.log"
 echo "============================================================"
 
 # 等待 GRPO 训练完成（关闭 set -e 以确保后续占卡命令能执行）
@@ -182,11 +127,8 @@ wait $GRPO_PID
 GRPO_EXIT_CODE=$?
 set -e  # 重新开启 errexit
 
-# GRPO 训练结束后（无论成功失败），停止 Reward Server
 echo ""
-echo "GRPO 训练结束 (exit code: ${GRPO_EXIT_CODE})，停止 Reward Server..."
-kill $REWARD_PID 2>/dev/null || true
-pkill -f "student_reward_server" 2>/dev/null || true
+echo "GRPO 训练结束 (exit code: ${GRPO_EXIT_CODE})"
 
 # 启动 fsf_judge 占卡（无论 GRPO 成功还是失败都要执行）
 echo ""

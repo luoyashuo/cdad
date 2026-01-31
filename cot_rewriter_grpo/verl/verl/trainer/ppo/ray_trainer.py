@@ -70,6 +70,11 @@ class ResourcePoolManager:
     resource_pool_spec: dict[str, list[int]]
     mapping: dict[Role, str]
     resource_pool_dict: dict[str, RayResourcePool] = field(default_factory=dict)
+    # TaskRunner GPU resources (used for resource check adjustment)
+    # When TaskRunner is allocated GPUs for reward computation, these GPUs are
+    # time-shared with training GPUs (reward runs after vLLM offload), so we need
+    # to add them back when checking available resources.
+    task_runner_num_gpus: float = 0.0
 
     def create_resource_pool(self):
         """Create Ray resource pools for distributed training.
@@ -109,6 +114,11 @@ class ResourcePoolManager:
 
         # check total required gpus can be satisfied
         total_available_gpus = sum(node_available_gpus.values())
+
+        # Add back TaskRunner GPU resources since they are time-shared with training GPUs
+        # (TaskRunner runs reward computation after vLLM memory is released)
+        total_available_gpus += self.task_runner_num_gpus
+
         total_required_gpus = sum(
             [n_gpus for process_on_nodes in self.resource_pool_spec.values() for n_gpus in process_on_nodes]
         )
@@ -527,6 +537,9 @@ class RayPPOTrainer:
         return gen_batch
 
     def _validate(self):
+        print("[VALIDATE] Starting validation process...")
+        print(f"[VALIDATE] Validation dataloader size: {len(self.val_dataloader)}")
+
         data_source_lst = []
         reward_extra_infos_dict: dict[str, list] = defaultdict(list)
 
@@ -538,7 +551,8 @@ class RayPPOTrainer:
         sample_turns = []
         sample_uids = []
 
-        for test_data in self.val_dataloader:
+        for batch_idx, test_data in enumerate(self.val_dataloader):
+            print(f"[VALIDATE] Processing batch {batch_idx + 1}/{len(self.val_dataloader)}")
             test_batch = DataProto.from_single_dict(test_data)
 
             if "uid" not in test_batch.non_tensor_batch:
@@ -585,15 +599,18 @@ class RayPPOTrainer:
                 else self.config.actor_rollout_ref.rollout.agent.num_workers
             )
             test_gen_batch_padded, pad_size = pad_dataproto_to_divisor(test_gen_batch, size_divisor)
+
+            print(f"[VALIDATE] Batch {batch_idx + 1}: Starting sequence generation...")
             if not self.async_rollout_mode:
                 test_output_gen_batch_padded = self.actor_rollout_wg.generate_sequences(test_gen_batch_padded)
             else:
                 test_output_gen_batch_padded = self.async_rollout_manager.generate_sequences(test_gen_batch_padded)
+            print(f"[VALIDATE] Batch {batch_idx + 1}: Sequence generation completed")
 
             # unpad
             test_output_gen_batch = unpad_dataproto(test_output_gen_batch_padded, pad_size=pad_size)
 
-            print("validation generation end")
+            print(f"[VALIDATE] Batch {batch_idx + 1}: Validation generation end")
 
             # Store generated outputs
             output_ids = test_output_gen_batch.batch["responses"]
@@ -604,17 +621,39 @@ class RayPPOTrainer:
             test_batch.meta_info["validate"] = True
 
             # evaluate using reward_function
+            print(f"[VALIDATE] Batch {batch_idx + 1}: Starting reward computation...")
             if self.val_reward_fn is None:
                 raise ValueError("val_reward_fn must be provided for validation.")
             result = self.val_reward_fn(test_batch, return_dict=True)
+            print(f"[VALIDATE] Batch {batch_idx + 1}: Reward computation completed")
+
             reward_tensor = result["reward_tensor"]
             scores = reward_tensor.sum(-1).cpu().tolist()
             sample_scores.extend(scores)
+            print(f"[VALIDATE] Batch {batch_idx + 1}: Got {len(scores)} reward scores")
 
             reward_extra_infos_dict["reward"].extend(scores)
             if "reward_extra_info" in result:
-                for key, lst in result["reward_extra_info"].items():
-                    reward_extra_infos_dict[key].extend(lst)
+                batch_size = len(scores)
+                print(f"[VALIDATE] Batch {batch_idx + 1}: Processing reward_extra_info with {len(result['reward_extra_info'])} keys")
+                for key, value in result["reward_extra_info"].items():
+                    value_type = type(value).__name__
+                    value_len = len(value) if isinstance(value, (list, tuple)) else "N/A (scalar)"
+                    print(f"[VALIDATE] Batch {batch_idx + 1}: Processing key '{key}' - type: {value_type}, length: {value_len}")
+
+                    # Handle both list and scalar values
+                    if isinstance(value, (list, tuple)) and len(value) == batch_size:
+                        # Sample-level info: extend with all samples in this batch
+                        reward_extra_infos_dict[key].extend(value)
+                        print(f"[VALIDATE] Batch {batch_idx + 1}: Extended key '{key}' with {len(value)} samples")
+                    elif isinstance(value, (list, tuple)):
+                        # List but wrong size: skip with warning
+                        print(f"[VALIDATE] Warning: Skipping reward_extra_info[{key}] - expected length {batch_size}, got {len(value)}")
+                    else:
+                        print(f"[VALIDATE] Batch {batch_idx + 1}: Skipping scalar key '{key}' (value: {value})")
+                    # Skip scalar values (batch-level statistics like mean_*)
+
+            print(f"[VALIDATE] Batch {batch_idx + 1}: Batch processing completed")
 
             # collect num_turns of each prompt
             if "__num_turns__" in test_batch.non_tensor_batch:
@@ -622,11 +661,15 @@ class RayPPOTrainer:
 
             data_source_lst.append(test_batch.non_tensor_batch.get("data_source", ["unknown"] * reward_tensor.shape[0]))
 
+        print(f"[VALIDATE] All batches processed. Total samples: {len(sample_scores)}")
+        print(f"[VALIDATE] Starting post-processing...")
+
         self._maybe_log_val_generations(inputs=sample_inputs, outputs=sample_outputs, scores=sample_scores)
 
         # dump generations
         val_data_dir = self.config.trainer.get("validation_data_dir", None)
         if val_data_dir:
+            print(f"[VALIDATE] Dumping generations to {val_data_dir}")
             self._dump_generations(
                 inputs=sample_inputs,
                 outputs=sample_outputs,
@@ -636,12 +679,17 @@ class RayPPOTrainer:
                 dump_path=val_data_dir,
             )
 
+        print(f"[VALIDATE] Validating reward_extra_infos_dict consistency...")
         for key_info, lst in reward_extra_infos_dict.items():
+            print(f"[VALIDATE] Checking key '{key_info}': length={len(lst)}, expected={len(sample_scores)}")
             assert len(lst) == 0 or len(lst) == len(sample_scores), f"{key_info}: {len(lst)=}, {len(sample_scores)=}"
+        print(f"[VALIDATE] All keys validated successfully")
 
+        print(f"[VALIDATE] Processing validation metrics...")
         data_sources = np.concatenate(data_source_lst, axis=0)
 
         data_src2var2metric2val = process_validation_metrics(data_sources, sample_uids, reward_extra_infos_dict)
+        print(f"[VALIDATE] Metrics processed. Building metric dictionary...")
         metric_dict = {}
         for data_source, var2metric2val in data_src2var2metric2val.items():
             core_var = "acc" if "acc" in var2metric2val else "reward"
@@ -665,6 +713,8 @@ class RayPPOTrainer:
             metric_dict["val-aux/num_turns/max"] = sample_turns.max()
             metric_dict["val-aux/num_turns/mean"] = sample_turns.mean()
 
+        print(f"[VALIDATE] Validation completed successfully!")
+        print(f"[VALIDATE] Collected {len(metric_dict)} metrics")
         return metric_dict
 
     def init_workers(self):
@@ -1088,6 +1138,13 @@ class RayPPOTrainer:
                     # compute global_valid tokens
                     batch.meta_info["global_token_num"] = torch.sum(batch.batch["attention_mask"], dim=-1).tolist()
 
+                    # Offload vLLM before reward computation if configured
+                    # This frees GPU memory for reward models to use
+                    offload_for_reward = self.config.reward_model.get("offload_rollout_for_reward", False)
+                    if offload_for_reward and hasattr(self, 'actor_rollout_wg'):
+                        with marked_timer("offload_for_reward", timing_raw, color="magenta"):
+                            self.actor_rollout_wg.offload_for_reward(offload_actor=False)
+
                     with marked_timer("reward", timing_raw, color="yellow"):
                         # compute reward model score
                         if self.use_rm and "rm_scores" not in batch.batch.keys():
@@ -1095,9 +1152,16 @@ class RayPPOTrainer:
                             batch = batch.union(reward_tensor)
 
                         if self.config.reward_model.launch_reward_fn_async:
-                            future_reward = compute_reward_async.remote(
-                                data=batch, config=self.config, tokenizer=self.tokenizer
-                            )
+                            # Dynamically configure GPU resources for async reward computation
+                            async_reward_num_gpus = self.config.reward_model.get("task_runner_num_gpus", 0)
+                            if async_reward_num_gpus > 0:
+                                future_reward = compute_reward_async.options(
+                                    num_gpus=async_reward_num_gpus
+                                ).remote(data=batch, config=self.config, tokenizer=self.tokenizer)
+                            else:
+                                future_reward = compute_reward_async.remote(
+                                    data=batch, config=self.config, tokenizer=self.tokenizer
+                                )
                         else:
                             reward_tensor, reward_extra_infos_dict = compute_reward(batch, self.reward_fn)
 

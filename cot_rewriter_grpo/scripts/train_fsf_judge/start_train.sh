@@ -22,10 +22,40 @@ USER=$(whoami)
 VENV_PATH="/data-share/yeesuanAI08/lihaitao/luoys/projects/cdad/.venv/bin/activate"
 LLAMAFACTORY_PATH="/data-share/yeesuanAI08/lihaitao/luoys/projects/cdad/LlamaFactory"
 
-# 训练配置
-TRAIN_YAML="examples/fsf_judge/qwen3_1_7b_judge.yaml"
+# 训练配置（根据GPU显存大小选择）
+TRAIN_YAML_40G="examples/fsf_judge/qwen3_1_7b_judge.yaml"   # 40G显存
+TRAIN_YAML_80G="examples/fsf_judge/qwen2_5_3b_judge.yaml"   # 80G显存
 TRAIN_CKPT="/data-share/yeesuanAI08/lihaitao/luoys/checkpoints/cdad/judge/qwen3_1_7b_fsf_judge"  # 与yaml中的output_dir一致
 LOG_DIR="/data-share/yeesuanAI08/lihaitao/luoys/projects/cdad/cot_rewriter_grpo/logs/judge"
+
+# 函数：获取指定GPU的显存大小（MB）
+get_gpu_memory() {
+    local gpu_id="$1"
+    nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits -i "$gpu_id" 2>/dev/null | tr -d ' '
+}
+
+# 函数：根据GPU显存选择配置文件
+get_train_yaml() {
+    local gpu_id="$1"
+    local mem_mb=$(get_gpu_memory "$gpu_id")
+
+    if [ -z "$mem_mb" ]; then
+        echo "警告: 无法获取GPU $gpu_id 的显存大小，使用默认40G配置" >&2
+        echo "$TRAIN_YAML_40G"
+        return
+    fi
+
+    # 将MB转换为GB（大约）
+    local mem_gb=$((mem_mb / 1024))
+
+    if [ "$mem_gb" -ge 70 ]; then
+        # 80G卡（通常显示为80GB左右）
+        echo "$TRAIN_YAML_80G"
+    else
+        # 40G卡（通常显示为40GB左右）
+        echo "$TRAIN_YAML_40G"
+    fi
+}
 
 # 信号处理
 stop_flag=0
@@ -151,7 +181,11 @@ run_single_card_training() {
 
     local log_path=$(generate_log_path "$cuda_visible_devices")
 
+    # 根据GPU显存选择配置文件
+    local train_yaml=$(get_train_yaml "$cuda_visible_devices")
+
     echo "执行单卡训练，CUDA_VISIBLE_DEVICES=$cuda_visible_devices"
+    echo "使用配置文件: $train_yaml"
     echo "日志文件: $log_path"
 
     export CUDA_VISIBLE_DEVICES="$cuda_visible_devices"
@@ -161,7 +195,7 @@ run_single_card_training() {
     cd "$LLAMAFACTORY_PATH"
 
     # 执行训练（使用 overwrite_output_dir 确保覆盖）
-    nohup llamafactory-cli train "$TRAIN_YAML" 2>&1 > "$log_path" &
+    nohup llamafactory-cli train "$train_yaml" 2>&1 > "$log_path" &
     TRAIN_PID=$!
     echo "训练进程PID: $TRAIN_PID"
 

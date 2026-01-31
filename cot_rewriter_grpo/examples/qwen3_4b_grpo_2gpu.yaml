@@ -1,0 +1,243 @@
+# CoT Rewriter GRPO Training Configuration
+# Hardware: 2 x 40GB A100 GPUs
+# Model: Qwen3-4B with LoRA
+#
+# Usage (Offload Mode - all GPUs for training):
+#   bash scripts/grpo/start.sh
+#
+# Architecture (Offload Mode):
+#   GPU 0,5: Actor Model (Qwen3-4B + LoRA) + Rollout Engine
+#   Reward Models: Loaded to GPU temporarily during reward computation, then offloaded to CPU
+#
+# LoRA Configuration:
+#   - lora_rank: 64 (可调整为32/128根据显存情况)
+#   - lora_alpha: 128 (通常设为rank的2倍)
+#   - target_modules: all-linear (所有线性层)
+
+hydra:
+  searchpath:
+    - file://verl/verl/trainer/config
+
+defaults:
+  - ppo_trainer
+  - _self_
+
+# ============ Experiment Configuration ============
+trainer:
+  project_name: cot_rewriter_grpo
+  experiment_name: qwen3_4b_2gpu
+  total_epochs: 1
+  total_training_steps: 500  # Limit total steps for faster iteration
+  save_freq: 50  # Save checkpoint every 50 steps
+  val_freq: 50
+  val_before_train: false  # Skip validation before training to speed up startup
+  device: cuda
+  log_freq: 10
+  # Checkpoint management
+  max_actor_ckpt_to_keep: 3  # Only keep the latest 3 checkpoints
+  # Output directory (timestamp will be added by code)
+  default_local_dir: /data-share/yeesuanAI08/lihaitao/luoys/checkpoints/cdad/rewrite/qwen3_4b_grpo_2gpu/${trainer.project_name}/${trainer.experiment_name}
+  # 训练使用 2 张 GPU (GPU 2,3)
+  n_gpus_per_node: 2
+  nnodes: 1
+  # Logger configuration: console, swanlab, wandb, tensorboard
+  logger: ["swanlab","console"]
+
+  # ========== Rollout Data Logging (for human review) ==========
+  rollout_data_dir: /data-share/yeesuanAI08/lihaitao/luoys/checkpoints/cdad/rewrite/qwen3_4b_grpo_2gpu/rollout_data
+  validation_data_dir: /data-share/yeesuanAI08/lihaitao/luoys/checkpoints/cdad/rewrite/qwen3_4b_grpo_2gpu/validation_data
+
+data:
+  # Use original JSONL directly (field names will be auto-mapped by custom reward function):
+  train_files: /data-share/yeesuanAI08/lihaitao/luoys/data/cdad/cot_rewrite_max_fsf/train.jsonl
+  val_files: /data-share/yeesuanAI08/lihaitao/luoys/data/cdad/cot_rewrite_max_fsf/val.jsonl
+  # IMPORTANT: total samples = train_batch_size × rollout.n must be divisible by n_gpus_per_node
+  # With 2 GPUs and rollout.n=8: 2 × 8 = 16, 16 / 2 = 8 ✓
+  # Batch sizes for training
+  # Input tokens < 4200, output tokens < 5000
+  train_batch_size: 2  # 最小化 batch_size，保持 rollout.n=8 和 max_model_len=10240
+  val_batch_size: 8
+  gen_batch_size: 16
+  max_prompt_length: 4500
+  max_response_length: 5500
+  return_raw_chat: true
+  dataloader_num_workers: 4
+  reward_fn_key: reward_model
+  prompt_key: problem  # Specify that 'problem' field contains the prompt (not 'prompt')
+  # Disable Qwen3 thinking mode during rollout (prevents <think> tags in output)
+  apply_chat_template_kwargs:
+    enable_thinking: false
+
+  # Custom dataset class to support JSONL files
+  custom_cls:
+    path: /data-share/yeesuanAI08/lihaitao/luoys/projects/cdad/cot_rewriter_grpo/verl/verl/utils/dataset/rl_dataset_jsonl.py
+    name: RLHFDatasetJSONL
+
+# ============ Actor/Rollout/Ref Configuration ============
+actor_rollout_ref:
+  hybrid_engine: true
+
+  model:
+    # Actor Model 路径 (参与 GRPO 训练的主模型) - 使用 4B 模型
+    path: /data-share/yeesuanAI08/lihaitao/luoys/hf_home/models/Qwen/Qwen3-4B
+    trust_remote_code: true
+    # Enable gradient checkpointing for memory efficiency
+    enable_gradient_checkpointing: true
+    # Disable remove_padding to avoid flash_attn dependency
+    use_remove_padding: false
+
+    # ============ LoRA Configuration ============
+    # Set lora_rank > 0 to enable LoRA training
+    # 64是一个平衡效果和显存的选择，可调为32(更省显存)或128(更强表达力)
+    lora_rank: 64
+    # LoRA scaling factor，通常设为rank的2倍
+    lora_alpha: 128
+    # Target modules for LoRA adaptation
+    # "all-linear" 表示对所有线性层应用LoRA
+    target_modules: all-linear
+    # 可选：排除某些模块不应用LoRA
+    # exclude_modules: null
+    # 可选：从预训练的LoRA adapter继续训练
+    # lora_adapter_path: null
+
+  actor:
+    ppo_epochs: 1
+    clip_ratio: 0.2
+    entropy_coeff: 0.01
+    grad_clip: 1.0
+    ppo_mini_batch_size: 2  # 必须 <= train_batch_size
+    # 降低 micro batch size 避免 OOM
+    ppo_micro_batch_size_per_gpu: 1
+
+    optim:
+      lr: 1e-5
+      weight_decay: 0.01
+      lr_scheduler_type: cosine
+      lr_warmup_steps_ratio: 0.03
+      min_lr_ratio: 0.1
+      total_training_steps: -1
+
+  rollout:
+    name: vllm
+    tensor_model_parallel_size: 1
+    # 降低 vLLM 显存占用，为 actor update 预留显存
+    # 0.65 确保 KV cache 足够，同时为梯度更新预留空间
+    gpu_memory_utilization: 0.65
+    dtype: bfloat16
+    # CRITICAL: 使用 auto 让 vLLM 直接从磁盘加载基础模型权重
+    # 这样 base_sync_done=True，只需同步 LoRA 参数而非整个模型，避免 OOM
+    load_format: auto
+    # CRITICAL: 启用 layered_summon 使 sleep_level=1，避免 vLLM 销毁基础模型权重
+    # 这样在 rollout 切换时只需同步 LoRA 参数，大幅减少内存压力
+    layered_summon: true
+    log_prob_micro_batch_size_per_gpu: 1  # 降低避免 OOM
+    n: 8  # GRPO requires multiple samples per prompt, n=8 提供最佳组内对比
+    temperature: 0.7
+    top_p: 0.95
+    prompt_length: 4500
+    response_length: 5500
+    # max_model_len = prompt_length(4500) + response_length(5500) = 10000
+    # vLLM requires max_num_batched_tokens >= max_model_len when chunked prefill is enabled
+    max_num_batched_tokens: 10240
+    # Explicitly set max_model_len to match our sequence length requirements
+    max_model_len: 10240
+    agent:
+      num_workers: 1
+
+  ref:
+    enable: false
+
+# ============ Algorithm Configuration ============
+algorithm:
+  adv_estimator: grpo
+  norm_adv_by_std_in_grpo: true
+  gamma: 1.0
+  lam: 1.0
+  use_kl_in_reward: false
+
+# ============ Critic Configuration (GRPO doesn't need) ============
+critic:
+  enable: false
+
+# ============ Reward Model Configuration ============
+reward_model:
+  enable: false
+  # Use custom reward manager that supports batch processing with (data, tokenizer) interface
+  reward_manager: cot_rewriter
+
+  # ===== GPU Memory Optimization for Reward Computation =====
+  # Enable offload to release vLLM memory before reward computation,
+  # freeing up GPU memory for training backward pass
+  offload_rollout_for_reward: true
+
+  # GPU resources allocated to TaskRunner for reward computation.
+  # NOTE: Set to 0 to avoid GPU resource conflicts with training workers.
+  # TaskRunner can still access GPUs via CUDA_VISIBLE_DEVICES environment variable.
+  # Since offload_rollout_for_reward=true, vLLM releases GPU memory before reward computation,
+  # allowing reward models to use GPUs without pre-allocation.
+  task_runner_num_gpus: 0
+
+# ============ Custom Reward Function Configuration ============
+custom_reward_function:
+  path: /data-share/yeesuanAI08/lihaitao/luoys/projects/cdad/cot_rewriter_grpo/verl/verl/experimental/reward/cot_rewriter/combined_reward.py
+  name: compute_cot_rewriter_reward
+  reward_kwargs:
+    # Student Model (for cognitive reward)
+    student_model_path: /data-share/LLM/Qwen3-1.7B
+    # FSF Judge Model (for logic reward)
+    fsf_model_path: /data-share/yeesuanAI08/lihaitao/luoys/checkpoints/cdad/fsf_judge/qwen3_8b_fsf_judge/checkpoint-12000
+    device: cuda:0
+    allow_cpu: true
+    # Enable offload: Reward Model is loaded to GPU only during computation, then offloaded to CPU
+    # This frees up GPU memory for training backward pass
+    enable_offload: true
+    offload_device: cpu
+    use_remote_student: false
+    student_server_url: "http://localhost:8765"
+    lambda_logic: 0.5
+    use_logic_reward: false
+    # Number of rollout samples to print for review (0 to disable)
+    print_samples: 2
+    field_mapping:
+      prompt_key: problem
+      # Use reward_model dict structure (dataset puts thought -> reward_model["original_cot"])
+      reward_model_key: reward_model
+      question_key: question
+      # Dataset maps thought -> reward_model["original_cot"], so use original_cot here
+      original_cot_key: original_cot
+      ground_truth_key: ground_truth
+
+# ============ Reward Manager Configuration ============
+reward_manager:
+  source: importlib
+  name: CoTRewriterRewardManager
+  module:
+    path: /data-share/yeesuanAI08/lihaitao/luoys/projects/cdad/cot_rewriter_grpo/verl/verl/experimental/reward/cot_rewriter/reward_manager.py
+
+# ============ Ray Configuration ============
+ray_kwargs:
+  ray_init:
+    _temp_dir: null
+    include_dashboard: false
+    dashboard_host: ""
+    dashboard_port: null
+    ignore_reinit_error: true
+    logging_level: "warning"
+    local_mode: false
+    namespace: "cot_rewriter_grpo"
+    _system_config:
+      enable_metrics_collection: false
+      agent_register_timeout_ms: 120000
+    runtime_env:
+      env_vars:
+        PYTHONPATH: "/data-share/yeesuanAI08/lihaitao/luoys/projects/cdad/cot_rewriter_grpo/.venv/lib/python3.12/site-packages:/data-share/yeesuanAI08/lihaitao/luoys/projects/cdad/cot_rewriter_grpo:/data-share/yeesuanAI08/lihaitao/luoys/projects/cdad/cot_rewriter_grpo/src:/data-share/yeesuanAI08/lihaitao/luoys/projects/cdad/cot_rewriter_grpo/verl"
+        TOKENIZERS_PARALLELISM: "false"
+        RAY_DEDUP_LOGS: "1"
+        RAY_DASHBOARD_HOST: ""
+        RAY_enable_dashboard: "0"
+        CUDA_VISIBLE_DEVICES: "0,5"
+        # CRITICAL: Prevent Ray from overriding CUDA_VISIBLE_DEVICES when num_gpus=0
+        # This allows TaskRunner to access GPUs for reward computation even without
+        # pre-allocated GPU resources (which would cause resource conflicts with training workers)
+        RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO: "0"
+  timeline_json_file: null

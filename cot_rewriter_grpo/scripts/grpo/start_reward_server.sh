@@ -49,7 +49,7 @@ export PYTHONPATH="${PROJECT_ROOT}:${PROJECT_ROOT}/src:${PYTHONPATH}"
 
 # Start the server with specified GPU
 echo "Starting server..."
-CUDA_VISIBLE_DEVICES=${GPU_ID} python -m src.reward.student_reward_server \
+CUDA_VISIBLE_DEVICES=${GPU_ID} python -m verl.experimental.reward.cot_rewriter.student_reward_server \
     --model_path "${MODEL_PATH}" \
     --port ${PORT} \
     --device_id 0 \
