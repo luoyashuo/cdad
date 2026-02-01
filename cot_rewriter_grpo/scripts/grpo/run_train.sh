@@ -61,10 +61,21 @@ export RAY_DEDUP_LOGS=1
 export RAY_memory_monitor_refresh_ms=0
 export NCCL_DEBUG=WARN
 export TOKENIZERS_PARALLELISM=false
-# PyTorch CUDA memory config
-# Note: expandable_segments:True is NOT compatible with vLLM's CuMem memory pool
-# See: https://github.com/pytorch/pytorch/issues/147851
-export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:False
+# PyTorch CUDA memory config - 使用原生后端并禁用可扩展段
+export PYTORCH_CUDA_ALLOC_CONF=backend:native,expandable_segments:False
+
+# NCCL 配置 - 帮助解决 CUDA driver 兼容性问题
+export NCCL_P2P_DISABLE=1
+export NCCL_IB_DISABLE=1
+export NCCL_SHM_DISABLE=0
+# 禁用 CUDA 内存缓存以避免驱动兼容性问题
+export PYTORCH_NO_CUDA_MEMORY_CACHING=1
+# 禁用 torch.compile 以避免 CUDA Graph 问题
+export TORCH_COMPILE_DISABLE=1
+# vLLM 配置 - 使用 V0 引擎以避免 CUDA Graph 兼容性问题
+export VLLM_USE_V1=0
+# 禁用 vLLM 的 flashinfer 后端（可能有兼容性问题）
+export VLLM_ATTENTION_BACKEND=FLASH_ATTN
 
 # CRITICAL: Disable Ray Dashboard to avoid OpenTelemetry version conflicts
 # This prevents: TypeError: Meter.create_histogram() got an unexpected keyword argument

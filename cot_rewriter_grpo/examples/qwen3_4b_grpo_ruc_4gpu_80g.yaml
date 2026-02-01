@@ -46,8 +46,8 @@ trainer:
   validation_data_dir: /fs/fast/u20240075/luoyashuo/checkpoints/cdad/rewrite/qwen3_4b_grpo_4gpu_80g/validation_data
 
 data:
-  train_files: /home/u20240075/luoyashuo/data/cdad/cot_rewrite_max_fsf/train.jsonl
-  val_files: /home/u20240075/luoyashuo/data/cdad/cot_rewrite_max_fsf/val.jsonl
+  train_files: /home/u20240075/luoyashuo/data/cdad/cot_rewrite_max_fsf_v2/train.jsonl
+  val_files: /home/u20240075/luoyashuo/data/cdad/cot_rewrite_max_fsf_v2/val.jsonl
   # IMPORTANT: total samples = train_batch_size × rollout.n must be divisible by n_gpus_per_node
   # With 4 GPUs and rollout.n=8: 8 × 8 = 64, 64 / 4 = 16 ✓
   # 80G 显存允许更大的 batch size
@@ -86,7 +86,13 @@ actor_rollout_ref:
     ppo_mini_batch_size: 8
     # 80G 显存允许更大的 micro batch
     ppo_micro_batch_size_per_gpu: 2
-
+    # FSDP 配置 - 使用 fp16 避免旧驱动的 bfloat16 转换问题
+    fsdp_config:
+      dtype: float16
+      mixed_precision:
+        param_dtype: fp16
+        reduce_dtype: fp16
+        buffer_dtype: fp16
 
     optim:
       lr: 1e-5
@@ -97,11 +103,12 @@ actor_rollout_ref:
       total_training_steps: -1
 
   rollout:
+    # 使用 vLLM V0 引擎 (通过环境变量 VLLM_USE_V1=0)
     name: vllm
     tensor_model_parallel_size: 1
     # 80G 显存全参数训练
     gpu_memory_utilization: 0.65
-    dtype: bfloat16
+    dtype: float16
     log_prob_micro_batch_size_per_gpu: 2
     n: 8
     temperature: 0.7
@@ -111,6 +118,8 @@ actor_rollout_ref:
     # max_model_len = 8192 + 8192 = 16384
     max_num_batched_tokens: 16384
     max_model_len: 16384
+    # 禁用 CUDA Graph 以避免旧驱动兼容性问题
+    enforce_eager: true
     agent:
       num_workers: 1
 

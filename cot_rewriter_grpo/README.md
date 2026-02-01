@@ -118,152 +118,24 @@ source .venv/bin/activate
 # 安装 VERL 框架（在父目录的 verl 中）
 cd verl
 uv pip install -e .
+uv pip install vllm==0.8.5.post1
+uv pip install "sglang[all]==0.5.2"
 uv pip install transformers==4.55.0
 uv pip install zmq
 uv pip install swanlab
 
 uv pip install torch==2.6.0 torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
 uv pip install https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.3/flash_attn-2.7.3+cu12torch2.6cxx11abiFALSE-cp312-cp312-linux_x86_64.whl
-uv pip install vllm==0.8.5.post1
+
 uv pip install opentelemetry-api==1.34.1 opentelemetry-sdk==1.34.1 opentelemetry-exporter-otlp==1.34.1
+uv pip install loguru
+
 ```
 
-**主要依赖说明：**
 
-| 依赖包 | 用途 |
-|--------|------|
-| `torch>=2.6.0` | PyTorch 深度学习框架 |
-| `transformers` | HuggingFace 模型库 |
-| `vllm` | 高效推理引擎 |
-| `ray` | 分布式训练框架 |
-| `hydra-core` | 配置管理 |
-| `omegaconf` | YAML 配置文件解析 |
-| `datasets` | 数据集处理 |
-| `peft` | LoRA 等参数高效微调 |
-| `accelerate` | 训练加速 |
-
-#### 4. 下载模型
-
-本项目需要以下模型：
-
-| 模型 | 用途 | 路径配置 |
-|------|------|----------|
-| Qwen3-8B | Actor Model（主训练模型） | `actor_rollout_ref.model.path` |
-| Qwen3-1.7B | Student Model（认知奖励） | `reward_model.custom_reward_function.reward_kwargs.student_model_path` |
-| FSF Judge | 逻辑奖励判断模型 | `reward_model.custom_reward_function.reward_kwargs.fsf_model_path` |
-
-```bash
-# 使用 HuggingFace CLI 下载模型（示例）
-huggingface-cli download Qwen/Qwen3-8B --local-dir /path/to/Qwen3-8B
-huggingface-cli download Qwen/Qwen3-1.7B --local-dir /path/to/Qwen3-1.7B
-
-# 或使用 Python
-python -c "from transformers import AutoModel; AutoModel.from_pretrained('Qwen/Qwen3-8B')"
-```
-
-#### 5. 准备训练数据
-
-```bash
-# 方式1：使用数据转换脚本（推荐）
-bash scripts/grpo/convert_data.sh data/raw/train.jsonl data/processed 0.9 jsonl
-
-# 方式2：直接使用原始数据（会自动进行字段映射）
-# 在配置文件中设置：
-# data.train_files: /path/to/original.jsonl
-```
-
-**数据格式说明：**
-
-原始数据格式（支持自动映射）：
-```json
-{
-  "problem": "问题描述",
-  "question": "具体问题",
-  "thought": "原始CoT推理过程",
-  "solution": "正确答案",
-  "fsf": 0.2
-}
-```
-
-转换后格式：
-```json
-{
-  "prompt": "改写提示",
-  "reward_model": {
-    "question": "具体问题",
-    "original_cot": "原始CoT",
-    "ground_truth": "正确答案"
-  }
-}
-```
-
-#### 6. 配置环境变量
-
-```bash
-# 可选：添加到 ~/.bashrc 或 ~/.zshrc
-export RAY_DEDUP_LOGS=1
-export RAY_memory_monitor_refresh_ms=0
-export NCCL_DEBUG=WARN
-export TOKENIZERS_PARALLELISM=false
-export CUDA_VISIBLE_DEVICES=0,1,2,3
-```
-
-#### 7. 验证安装
-
-```bash
-# 检查 GPU 可用性
-nvidia-smi
-
-# 验证 Python 环境
-python -c "import torch; print(f'PyTorch: {torch.__version__}'); print(f'CUDA: {torch.version.cuda}')"
-python -c "import transformers; print(f'Transformers: {transformers.__version__}')"
-python -c "import vllm; print(f'vLLM: {vllm.__version__}')"
-python -c "import ray; print(f'Ray: {ray.__version__}')"
-
-# 验证 VERL 安装
-python -c "from verl.trainer.main_ppo import run_ppo; print('VERL installed successfully')"
-```
-
-#### 8. 启动训练
-
-```bash
-# 使用默认配置启动训练
-bash scripts/grpo/run_train.sh
-
-# 指定配置文件和 GPU
-bash scripts/grpo/run_train.sh qwen3_8b_grpo_4gpu 0,1,2,3
-
-# 或直接运行 Python
-python src/trainer/train.py --config-name=qwen3_8b_grpo_4gpu
-```
-
-### 常见问题
-
-**Q: 遇到 `ModuleNotFoundError: No module named 'verl'`**
-
-A: 确保 VERL 框架已克隆到父目录，并执行了 `uv pip install -e .` 安装
-
-**Q: 遇到 CUDA 版本不匹配**
-
-A: 确保 PyTorch CUDA 版本与系统 CUDA 版本匹配：
-```bash
-python -c "import torch; print(torch.version.cuda)"  # 查看 PyTorch CUDA 版本
-nvcc --version  # 查看系统 CUDA 版本
-```
-
-**Q: 训练时显存不足**
-
-A: 可以尝试以下方法：
-- 启用 LoRA（在配置中设置 `actor_rollout_ref.model.lora`）
-- 减小 `train_batch_size` 和 `gen_batch_size`
-- 降低 `max_prompt_length` 和 `max_response_length`
-- 增加 `gradient_checkpointing`
-
-**Q: Ray 初始化失败**
-
-A: 检查是否有其他 Ray 进程占用资源：
-```bash
-ray status
-ray stop --force  # 强制停止所有 Ray 进程
-```
-
+#### 环境问题
+1. RUC服务器有：NVIDIA-SMI 525.60.13    Driver Version: 525.60.13    CUDA Version: 12.4
+  NVIDIA驱动跟不上CUDA驱动的问题，建议升级大535+
+2. RUC服务器上VLLM运行必须开：
+  - VLLM_USE_V1=0 - 强制使用 vLLM V0 引擎                                                                                                                    
+  - VLLM_ATTENTION_BACKEND=FLASH_ATTN - 使用 Flash Attention 后端 
