@@ -58,8 +58,8 @@ data:
   train_batch_size: 2  # 最小化 batch_size，保持 rollout.n=8 和 max_model_len=10240
   val_batch_size: 8
   gen_batch_size: 16
-  max_prompt_length: 4500
-  max_response_length: 5500
+  max_prompt_length: 6000
+  max_response_length: 5000
   return_raw_chat: true
   dataloader_num_workers: 4
   reward_fn_key: reward_model
@@ -196,6 +196,8 @@ custom_reward_function:
     student_server_url: "http://localhost:8765"
     lambda_logic: 0.5
     use_logic_reward: false
+    # Alpha for cognitive reward formula: R_cog = avg(log P) + alpha * min(avg(log P))
+    alpha: 0.01
     # Number of rollout samples to print for review (0 to disable)
     print_samples: 2
     field_mapping:

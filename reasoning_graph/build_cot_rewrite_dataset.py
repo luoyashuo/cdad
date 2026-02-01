@@ -231,13 +231,32 @@ def process_single_file(input_path: str, strategy: str) -> List[Dict[str, Any]]:
                     "thought": item.get("thought", ""),
                     "solution": item.get("solution", ""),
                 }
+                # v1版本 prompt,会导致格式问题
+#                 problem = f"""\
+# Please rewrite the following reasoning process based on the given question.
+
+# Question: {entry["question"]}
+
+# Reasoning Process: {entry["thought"]}
+# """
+                # v2版本 prompt,强制约束输出格式
                 problem = f"""\
-Please rewrite the following reasoning process based on the given question.
+Task: Rewrite the reasoning process based on the question below.
 
-Question: {entry["question"]}
+### Question
+{entry["question"]}
 
-Reasoning Process: {entry["thought"]}
-"""
+### Original Reasoning
+{entry["thought"]}
+
+### Instructions
+1. Output **ONLY** the rewritten reasoning body text.
+2. **DO NOT** repeat the Question or the Original Reasoning.
+3. **DO NOT** use any headers, labels, or prefixes such as "**Rewritten Reasoning Process:**".
+4. The output must be the direct continuation of the header below.
+
+### Rewritten Reasoning
+""" 
                 entry["problem"] = problem
                 # 如果使用了 FSF 相关策略，添加 fsf 字段用于参考
                 if strategy in ["max_fsf", "min_fsf"]:
@@ -398,6 +417,24 @@ python3 build_cot_rewrite_dataset.py \
     -i /data-share/yeesuanAI08/lihaitao/luoys/data/cdad/omnithought_math_all/train_merge_level1.jsonl \
        /data-share/yeesuanAI08/lihaitao/luoys/data/cdad/omnithought_code_all/train_merge_level1.jsonl \
     -o /data-share/yeesuanAI08/lihaitao/luoys/data/cdad/cot_rewrite_max_fsf \
+    --sampling-strategy max_fsf \
+    --train-ratio 0.98 \
+    --seed 42
+
+# 采样 FSF 最高的 thought v2
+python3 build_cot_rewrite_dataset.py \
+    -i /data-share/yeesuanAI08/lihaitao/luoys/data/cdad/omnithought_math_all/train_merge_level1.jsonl \
+       /data-share/yeesuanAI08/lihaitao/luoys/data/cdad/omnithought_code_all/train_merge_level1.jsonl \
+    -o /data-share/yeesuanAI08/lihaitao/luoys/data/cdad/cot_rewrite_max_fsf_v2 \
+    --sampling-strategy max_fsf \
+    --train-ratio 0.98 \
+    --seed 42
+
+# 采样 FSF 最高的 thought v2
+python3 build_cot_rewrite_dataset.py \
+    -i /home/u20240075/luoyashuo/data/cdad/omnithought_math_all/train_merge_level1.jsonl \
+       /home/u20240075/luoyashuo/data/cdad/omnithought_code_all/train_merge_level1.jsonl \
+    -o /home/u20240075/luoyashuo/data/cdad/cot_rewrite_max_fsf_v2 \
     --sampling-strategy max_fsf \
     --train-ratio 0.98 \
     --seed 42

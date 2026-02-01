@@ -3,8 +3,8 @@ Combined Reward Function for CoT Rewriter GRPO
 
 Reward 计算逻辑:
 - 使用 Qwen3 chat template 格式计算 Student Model 的 log prob
-- 比较 rewrite_cot 和 original_cot 条件下 answer 的 mean log prob
-- 如果 rewrite_mean > original_mean → R_cog = 1，否则 R_cog = 0
+- R_cog = avg(log P_student(Answer | Question, Rewrite_CoT)) + alpha_cog * min(batch内的avg log prob)
+- alpha_cog 为可配置参数，默认为 0.01
 - (可选) R_logic: FSF Judge 比较失败分支比例
 
 This module provides the VERL-compatible interface for reward computation.
@@ -45,6 +45,7 @@ class CombinedRewardComputer:
         student_server_url: str = "http://localhost:8765",
         enable_offload: bool = False,
         offload_device: str = "cpu",
+        alpha_cog: float = 0.01,
     ):
         """
         Initialize Combined Reward Computer.
@@ -60,15 +61,19 @@ class CombinedRewardComputer:
             student_server_url: URL of the student reward server (only used if use_remote_student=True)
             enable_offload: If True, models are kept on CPU and loaded to GPU only during computation
             offload_device: Device to offload models when not in use (default: "cpu")
+            alpha_cog: Weight for min log prob term in cognitive reward (default: 0.01)
+                       R_cog = avg(log_prob) + alpha_cog * min(batch内的avg log_prob)
         """
         self.lambda_logic = lambda_logic
         self.use_logic_reward = use_logic_reward
         self.use_remote_student = use_remote_student
         self.enable_offload = enable_offload
+        self.alpha_cog = alpha_cog
 
         logger.info(f"[CombinedRewardComputer] Initializing")
         logger.info(f"  Device: {device}")
         logger.info(f"  Offload Enabled: {enable_offload}")
+        logger.info(f"  Alpha Cog: {alpha_cog}")
         if enable_offload:
             logger.info(f"  Offload Device: {offload_device}")
 
@@ -146,8 +151,7 @@ class CombinedRewardComputer:
         Compute combined reward.
 
         Reward 逻辑:
-        - 比较 rewrite_cot 和 original_cot 条件下 answer 的 mean log prob
-        - 如果 rewrite_mean > original_mean → R_cog = 1，否则 R_cog = 0
+        - R_cog = avg(log P_student(Answer | Question, Rewrite_CoT)) + alpha_cog * min(batch内的avg log prob)
         - (可选) R_logic = 1 if FSF(rewrite) < FSF(original) else 0
         - Total = R_cog + lambda * R_logic
 
@@ -163,22 +167,36 @@ class CombinedRewardComputer:
         batch_size = len(questions)
         logger.info(f"[REWARD] Computing reward for batch_size={batch_size}")
 
-        # Compute cognitive reward (比较 rewrite vs original)
+        # Compute cognitive reward (获取 mean log prob)
         logger.info(f"[REWARD] Computing cognitive reward...")
         cog_result = self.student_client.compute_cognitive_reward_batch(
             questions=questions,
             rewrite_cots=rewrite_cots,
             answers=answers,
-            original_cots=original_cots,  # 传入 original_cots 进行比较
+            original_cots=original_cots,  # 传入 original_cots 用于记录
         )
         logger.info(f"[REWARD] Cognitive reward computed")
 
-        # 使用比较后的 reward (0 或 1)
-        r_cog = cog_result["rewards"]
+        # 获取 rewrite_cot 条件下的 mean log prob
         rewrite_mean_log_probs = cog_result["rewrite_mean_log_probs"]
         original_mean_log_probs = cog_result["original_mean_log_probs"]
         token_log_probs = cog_result["rewrite_token_log_probs"]
         token_ids = cog_result["rewrite_token_ids"]
+
+        # 新的 R_cog 计算: R_cog = avg(log_prob) + alpha_cog * min(batch内的avg log_prob)
+        # 过滤掉无效值 (-100.0) 来计算 min
+        valid_log_probs = [lp for lp in rewrite_mean_log_probs if lp > -99.0]
+        if valid_log_probs:
+            min_log_prob = min(valid_log_probs)
+        else:
+            min_log_prob = -100.0
+
+        r_cog = [
+            lp + self.alpha_cog * min_log_prob if lp > -99.0 else 0.0
+            for lp in rewrite_mean_log_probs
+        ]
+        logger.info(f"[REWARD] R_cog formula: avg(log_prob) + {self.alpha_cog} * min(log_prob)")
+        logger.info(f"[REWARD] min_log_prob in batch: {min_log_prob:.4f}")
 
         # Compute logic reward (if enabled)
         if (
@@ -251,6 +269,7 @@ def compute_cot_rewriter_reward(
     student_server_url: str = "http://localhost:8765",
     enable_offload: bool = False,
     offload_device: str = "cpu",
+    alpha_cog: float = 0.01,
     field_mapping: Optional[Dict[str, str]] = None,
     **kwargs,
 ) -> Dict[str, Any]:
@@ -274,6 +293,8 @@ def compute_cot_rewriter_reward(
         enable_offload: If True, models are kept on CPU and loaded to GPU only during computation.
             This allows sharing GPU memory with training. Recommended for 4-GPU setups.
         offload_device: Device to offload models when not in use (default: "cpu")
+        alpha_cog: Weight for min log prob term in cognitive reward (default: 0.01)
+                   R_cog = avg(log_prob) + alpha_cog * min(batch内的avg log_prob)
         field_mapping: Optional dict to customize field names in data.
             Keys: "prompt_key", "reward_model_key", "question_key",
                   "original_cot_key", "ground_truth_key"
@@ -408,6 +429,7 @@ def compute_cot_rewriter_reward(
         student_server_url=student_server_url,
         enable_offload=enable_offload,
         offload_device=offload_device,
+        alpha_cog=alpha_cog,
     )
 
     # Load models to GPU before computing rewards (if offload enabled)

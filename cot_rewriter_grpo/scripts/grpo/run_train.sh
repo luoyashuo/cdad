@@ -139,12 +139,8 @@ echo ""
 cd "${PROJECT_ROOT}"
 
 # 启动训练
-# 方式1: 直接运行 Python (使用 Hydra 配置)
-python src/trainer/train.py --config-name="${CONFIG_NAME}" 2>&1 | tee "${LOG_FILE}"
-
-# 方式2: 使用 torchrun (如果需要多进程)
-# torchrun --standalone --nnodes=1 --nproc_per_node=4 \
-#     src/trainer/train.py --config-name="${CONFIG_NAME}" 2>&1 | tee "${LOG_FILE}"
+# 使用 verl 内置的 main_ppo.py 作为训练入口
+python verl/verl/trainer/main_ppo.py --config-path="${PROJECT_ROOT}/examples" --config-name="${CONFIG_NAME}" 2>&1 | tee "${LOG_FILE}"
 
 echo ""
 echo "============================================================"
