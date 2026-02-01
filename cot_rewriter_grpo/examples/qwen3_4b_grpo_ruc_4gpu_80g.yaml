@@ -87,13 +87,6 @@ actor_rollout_ref:
     # 80G 显存允许更大的 micro batch
     ppo_micro_batch_size_per_gpu: 2
 
-    # FSDP 配置 - 使用 FSDP2 以避免 CUDA driver error
-    strategy: fsdp2
-    fsdp_config:
-      strategy: fsdp2
-      model_dtype: bfloat16
-      dtype: bfloat16
-      reshard_after_forward: true
 
     optim:
       lr: 1e-5
