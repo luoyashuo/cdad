@@ -608,6 +608,9 @@ def compute_cot_rewriter_reward(
             logger.info("-" * 50)
         logger.info(f"{'='*60}\n")
 
+    # Build truncated mask (per-sample, can be chunked by VERL)
+    truncated_mask = [1.0 if i in truncated_indices else 0.0 for i in range(batch_size)]
+
     reward_result = {
         "reward_tensor": token_level_rewards,
         "reward_extra_info": {
@@ -618,8 +621,9 @@ def compute_cot_rewriter_reward(
             "total_rewards": result["total_rewards"],
             "original_fsfs": result["extra_info"]["original_fsfs"],
             "rewrite_fsfs": result["extra_info"]["rewrite_fsfs"],
-            "truncated_count": len(truncated_indices),
-            "truncated_ratio": len(truncated_indices) / batch_size if batch_size > 0 else 0.0,
+            # Per-sample truncation mask (1.0 = truncated, 0.0 = not truncated)
+            # This can be properly chunked by VERL's data sharding
+            "truncated_mask": truncated_mask,
         },
     }
 

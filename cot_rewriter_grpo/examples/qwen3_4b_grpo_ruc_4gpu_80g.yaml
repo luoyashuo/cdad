@@ -8,11 +8,7 @@
 # Architecture (Offload Mode):
 #   GPU 0,1,2,3: Actor Model (Qwen3-4B 全参数) + Rollout Engine
 #   Reward Models: Loaded to GPU temporarily during reward computation, then offloaded to CPU
-#
-# 80G 显存优化:
-#   - 全参数训练 (无 LoRA)
-#   - 更大的 batch size: 8 (vs 2 on 40G)
-#   - 更长的序列长度: max_model_len=16384
+
 
 hydra:
   searchpath:
@@ -51,11 +47,11 @@ data:
   # IMPORTANT: total samples = train_batch_size × rollout.n must be divisible by n_gpus_per_node
   # 快速验证配置: 2 × 2 = 4, 4 × 4 GPUs = 16 samples
   # 正式训练时改回: train_batch_size=4, rollout.n=8
-  train_batch_size: 2  # 快速验证，正式训练改回 4
+  train_batch_size: 4  # 快速验证，正式训练改回 4
   val_batch_size: 4
   gen_batch_size: 8
   max_prompt_length: 5500
-  max_response_length: 4500
+  max_response_length: 5500
   return_raw_chat: true
   dataloader_num_workers: 4
   reward_fn_key: reward_model
@@ -79,18 +75,21 @@ actor_rollout_ref:
     # Full parameter training (no LoRA)
 
   actor:
+    # strategy: fsdp # 不要用fsdp2, 接口改动太多
     ppo_epochs: 1
     clip_ratio: 0.2
     entropy_coeff: 0.01
     grad_clip: 1.0
-    ppo_mini_batch_size: 1  # 减小以避免 backward OOM
+    ppo_mini_batch_size: 4  # 减小以避免 backward OOM
     # 降低 micro batch size 以减少显存峰值
-    ppo_micro_batch_size_per_gpu: 1
+    ppo_micro_batch_size_per_gpu: 2
     # FSDP 配置 - 使用 fp16 避免旧驱动的 bfloat16 转换问题
     fsdp_config:
       dtype: float16
-      param_offload: true      # 在 reward 计算时 offload 参数到 CPU
-      optimizer_offload: true  # 在 reward 计算时 offload optimizer 到 CPU
+      # fsdp1尽量不要开，可能会导致梯度回传出bug：https://www.linkedin.com/pulse/rl-system-deep-dive-fsdp-training-backend-chenyang-zhao-jjeoe
+      # 似乎fsdp2修复了这个问题
+      param_offload: false      # 在 reward 计算时 offload 参数到 CPU
+      optimizer_offload: false  # 在 reward 计算时 offload optimizer 到 CPU
       mixed_precision:
         param_dtype: fp16
         reduce_dtype: fp16
@@ -111,18 +110,17 @@ actor_rollout_ref:
     tensor_model_parallel_size: 1
     # vLLM 显存占用 - Actor vLLM 通过 sleep(level=2) 完全释放后
     # Student vLLM 可以使用全部 GPU 显存，计算完后 cleanup 再 reload Actor vLLM
-    gpu_memory_utilization: 0.7
+    gpu_memory_utilization: 0.6
     dtype: float16
     # 降低 log_prob 计算时的 micro batch size
-    log_prob_micro_batch_size_per_gpu: 1
-    n: 4  # 快速验证 (需要满足 ppo_mini_batch_size * n >= n_gpus)，正式训练改回 8
+    log_prob_micro_batch_size_per_gpu: 2
+    n: 8  # 快速验证 (需要满足 ppo_mini_batch_size * n >= n_gpus)，正式训练改回 8
     temperature: 0.7
     top_p: 0.95
-    prompt_length: 4500
+    prompt_length: 5500
     response_length: 5500
-    # max_model_len = 8192 + 8192 = 16384
-    max_num_batched_tokens: 10240
-    max_model_len: 10240
+    max_num_batched_tokens: 12288
+    max_model_len: 12288
     # 禁用 CUDA Graph 以避免旧驱动兼容性问题
     enforce_eager: true
     # 启用 vLLM 销毁/重建机制 - 在 reward 计算时销毁 vLLM 释放显存给 Student vLLM
@@ -195,8 +193,8 @@ custom_reward_function:
     #
     # 设置 0.4 确保 Student vLLM + logprobs 计算不会 OOM
     # 如果仍然 OOM，可以进一步降到 0.35
-    sglang_gpu_memory_utilization: 0.4  # SGLang 后端使用
-    vllm_gpu_memory_utilization: 0.4    # vLLM 后端使用 (从 0.5 降到 0.4 避免 OOM)
+    sglang_gpu_memory_utilization: 0.3  # SGLang 后端使用
+    vllm_gpu_memory_utilization: 0.3    # vLLM 后端使用 (从 0.5 降到 0.4 避免 OOM)
     # 在所有 4 个 GPU 上启动 Student vLLM，实现数据并行
     # 每个 GPU 一个 Student vLLM 实例，计算完成后自动 cleanup 释放显存
     student_devices: ["cuda:0", "cuda:1", "cuda:2", "cuda:3"]
