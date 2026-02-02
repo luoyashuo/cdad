@@ -192,14 +192,18 @@ custom_reward_function:
     # This frees up GPU memory for training backward pass
     enable_offload: true
     offload_device: cpu
-    use_remote_student: false
-    student_server_url: "http://localhost:8765"
+
     lambda_logic: 0.5
     use_logic_reward: false
     # Alpha for cognitive reward formula: R_cog = avg(log P) + alpha * min(avg(log P))
     alpha: 0.01
     # Number of rollout samples to print for review (0 to disable)
     print_samples: 2
+    # 多 GPU 并行加速 Student Reward 计算 (自动检测可用 GPU)
+    use_multi_gpu: true
+      # GPU batch size for forward pass (higher = better GPU utilization, more memory)
+    # 每次 GPU forward 处理的样本数，控制内存使用和 GPU 利用率
+    gpu_batch_size: 16
     field_mapping:
       prompt_key: problem
       # Use reward_model dict structure (dataset puts thought -> reward_model["original_cot"])

@@ -16,7 +16,6 @@ A unified tracking interface that supports logging data to different backend
 """
 
 import dataclasses
-import json
 import os
 from enum import Enum
 from functools import partial
@@ -35,17 +34,7 @@ class Tracking:
         logger: Dictionary of initialized logger instances for each backend.
     """
 
-    supported_backend = [
-        "wandb",
-        "mlflow",
-        "swanlab",
-        "vemlp_wandb",
-        "tensorboard",
-        "console",
-        "clearml",
-        "trackio",
-        "file",
-    ]
+    supported_backend = ["wandb", "mlflow", "swanlab", "vemlp_wandb", "tensorboard", "console", "clearml"]
 
     def __init__(self, project_name, experiment_name, default_backend: str | list[str] = "console", config=None):
         if isinstance(default_backend, str):
@@ -61,22 +50,13 @@ class Tracking:
         self.logger = {}
 
         if "tracking" in default_backend or "wandb" in default_backend:
-            import os
-
             import wandb
 
             settings = None
             if config and config["trainer"].get("wandb_proxy", None):
                 settings = wandb.Settings(https_proxy=config["trainer"]["wandb_proxy"])
-            entity = os.environ.get("WANDB_ENTITY", None)
-            wandb.init(project=project_name, name=experiment_name, entity=entity, config=config, settings=settings)
+            wandb.init(project=project_name, name=experiment_name, config=config, settings=settings)
             self.logger["wandb"] = wandb
-
-        if "trackio" in default_backend:
-            import trackio
-
-            trackio.init(project=project_name, name=experiment_name, config=config)
-            self.logger["trackio"] = trackio
 
         if "mlflow" in default_backend:
             import os
@@ -147,9 +127,6 @@ class Tracking:
         if "clearml" in default_backend:
             self.logger["clearml"] = ClearMLLogger(project_name, experiment_name, config)
 
-        if "file" in default_backend:
-            self.logger["file"] = FileLogger(project_name, experiment_name)
-
     def log(self, data, step, backend=None):
         for default_backend, logger_instance in self.logger.items():
             if backend is None or default_backend in backend:
@@ -164,12 +141,9 @@ class Tracking:
             self.logger["vemlp_wandb"].finish(exit_code=0)
         if "tensorboard" in self.logger:
             self.logger["tensorboard"].finish()
-        if "clearml" in self.logger:
-            self.logger["clearml"].finish()
-        if "trackio" in self.logger:
-            self.logger["trackio"].finish()
-        if "file" in self.logger:
-            self.logger["file"].finish()
+
+        if "clearnml" in self.logger:
+            self.logger["clearnml"].finish()
 
 
 class ClearMLLogger:
@@ -221,29 +195,7 @@ class ClearMLLogger:
                 )
 
     def finish(self):
-        self._task.close()
-
-
-class FileLogger:
-    def __init__(self, project_name: str, experiment_name: str):
-        self.project_name = project_name
-        self.experiment_name = experiment_name
-
-        self.filepath = os.getenv("VERL_FILE_LOGGER_PATH", None)
-        if self.filepath is None:
-            root_path = os.path.expanduser(os.getenv("VERL_FILE_LOGGER_ROOT", "."))
-            directory = os.path.join(root_path, self.project_name)
-            os.makedirs(directory, exist_ok=True)
-            self.filepath = os.path.join(directory, f"{self.experiment_name}.jsonl")
-            print(f"Creating file logger at {self.filepath}")
-        self.fp = open(self.filepath, "w")
-
-    def log(self, data, step):
-        data = {"step": step, "data": data}
-        self.fp.write(json.dumps(data) + "\n")
-
-    def finish(self):
-        self.fp.close()
+        self._task.mark_completed()
 
 
 class _TensorboardAdapter:
@@ -266,34 +218,10 @@ class _TensorboardAdapter:
 
 
 class _MlflowLoggingAdapter:
-    def __init__(self):
-        import logging
-        import re
-
-        self.logger = logging.getLogger(__name__)
-        # MLflow metric key validation logic:
-        # https://github.com/mlflow/mlflow/blob/master/mlflow/utils/validation.py#L157C12-L157C44
-        # Only characters allowed: slashes, alphanumerics, underscores, periods, dashes, colons,
-        # and spaces.
-        self._invalid_chars_pattern = re.compile(
-            r"[^/\w.\- :]"
-        )  # Allowed: slashes, alphanumerics, underscores, periods, dashes, colons, and spaces.
-
     def log(self, data, step):
         import mlflow
 
-        def sanitize_key(key):
-            # First replace @ with _at_ for backward compatibility
-            sanitized = key.replace("@", "_at_")
-            # Then replace any other invalid characters with _
-            sanitized = self._invalid_chars_pattern.sub("_", sanitized)
-            if sanitized != key:
-                self.logger.warning(
-                    "[MLflow] Metric key '%s' sanitized to '%s' due to invalid characters.", key, sanitized
-                )
-            return sanitized
-
-        results = {sanitize_key(k): v for k, v in data.items()}
+        results = {k.replace("@", "_at_"): v for k, v in data.items()}
         mlflow.log_metrics(metrics=results, step=step)
 
 

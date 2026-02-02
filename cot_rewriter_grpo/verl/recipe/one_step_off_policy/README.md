@@ -35,18 +35,17 @@ policy.
 https://raw.githubusercontent.com/eric-haibin-lin/verl-community/refs/heads/main/docs/one_step_off_policy.png)
 > reference: [AReaL: A Large-Scale Asynchronous Reinforcement Learning System for Language Reasoning](
 > https://arxiv.org/abs/2505.24298)
-> original work: [Asynchronous RLHF: Faster and More Efficient Off-Policy RL for Language Models](https://arxiv.org/abs/2410.18252)
 
 Our core contributions include:
 
-1. **Parallel Generation and Training**:
+1. **Parallel Generation and Training**:  
    Samples for the next batch are asynchronously generated while the current batch is being trained.
 
-2. **Resource Isolation**:
+2. **Resource Isolation**:  
    Unlike `hybrid_engine`, this method requires explicit resource allocation for rollout, with remaining resources
    automatically assigned to training.
 
-3. **NCCL Parameter Synchronization**:
+3. **NCCL Parameter Synchronization**:  
    Employs NCCL communication primitives for seamless parameter transfer between generation and training modules.
 
 ### Experimental Results
@@ -77,7 +76,7 @@ https://raw.githubusercontent.com/eric-haibin-lin/verl-community/refs/heads/main
 
 ## Implementation
 
-### One Step Off Policy Async Pipeline
+### One Step Off Policy Async Pipline
 
 Our implemented **One Step Off Policy Async Pipeline** integrates seamlessly into existing training logic at minimal
 cost,
@@ -121,7 +120,7 @@ while batch_data_future is not None:
     # launch the next async call to generate sequences
     batch_data_future = self._async_gen_next_batch(continuous_iterator)
 
-    # compute advantages
+    # compute advantages 
     batch = critic.compute_values(batch)
     batch = reference.compute_log_prob(batch)
     batch = reward.compute_reward(batch)
@@ -179,7 +178,7 @@ collective.create_collective_group(
 ```
 
 ```python
-# drive process call the actor and rollout respectively to sync parameters by nccl
+# drive process call the actor and rollout respectively to sync parameters by nccl 
 def sync_rollout_weights(self):
     self.actor_wg.sync_rollout_weights()
     ray.get(self.rollout_wg.sync_rollout_weights())
@@ -193,7 +192,6 @@ def sync_rollout_weights(self):
         inference_model = (
             self.rollout.inference_engine.llm_engine.model_executor.driver_worker.worker.model_runner.model
         )
-        from verl.utils.vllm.patch import patch_vllm_moe_model_weight_loader
         patch_vllm_moe_model_weight_loader(inference_model)
     # Model parameters are broadcast tensor-by-tensor from actor to rollout
     for key, shape, dtype in self._weights_info:
@@ -248,17 +246,17 @@ python3 -m recipe.one_step_off_policy.async_main_ppo \
 
 ### Configuration Guidelines
 
-1. **Card Number Relationships**
+1. **Card Number Relationships**  
    Maintain either of these relationships for optimal batch distribution:
-    - `actor_rollout_ref.rollout.n` should be an integer divisor of:
+    - `actor_rollout_ref.rollout.n` should be an integer divisor of:  
       `trainer.n_gpus_per_node * trainer.nnodes`
-    - `actor_rollout_ref.rollout.n * data.train_batch_size` should be evenly divisible by:
+    - `actor_rollout_ref.rollout.n * data.train_batch_size` should be evenly divisible by:  
       `trainer.n_gpus_per_node * trainer.nnodes`
 
    > Rationale: Ensures training samples can be evenly distributed across training GPUs when using partial resources for
    generation.
 
-2. **Dynamic Resource Tuning**
+2. **Dynamic Resource Tuning**  
    Adjust `trainer.nnodes` `trainer.n_gpus_per_node` `rollout.nnodes` `rollout.n_gpus_per_node` based on phase
    durations:
     - **Ideal state**: Rollout and training phases have comparable durations
@@ -293,6 +291,6 @@ python3 -m recipe.one_step_off_policy.async_main_ppo \
 | Category           | Support Situation                                                                                               |
 |--------------------|-----------------------------------------------------------------------------------------------------------------|
 | train engine       | FSDP2  <br/> Megatron                                                                                           |
-| rollout engine     | vLLM <br/> SGLang                                                                                               |
+| rollout engine     | vLLM                                                                                                            |
 | AdvantageEstimator | GRPO <br/> GRPO_PASSK <br/> REINFORCE_PLUS_PLUS <br/> RLOO <br/> OPO <br/> REINFORCE_PLUS_PLUS_BASELINE<br/>GPG |
 | Reward             | all                                                                                                             |

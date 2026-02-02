@@ -37,7 +37,7 @@ from omegaconf import OmegaConf
 from torch import nn
 
 from verl import DataProto
-from verl.trainer.ppo.core_algos import agg_loss, get_policy_loss_fn, kl_penalty
+from verl.trainer.ppo.core_algos import agg_loss, compute_policy_loss, get_policy_loss_fn, kl_penalty
 from verl.utils.device import get_device_id, get_torch_device
 from verl.utils.megatron.pipeline_parallel import make_batch_generator
 from verl.utils.megatron.tensor_parallel import vocab_parallel_entropy, vocab_parallel_log_probs_from_logits
@@ -122,16 +122,9 @@ class MegatronPPOActor(BasePPOActor):
         self.tf_config = tf_config
         self.actor_module = actor_module
         self.actor_optimizer: DistributedOptimizer = actor_optimizer
-        self.use_torch_profiler = self.config.profiler.get("tool") == "torch"
-        if self.use_torch_profiler:
-            self.prof = Profiler(
-                self.config.profiler, tool_config=self.config.profiler.get("tool_config", {}).get("torch", {})
-            )
-        else:
-            self.prof = None
+        self.prof = Profiler(self.config.profile)
         self.use_fused_kernels = self.config.get("use_fused_kernels", False)
-        if self.use_fused_kernels and not getattr(self.config, "overlap_moe_expert_parallel_comm", False):
-            # do not patch if overlap_moe_expert_parallel_comm is enabled
+        if self.use_fused_kernels:
             from verl.models.mcore.model_forward_fused import patch_fused_forward
 
             for model in self.actor_module:
@@ -146,6 +139,7 @@ class MegatronPPOActor(BasePPOActor):
                 "sequence_parallel": self.tf_config.sequence_parallel,
                 "DDP_impl": "local",
                 "layernorm_allreduce_bucket_threshold": 0,
+                "pipeline_model_parallel_split_rank": None,
                 "reduce_grads_use_alltoall": False,
             }
         )
@@ -183,16 +177,15 @@ class MegatronPPOActor(BasePPOActor):
         Returns:
             DataProto: torch.Tensor: the log_prob tensor
         """
+        data.to(get_device_id())
+        data.batch = data.batch.contiguous()
         use_dynamic_bsz = data.meta_info.get("use_dynamic_bsz", False)
         micro_batch_size = data.meta_info.get("micro_batch_size", None)
         max_token_len = data.meta_info.get("max_token_len", None)
+        assert micro_batch_size is not None, "micro batch size is needed for forward compute"
         if use_dynamic_bsz:
             assert max_token_len is not None, "max_token_len must be set when use_dynamic_bsz is True"
             max_token_len = max_token_len * self.config.megatron.context_parallel_size
-        else:
-            assert micro_batch_size is not None, (
-                "micro batch size is needed for forward compute when use_dynamic_bsz is False"
-            )
 
         def compute_logprobs_fn(output, data, use_dynamic_bsz=False, indices=None):
             response = data["responses"]
@@ -240,7 +233,7 @@ class MegatronPPOActor(BasePPOActor):
                     log_probs = torch.empty(
                         size=(batch_size, response_length), dtype=torch.float32, device=input_ids.device
                     )
-                log_probs = log_probs.to(get_device_id())
+
                 # broadcast across pp ranks
                 torch.distributed.broadcast(
                     tensor=log_probs,
@@ -248,7 +241,6 @@ class MegatronPPOActor(BasePPOActor):
                     group=mpu.get_pipeline_model_parallel_group(),
                     async_op=False,
                 )
-                log_probs = log_probs.to("cpu")
                 if calculate_entropy:
                     # Note that o[0] is metrics, o[1] is entropy
                     if mpu.is_pipeline_last_stage(ignore_virtual=True):
@@ -265,14 +257,12 @@ class MegatronPPOActor(BasePPOActor):
                             size=(batch_size, response_length), dtype=torch.float32, device=input_ids.device
                         )
                     # broadcast across pp ranks
-                    entropys = entropys.to(get_device_id())
                     torch.distributed.broadcast(
                         tensor=entropys,
                         src=mpu.get_pipeline_model_parallel_last_rank(),
                         group=mpu.get_pipeline_model_parallel_group(),
                         async_op=False,
                     )
-                    entropys = entropys.to("cpu")
 
         # add empty cache after each compute
         get_torch_device().empty_cache()
@@ -316,13 +306,6 @@ class MegatronPPOActor(BasePPOActor):
         ]
         if self.config.use_kl_loss:
             select_keys.append("ref_log_prob")
-        # Include pre-computed IS weights if present in batch
-        # Weights are computed centrally in trainer and added to batch when algorithm.rollout_is=True
-        if "rollout_is_weights" in data.batch.keys():
-            select_keys.append("rollout_is_weights")
-        # Include rollout_log_probs for computing rollout_corr metrics in bypass mode
-        if "rollout_log_probs" in data.batch.keys():
-            select_keys.append("rollout_log_probs")
         self.has_multi_modal_inputs = "multi_modal_inputs" in data.non_tensor_batch.keys()
         if self.has_multi_modal_inputs:
             data = data.select(select_keys, ["multi_modal_inputs"])
@@ -353,15 +336,12 @@ class MegatronPPOActor(BasePPOActor):
         """
         # broadcast from last pp rank to all other pp ranks
         # TODO: actually, we just need to control the sampling order.
-        data.to(get_device_id())
-        data.batch = data.batch.contiguous()
         mini_batch = data
         broadcast_dict_tensor(
             mini_batch.batch,
             src=mpu.get_pipeline_model_parallel_last_rank(),
             group=mpu.get_pipeline_model_parallel_group(),
         )
-        mini_batch.to("cpu")
         # split into micro-batches
         mini_batch.batch["attention_mask"] = mini_batch.batch["attention_mask"].to(bool)
         self.has_multi_modal_inputs = "multi_modal_inputs" in mini_batch.non_tensor_batch.keys()
@@ -377,7 +357,6 @@ class MegatronPPOActor(BasePPOActor):
             ]  # mcore patch recompute qwen2vl's pos ids during forward
 
         indices = None
-        temperature = data.meta_info["temperature"]
         if use_dynamic_bsz:
             assert max_token_len is not None, "max_token_len must be set when use_dynamic_bsz is True"
             vpp_size = mpu.get_virtual_pipeline_model_parallel_world_size()
@@ -410,17 +389,7 @@ class MegatronPPOActor(BasePPOActor):
         def loss_func(output, data, meta_info):
             # For memory efficiency
             # We move calculation of entropy to compute_log_probs, forward_only == True
-            log_probs = None
-            entropy = None
-            if isinstance(output, dict):
-                log_probs = output["log_probs"]
-                if "entropy" in output:
-                    entropy = output["entropy"]
-            else:
-                assert isinstance(output, torch.Tensor)
-                log_probs = output
-
-            device = log_probs.device
+            device = output["log_probs"].device
             metrics = {}
             if forward_only:
                 if post_process_fn is None:
@@ -436,50 +405,57 @@ class MegatronPPOActor(BasePPOActor):
             response_length = responses.size(1)
             response_mask = data["response_mask"].to(bool)
             loss_agg_mode = self.config.loss_agg_mode
+
             # compute policy loss
-            log_prob = log_probs[:, -response_length - 1 : -1].contiguous()
+            log_prob = output["log_probs"][:, -response_length - 1 : -1].contiguous()
             ret_entropy = None
             stats = {}
             if not forward_only:
                 old_log_prob = data["old_log_probs"]
                 advantages = data["advantages"]
 
+                clip_ratio = self.config.clip_ratio
+                clip_ratio_low = self.config.clip_ratio_low if self.config.clip_ratio_low is not None else clip_ratio
+                clip_ratio_high = self.config.clip_ratio_high if self.config.clip_ratio_high is not None else clip_ratio
+
+                clip_ratio_c = self.config.get("clip_ratio_c", 3.0)
                 entropy_coeff = self.config.entropy_coeff
                 loss_agg_mode = self.config.loss_agg_mode
 
                 loss_mode = self.config.policy_loss.get("loss_mode", "vanilla")
 
-                policy_loss_fn = get_policy_loss_fn(loss_mode)
-
-                # Extract pre-computed rollout correction weights if present
-                # Weights are computed centrally in trainer and added when algorithm.rollout_is=True
-                rollout_is_weights = data.get("rollout_is_weights", None)
-                pg_loss, pg_metrics = policy_loss_fn(
-                    old_log_prob=old_log_prob,
-                    log_prob=log_prob,
-                    advantages=advantages,
-                    response_mask=response_mask,
-                    loss_agg_mode=loss_agg_mode,
-                    config=self.config,
-                    rollout_is_weights=rollout_is_weights,
-                )
-                stats.update(pg_metrics)
-
-                # Skip if using pure rollout correction mode (metrics already in pg_metrics)
-                rollout_log_prob = data.get("rollout_log_probs", None)
-                if loss_mode != "rollout_correction" and rollout_log_prob is not None:
-                    # Compute metrics using CURRENT policy π_θ vs π_rollout
-                    # Tracks evolving off-policy gap as π_θ updates during mini-batch training
-                    from verl.trainer.ppo.rollout_corr_helper import compute_rollout_corr_metrics_from_logprobs
-
-                    rollout_corr_metrics = compute_rollout_corr_metrics_from_logprobs(
+                if self.config.policy_loss.loss_mode == "vanilla":
+                    pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower = compute_policy_loss(
+                        old_log_prob=old_log_prob,
                         log_prob=log_prob,
-                        rollout_log_prob=rollout_log_prob,
+                        advantages=advantages,
                         response_mask=response_mask,
+                        cliprange=clip_ratio,
+                        cliprange_low=clip_ratio_low,
+                        cliprange_high=clip_ratio_high,
+                        clip_ratio_c=clip_ratio_c,
+                        loss_agg_mode=loss_agg_mode,
                     )
-                    stats.update(rollout_corr_metrics)
 
-                stats["actor/pg_loss"] = pg_loss.detach().item()
+                else:
+                    policy_loss_fn = get_policy_loss_fn(loss_mode)
+                    pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower = policy_loss_fn(
+                        old_log_prob=old_log_prob,
+                        log_prob=log_prob,
+                        advantages=advantages,
+                        response_mask=response_mask,
+                        loss_agg_mode=loss_agg_mode,
+                        config=self.config,
+                    )
+
+                stats.update(
+                    {
+                        "actor/pg_loss": pg_loss.detach().item(),
+                        "actor/pg_clipfrac": pg_clipfrac.detach().item(),
+                        "actor/ppo_kl": ppo_kl.detach().item(),
+                        "actor/pg_clipfrac_lower": pg_clipfrac_lower.detach().item(),
+                    }
+                )
                 policy_loss = pg_loss
 
             if calculate_entropy:
@@ -509,40 +485,20 @@ class MegatronPPOActor(BasePPOActor):
             append_to_dict(metrics, stats)
             return policy_loss, [metrics, ret_entropy]
 
-        def forward_step(batch_iter, model, return_schedule_plan: bool = False):
-            """
-            Args:
-                batch_iter: the batch iterator
-                model: the model
-                return_schedule_plan: whether to return the schedule plan, for 1f1b overlap
-            """
-            if return_schedule_plan:
-                assert self.tf_config.overlap_moe_expert_parallel_comm, (
-                    "overlap_moe_expert_parallel_comm must be enabled to return the schedule plan"
-                )
-                # TODO: Fix this
-                assert not calculate_entropy, "calculate_entropy must be disabled to return the schedule plan"
-                from megatron.core.models.gpt.gpt_model import GPTModel
-
-                assert isinstance(model, GPTModel), "model must be a GPTModel"
-                assert self.use_fused_kernels, "use_fused_kernels must be enabled to return the schedule plan"
-                # TODO: support VLM with MoE
-                from verl.models.mcore.model_forward_1f1b_overlap import gptmodel_forward_1f1b_overlap
-
+        def forward_step(batch_iter, model):
             batch = next(batch_iter)
-            batch = batch.to(get_device_id())
-            batch = batch.contiguous()
-
             input_ids = batch["input_ids"]
             attention_mask = batch["attention_mask"].to(bool)
             position_ids = batch["position_ids"]
 
             multi_modal_inputs = {}
             if "multi_modal_inputs" in batch:
-                from verl.utils.model import extract_multi_modal_inputs
-
-                indices = batch.get("multi_modal_inputs_idx", None)
-                multi_modal_inputs = extract_multi_modal_inputs(batch["multi_modal_inputs"], indices)
+                for key in batch["multi_modal_inputs"][0].keys():
+                    idxs = batch["multi_modal_inputs_idx"]
+                    mmi = batch["multi_modal_inputs"]
+                    multi_modal_inputs[key] = torch.cat(
+                        [mmi[idx].get(key) for idx in idxs if mmi[idx].get(key) is not None], dim=0
+                    )
             responses = batch["responses"]
             response_length = responses.size(1)
             label = position_ids.clone()
@@ -555,18 +511,16 @@ class MegatronPPOActor(BasePPOActor):
 
             if self.use_fused_kernels:
                 forward_fn = get_mcore_forward_fused_fn(self.hf_config)
-                if return_schedule_plan:
-                    forward_fn = gptmodel_forward_1f1b_overlap
                 # return dict of [logits, entropy]
                 output = forward_fn(
-                    model=model,
-                    input_ids=input_ids,
-                    position_ids=position_ids,
-                    attention_mask=attention_mask,
+                    model,
+                    input_ids,
+                    position_ids,
+                    attention_mask,
+                    sequence_parallel=self.tf_config.sequence_parallel,
+                    multi_modal_inputs=multi_modal_inputs,
                     labels=label,
                     labels_mask=label_mask,
-                    temperature=temperature,
-                    multi_modal_inputs=multi_modal_inputs,
                 )
             else:
                 forward_fn = get_mcore_forward_fn(self.hf_config)
@@ -574,30 +528,22 @@ class MegatronPPOActor(BasePPOActor):
                 def logits_processor(logits, label, label_mask):
                     assert logits.shape[:2] == label.shape[:2]
                     assert label.shape == label_mask.shape
-                    logits.div_(temperature)
                     ret = {}
                     if calculate_entropy:
-                        logits_bak = logits.clone()
-                        logger.warning_once(
-                            "For memory-efficient computation, enable fused kernels via "
-                            "`actor_rollout_ref.model.use_fused_kernels=True`. "
-                            "The current `clone()` operation ensures correctness but increases memory usage."
-                        )
                         entropy = vocab_parallel_entropy(logits)
                         ret["entropy"] = entropy
-                    else:
-                        logits_bak = logits
-                    log_probs = vocab_parallel_log_probs_from_logits(logits_bak, label)
+                    log_probs = vocab_parallel_log_probs_from_logits(logits, label)
                     log_probs = log_probs.masked_fill(~label_mask, 0.0)
                     ret["log_probs"] = log_probs
                     return ret
 
                 logits_processor_args = {"label": label, "label_mask": label_mask}
                 output = forward_fn(
-                    model=model,
-                    input_ids=input_ids,
-                    attention_mask=attention_mask,
-                    position_ids=position_ids,
+                    model,
+                    input_ids,
+                    attention_mask,
+                    position_ids,
+                    sequence_parallel=self.tf_config.sequence_parallel,
                     multi_modal_inputs=multi_modal_inputs,
                     logits_processor=logits_processor,
                     logits_processor_args=logits_processor_args,
@@ -665,9 +611,9 @@ class MegatronPPOActor(BasePPOActor):
 
         """
         metrics = {}
-        if self.use_torch_profiler and self.prof and self.prof.enable:
-            self.prof.start()
+        self.prof.start()
         for data in dataloader:
+            data.to(get_device_id())
             self.actor_optimizer.zero_grad()
             # use use_contiguous_buffers_in_local_ddp and no overlap_dp_param_comm
             for chunk in self.actor_module:
@@ -704,11 +650,9 @@ class MegatronPPOActor(BasePPOActor):
                 pass
             else:
                 raise NotImplementedError
-            if self.use_torch_profiler and self.prof and self.prof.enable:
-                self.prof.step()
+            self.prof.step()
         # add empty cache after each compute
-        if self.use_torch_profiler and self.prof and self.prof.enable:
-            self.prof.stop_and_save()
-            self.prof.stop_trace()
+        self.prof.stop_and_save()
+        self.prof.stop_trace()
         get_torch_device().empty_cache()
         return metrics

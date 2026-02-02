@@ -37,7 +37,6 @@ class RLHFDatasetJSONL(RLHFDataset):
         tokenizer (PreTrainedTokenizer): For the tokenization of text to token IDs.
         config (DictConfig): Options like cache_dir, prompt_key, max_prompt_length, etc.
         processor (ProcessorMixin, optional): Multimodal preprocessor for images/videos.
-        max_samples (int, optional): Maximum number of samples to load. Default is -1 (all).
     """
 
     def __init__(
@@ -46,16 +45,20 @@ class RLHFDatasetJSONL(RLHFDataset):
         tokenizer: PreTrainedTokenizer,
         config: DictConfig,
         processor: Optional[ProcessorMixin] = None,
-        max_samples: int = -1,
     ):
-        # Call parent init but skip the _read_files_and_tokenize call
-        # We'll handle it ourselves
+        # Initialize additional attributes before calling parent init
+        # These are used in _read_files_and_tokenize and __getitem__
+        self.max_samples = config.get("max_samples", -1)
+        self.shuffle = config.get("shuffle", False)
+        self.seed = config.get("seed", None)
+        self.apply_chat_template_kwargs = config.get("apply_chat_template_kwargs", {})
+
+        # Call parent init (this will call _read_files_and_tokenize)
         super().__init__(
             data_files=data_files,
             tokenizer=tokenizer,
             config=config,
             processor=processor,
-            max_samples=max_samples,
         )
 
     def _read_files_and_tokenize(self):

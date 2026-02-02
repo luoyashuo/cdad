@@ -15,23 +15,30 @@
 The abstract base class defining the interface for model training engines.
 """
 
-from typing import Any, Callable, Optional
+from typing import Callable
 
 import torch
-from tensordict import TensorDict
 
-from verl.utils.device import get_device_name
+from verl import DataProto
 
 
 class BaseEngine:
     """
-    Abstract base class defining the interface for model training engines. Interface is subject to
-    change before release.
+    Abstract base class defining the interface for model training engines.
 
     Engine implementations must subclass BaseEngine and provide concrete behavior for all methods.
     """
 
-    def initialize(self):
+    def __init__(self, config):
+        """
+        Initialize the BaseEngine.
+
+        Args:
+            config: Configuration object containing parameters for engine setup.
+        """
+        raise NotImplementedError
+
+    def init_model(self):
         """
         Instantiate or load the model, optimizer, and learning rate scheduler.
 
@@ -59,15 +66,53 @@ class BaseEngine:
         """
         raise NotImplementedError
 
+    def infer_batch(
+        self,
+        data: DataProto,
+        post_fn: Callable[[DataProto, torch.Tensor], tuple[torch.Tensor, dict[str, torch.Tensor]]],
+    ) -> dict[str, torch.Tensor]:
+        """
+        Perform inference on a mini batch of data.
+
+        Args:
+            data: The input data for inference, typically containing tensors and metadata.
+            post_fn: A post-processing function that takes a micro-batch and predictions as input,
+                     and returns a tuple containing processed predictions and a dictionary of outputs.
+
+        Returns:
+            dict[str, torch.Tensor]: A dictionary containing the predictions for the entire batch.
+        """
+        raise NotImplementedError
+
+    def train_batch(
+        self,
+        data: DataProto,
+        loss_fn: Callable[[DataProto, torch.Tensor], tuple[torch.Tensor, dict[str, torch.Tensor]]],
+    ) -> dict[str, torch.Tensor]:
+        """
+        Perform a training step on a mini-batch of data.
+
+        Args:
+            data (DataProto): The input data for training, typically containing tensors and metadata.
+            loss_fn (Callable): A function that computes the loss and metrics given a micro-batch and predictions.
+
+        Returns:
+            dict[str, torch.Tensor]: A dictionary containing the aggregated training metrics for the mini-batch.
+        """
+        raise NotImplementedError
+
     def optimizer_zero_grad(self):
         """
-        Zero the gradients of the optimizer.
+        Zero out gradients of all parameters before starting a new backward pass.
         """
         raise NotImplementedError
 
     def optimizer_step(self):
         """
-        Perform an optimization step using the optimizer.
+        Perform an optimization step to update model parameters based on accumulated gradients.
+
+        Returns:
+            grad_norm (float): The norm of the gradients before clipping or update.
         """
         raise NotImplementedError
 
@@ -80,62 +125,28 @@ class BaseEngine:
         """
         raise NotImplementedError
 
-    def forward_backward_batch(self, data: TensorDict, loss_function: Callable, forward_only=False) -> Any:
+    def shard_data(self, data):
         """
-        Perform a forward pass and optionally a backward pass on a batch of data.
+        Shard or partition data for distributed training or parallel execution.
 
         Args:
-            data: The input data for the forward pass, typically containing tensors and metadata.
-            loss_function: The loss function to optimize. See `verl.workers.roles.utils.losses` for examples.
-            forward_only: If True, perform only the forward pass. If False, perform forward and backward pass.
+            data: Data structure to be sharded across devices/workers.
 
         Returns:
-            Any: The output of the forward pass, which can be used for loss computation or other purposes.
+            Sharded data in the same format as input.
         """
         raise NotImplementedError
 
-    def train_batch(self, data: TensorDict, loss_function: Callable) -> Any:
+    def unshard_data(self, data):
         """
-        Perform a training step on a batch of data.
+        Reconstruct or gather sharded data back to a unified format.
 
         Args:
-            data: The input data for training, typically containing tensors and metadata.
-            loss_function: A function that computes the loss and metrics given a batch and predictions.
+            data: Sharded data structure to reconstruct.
 
         Returns:
-            dict[str, torch.Tensor]: A dictionary containing the aggregated training metrics for the batch.
+            Unsharded, combined data.
         """
-        self.optimizer_zero_grad()
-        outputs = self.forward_backward_batch(data, loss_function, forward_only=False)
-        grad_norm = self.optimizer_step()
-        if self.is_mp_src_rank_with_outputs():
-            outputs["metrics"]["grad_norm"] = grad_norm
-        return outputs
-
-    def infer_batch(self, data: TensorDict, loss_function: Optional[Callable] = None) -> Any:
-        """
-        Perform inference on a batch of data.
-
-        Args:
-            data: The input data for inference, typically containing tensors and metadata.
-
-        Returns:
-            Any: The output of the inference, which can be used for predictions or other purposes.
-        """
-        with torch.no_grad():
-            outputs = self.forward_backward_batch(data, loss_function, forward_only=True)
-        return outputs
-
-    def get_per_tensor_param(self):
-        raise NotImplementedError
-
-    def get_data_parallel_size(self):
-        raise NotImplementedError
-
-    def get_data_parallel_rank(self):
-        raise NotImplementedError
-
-    def get_data_parallel_group(self):
         raise NotImplementedError
 
     def to(self, device: str, model: bool = True, optimizer: bool = True):
@@ -149,14 +160,7 @@ class BaseEngine:
         """
         raise NotImplementedError
 
-    def save_checkpoint(
-        self,
-        local_path: str,
-        hdfs_path: Optional[str] = None,
-        global_step: int = 0,
-        max_ckpt_to_keep: Optional[int] = None,
-        **kwargs,
-    ) -> None:
+    def save_checkpoint(self, local_path, hdfs_path=None, global_step=0, max_ckpt_to_keep=None):
         """
         Save model, optimizer, and scheduler states to a checkpoint.
 
@@ -165,13 +169,10 @@ class BaseEngine:
             hdfs_path: Optional HDFS path to copy checkpoint.
             global_step: Integer training step number for naming.
             max_ckpt_to_keep: Maximum number of recent checkpoints to retain.
-            **kwargs: Arbitrary keyword arguments.
         """
         raise NotImplementedError
 
-    def load_checkpoint(
-        self, local_path: str, hdfs_path: Optional[str] = None, del_local_after_load: bool = True, **kwargs
-    ) -> None:
+    def load_checkpoint(self, local_path, hdfs_path=None, del_local_after_load=True):
         """
         Load model, optimizer, and scheduler states from a checkpoint.
 
@@ -179,13 +180,6 @@ class BaseEngine:
             local_path: Local filesystem path of the checkpoint.
             hdfs_path: Optional HDFS path where checkpoint is stored.
             del_local_after_load: Whether to delete local copy after loading.
-            **kwargs: Arbitrary keyword arguments.
-        """
-        raise NotImplementedError
-
-    def is_mp_src_rank_with_outputs(self):
-        """
-        Whether the current rank is the first rank in model parallel group that contains model outputs
         """
         raise NotImplementedError
 
@@ -202,17 +196,14 @@ class EngineRegistry:
     _engines = {}
 
     @classmethod
-    def register(cls, model_type: str, backend: list[str] | str, device: list[str] | str = "cuda"):
+    def register(cls, key):
         """
         A class method decorator that registers an engine class with a given key.
 
         This allows for dynamic instantiation of engine classes by their registered key.
 
         Args:
-            model_type (str): The type of the model
-            backend (list[str] | str): The backend to use for the model type
-            device (list[str] | str): The device type (e.g., "cuda", "npu", "cpu") this engine supports,
-                default is "cuda"
+            key (str): The identifier to associate with the engine class.
 
         Returns:
             A decorator function that takes an engine class and registers it.
@@ -220,34 +211,13 @@ class EngineRegistry:
 
         def decorator(engine_class):
             assert issubclass(engine_class, BaseEngine)
-            if model_type not in cls._engines:
-                cls._engines[model_type] = {}
-
-            backends = backend if isinstance(backend, list) else [backend]
-            devices = device if isinstance(device, list) else [device]
-            for current_backend in backends:
-                for current_device in devices:
-                    if current_backend not in cls._engines[model_type]:
-                        cls._engines[model_type][current_backend] = {}
-                    if current_device not in cls._engines[model_type][current_backend]:
-                        cls._engines[model_type][current_backend][current_device] = engine_class
-
+            cls._engines[key] = engine_class
             return engine_class
 
         return decorator
 
     @classmethod
-    def get_engine_cls(cls, model_type: str, backend: str):
-        assert model_type in cls._engines, f"Unknown model_type: {model_type}"
-        assert backend in cls._engines[model_type], f"Unknown backend: {backend}"
-        device = get_device_name()
-        assert device in cls._engines[model_type][backend], (
-            f"Unknown device: {device} for model_type: {model_type} and backend: {backend}"
-        )
-        return cls._engines[model_type][backend][device]
-
-    @classmethod
-    def new(cls, model_type, backend, *args, **kwargs):
+    def new(cls, key, *args, **kwargs):
         """
         Function to create a new training engine instance based on the provided config.
         Args:
@@ -259,5 +229,7 @@ class EngineRegistry:
         Raises:
             NotImplementedError: If the engine key in the config does not match any known engines.
         """
-        engine_cls = cls.get_engine_cls(model_type, backend)
-        return engine_cls(*args, **kwargs)
+        if key in cls._engines:
+            return cls._engines[key](*args, **kwargs)
+        else:
+            raise NotImplementedError(f"Unknown engine: {key}")

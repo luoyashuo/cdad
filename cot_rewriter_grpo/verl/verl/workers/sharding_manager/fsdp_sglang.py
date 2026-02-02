@@ -18,18 +18,24 @@ import asyncio
 import logging
 import os
 
+import torch
+import torch.distributed as dist
 from sglang.srt.entrypoints.engine import Engine
-from sglang.srt.weight_sync.utils import update_weights as sgl_update_weights
+from sglang.srt.model_executor.model_runner import LocalSerializedTensor
+
+try:
+    from sglang.srt.utils import TorchPatchMultiprocessingSerializer as MultiprocessingSerializer
+except ImportError:
+    from sglang.srt.utils import MultiprocessingSerializer
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.fsdp.api import FullStateDictConfig, ShardedStateDictConfig, StateDictType
 from torch.distributed.fsdp.fully_sharded_data_parallel import FullyShardedDataParallel as FSDP
+from torch.distributed.tensor import DTensor
 
 from verl import DataProto
 from verl.protocol import all_gather_data_proto
-from verl.utils.device import get_device_id, get_torch_device, set_expandable_segments
+from verl.utils.device import get_device_id, get_torch_device
 from verl.utils.fsdp_utils import fsdp_version, load_fsdp_model_to_gpu, offload_fsdp_model_to_cpu
-from verl.utils.import_utils import deprecated
-from verl.utils.memory_utils import aggressive_empty_cache
 from verl.utils.model import convert_weight_keys
 from verl.utils.profiler import GPUMemoryLogger, log_gpu_memory_usage, simple_timer
 from verl.utils.torch_functional import check_device_is_available
@@ -42,7 +48,12 @@ logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 
-@deprecated()
+def _preprocess_tensor_for_update_weights(tensor: torch.Tensor):
+    if isinstance(tensor, DTensor):
+        return tensor.full_tensor()
+    return tensor
+
+
 class FSDPSGLangShardingManager(BaseShardingManager):
     @check_device_is_available()
     def __init__(
@@ -91,48 +102,171 @@ class FSDPSGLangShardingManager(BaseShardingManager):
         else:
             self.gen_random_states = None
 
+    def _get_or_create_event_loop(self):
+        """Get event loop, create if needed (Python 3.10+ / uvloop compatible)."""
+        try:
+            return asyncio.get_running_loop()
+        except RuntimeError:
+            # No running loop - create a new one directly
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            return loop
+
     @GPUMemoryLogger(role="FSDPSGLangShardingManager enter", logger=logger)
     def __enter__(self):
+        import torch.distributed as dist_module
+        rank = dist_module.get_rank() if dist_module.is_initialized() else 0
+        print(f"[FSDPSGLangShardingManager] __enter__ START rank={rank}", flush=True)
         self.timing = {}
         with simple_timer("reshard", self.timing):
-            loop = asyncio.get_event_loop()
+            print(f"[FSDPSGLangShardingManager] __enter__ getting event loop rank={rank}", flush=True)
+            loop = self._get_or_create_event_loop()
+            print(f"[FSDPSGLangShardingManager] __enter__ got loop, calling wake_up rank={rank}", flush=True)
             loop.run_until_complete(self.wake_up())
+            print(f"[FSDPSGLangShardingManager] __enter__ wake_up DONE rank={rank}", flush=True)
+        print(f"[FSDPSGLangShardingManager] __enter__ RETURNING rank={rank}", flush=True)
+        return self
 
     @GPUMemoryLogger(role="FSDPSGLangShardingManager exit", logger=logger)
     def __exit__(self, exc_type, exc_value, traceback):
-        loop = asyncio.get_event_loop()
+        loop = self._get_or_create_event_loop()
         loop.run_until_complete(self.sleep())
 
     async def update_weights(self, params):
-        named_tensors = [(k, v) for k, v in params.items()]
-        update_weights_bucket_bytes = int(self.rollout_config.update_weights_bucket_megabytes) << 20
-        for params_batch in get_named_tensor_buckets(named_tensors, update_weights_bucket_bytes):
-            await sgl_update_weights(
-                engine=self.inference_engine,
-                params_batch=params_batch,
-                device_mesh_key="infer_tp",
-                device_mesh=self.device_mesh,
-            )
+        import torch.distributed as dist_module
+        rank = dist_module.get_rank() if dist_module.is_initialized() else 0
+        tp_rank = self.device_mesh["infer_tp"].get_local_rank()
+        tp_size = self.device_mesh["infer_tp"].mesh.size()[0]
+        print(f"[SGLang update_weights] rank={rank} tp_rank={tp_rank} tp_size={tp_size} START", flush=True)
 
-        if self.device_mesh["infer_tp"].get_local_rank() == 0:
+        # Most naive implementation, can optimize a lot if it is bottleneck from sglang Engine weight update
+        named_tensors = [(k, v) for k, v in params.items()]
+        load_format = None
+        # convert megabytes to bytes
+        update_weights_bucket_bytes = int(self.rollout_config.update_weights_bucket_megabytes) << 20
+        batch_idx = 0
+        for batch in get_named_tensor_buckets(named_tensors, update_weights_bucket_bytes):
+            print(f"[SGLang update_weights] rank={rank} batch={batch_idx} serialize START, batch_size={len(batch)}", flush=True)
+            # On each rank, serialize a batch of (name, tensor) tuples.
+            # named_tensors_batch will be a list like:
+            # [(name0, serialized_tensor0_tp0), (name1, serialized_tensor1_tp0), ...]
+            named_tensors_batch = [
+                (name, MultiprocessingSerializer.serialize(_preprocess_tensor_for_update_weights(tensor)))
+                for name, tensor in batch
+            ]
+            print(f"[SGLang update_weights] rank={rank} batch={batch_idx} serialize DONE", flush=True)
+
+            # Check if this rank has the engine (handles tensor_model_parallel_size=1 case)
+            has_engine = self.inference_engine is not None
+            
+            if tp_size == 1:
+                # When tensor_model_parallel_size=1, each rank is in its own TP group.
+                # No need to gather, just process locally on the rank with engine.
+                if has_engine:
+                    print(f"[SGLang update_weights] rank={rank} tp_size=1 batch={batch_idx} processing locally", flush=True)
+                    # Wrap in a list to match the expected format
+                    gathered_serialized_batches = [named_tensors_batch]
+                    
+                    # Use zip(*) to "transpose" the data structure.
+                    print(f"[SGLang update_weights] rank={rank} batch={batch_idx} update_weights_from_tensor START", flush=True)
+                    logical_tensors = zip(*gathered_serialized_batches, strict=True)
+
+                    await self.inference_engine.update_weights_from_tensor(
+                        named_tensors=[
+                            # 'tensor_group' represents a single logical tensor's data from all ranks.
+                            (
+                                tensor_group[0][0],  # Get the name from the first rank's data.
+                                LocalSerializedTensor(
+                                    # 'rank_part' is the (name, serialized_tensor) tuple from one specific rank.
+                                    values=[rank_part[1] for rank_part in tensor_group]
+                                ),
+                            )
+                            for tensor_group in logical_tensors
+                            # each tensor_group is like ( (n0, t0_tp0), (n0, t0_tp1) )
+                        ],
+                        load_format=load_format,
+                        flush_cache=False,
+                    )
+                    print(f"[SGLang update_weights] rank={rank} batch={batch_idx} update_weights_from_tensor DONE", flush=True)
+                else:
+                    print(f"[SGLang update_weights] rank={rank} tp_size=1 batch={batch_idx} skipping (no engine)", flush=True)
+            else:
+                # When tensor_model_parallel_size > 1, gather data from all TP ranks to rank 0.
+                if tp_rank == 0:
+                    # On rank 0, prepare a list to hold the gathered batches from all ranks.
+                    gathered_serialized_batches = [None for _ in range(tp_size)]
+                else:
+                    gathered_serialized_batches = None
+
+                # Gather the named_tensors_batch from all ranks to rank 0 in the TP group.
+                print(f"[SGLang update_weights] rank={rank} tp_rank={tp_rank} tp_size={tp_size} batch={batch_idx} gather_object START", flush=True)
+                dist.gather_object(
+                    obj=named_tensors_batch,
+                    object_gather_list=gathered_serialized_batches,
+                    dst=0,
+                    group=self.device_mesh["infer_tp"].get_group(),
+                )
+                print(f"[SGLang update_weights] rank={rank} batch={batch_idx} gather_object DONE", flush=True)
+
+                if has_engine:
+                    # Use zip(*) to "transpose" the data structure.
+                    print(f"[SGLang update_weights] rank={rank} batch={batch_idx} update_weights_from_tensor START", flush=True)
+                    logical_tensors = zip(*gathered_serialized_batches, strict=True)
+
+                    await self.inference_engine.update_weights_from_tensor(
+                        named_tensors=[
+                            # 'tensor_group' represents a single logical tensor's data from all ranks.
+                            (
+                                tensor_group[0][0],  # Get the name from the first rank's data.
+                                LocalSerializedTensor(
+                                    # 'rank_part' is the (name, serialized_tensor) tuple from one specific rank.
+                                    values=[rank_part[1] for rank_part in tensor_group]
+                                ),
+                            )
+                            for tensor_group in logical_tensors
+                            # each tensor_group is like ( (n0, t0_tp0), (n0, t0_tp1) )
+                        ],
+                        load_format=load_format,
+                        flush_cache=False,
+                    )
+                    print(f"[SGLang update_weights] rank={rank} batch={batch_idx} update_weights_from_tensor DONE", flush=True)
+            batch_idx += 1
+
+        if self.inference_engine is not None:
+            print(f"[SGLang update_weights] rank={rank} flush_cache START", flush=True)
             await self.inference_engine.flush_cache()
+            print(f"[SGLang update_weights] rank={rank} flush_cache DONE", flush=True)
+        print(f"[SGLang update_weights] rank={rank} DONE", flush=True)
 
     async def release_memory(self):
-        if self.device_mesh["infer_tp"].get_local_rank() == 0 and self.rollout_config.free_cache_engine:
-            if self.multi_stage_wake_up:
-                await self.inference_engine.release_memory_occupation(tags=["kv_cache", "weights"])
-            else:
-                await self.inference_engine.release_memory_occupation()
-            log_gpu_memory_usage("After release memory occupation in sharding manager", logger=logger)
+        if self.inference_engine is not None and self.rollout_config.free_cache_engine:
+            await self.inference_engine.release_memory_occupation()
 
     @GPUMemoryLogger(role="FSDPSGLangShardingManager enter", logger=logger)
     async def wake_up(self):
-        aggressive_empty_cache(force_sync=True)
+        import torch.distributed as dist
+        rank = dist.get_rank() if dist.is_initialized() else 0
+        print(f"[SGLang wake_up] rank={rank} START", flush=True)
 
+        get_torch_device().empty_cache()
+        print(f"[SGLang wake_up] rank={rank} after empty_cache", flush=True)
+
+        if self.inference_engine is not None and self.rollout_config.free_cache_engine:
+            print(f"[SGLang wake_up] rank={rank} resume_memory_occupation START", flush=True)
+            if self.multi_stage_wake_up:
+                await self.inference_engine.resume_memory_occupation(tags=["weights"])
+                log_gpu_memory_usage("Before resume SGLang weights in sharding manager", logger=logger)
+            else:
+                await self.inference_engine.resume_memory_occupation()
+                log_gpu_memory_usage("Before resume SGLang weights + kv_cache in sharding manager", logger=logger)
+            print(f"[SGLang wake_up] rank={rank} resume_memory_occupation DONE", flush=True)
+
+        print(f"[SGLang wake_up] rank={rank} before state_dict", flush=True)
         log_gpu_memory_usage("Before state_dict() in sharding manager memory", logger=logger)
         if self.offload_param:
             load_fsdp_model_to_gpu(self.module)
         params = self.module.state_dict()
+        print(f"[SGLang wake_up] rank={rank} after state_dict, num_params={len(params)}", flush=True)
         log_gpu_memory_usage("After state_dict() in sharding manager memory", logger=logger)
         device = get_device_id()  # used when fsdp2 set cpu_offload_policy
         params = {
@@ -141,38 +275,23 @@ class FSDPSGLangShardingManager(BaseShardingManager):
 
         # convert weight keys to match the model config
         params = convert_weight_keys(params, getattr(self.module, "_fsdp_wrapped_module", self.module))
-
-        if self.offload_param:
-            offload_fsdp_model_to_cpu(self.module)
-
-        log_gpu_memory_usage("After offload_param in sharding manager memory", logger=logger)
-
-        # sglang need to set _set_allocator_settings to False
-        logger.debug("fsdp sglang sharding_manager _set_allocator_settings to False")
-        # Note(chenyang): SGLang is using torch memory pool to manage memory
-        # which is incompatible with expandable segments
-        set_expandable_segments(False)
-
-        if self.device_mesh["infer_tp"].get_local_rank() == 0 and self.rollout_config.free_cache_engine:
-            if self.multi_stage_wake_up:
-                await self.inference_engine.resume_memory_occupation(tags=["weights"])
-                log_gpu_memory_usage("Before resume SGLang weights in sharding manager", logger=logger)
-            else:
-                await self.inference_engine.resume_memory_occupation()
-                log_gpu_memory_usage("Before resume SGLang weights + kv_cache in sharding manager", logger=logger)
+        print(f"[SGLang wake_up] rank={rank} before update_weights", flush=True)
 
         # Copy, not share memory
         await self.update_weights(params)
+        print(f"[SGLang wake_up] rank={rank} after update_weights", flush=True)
         log_gpu_memory_usage("After sync model weights in sharding manager", logger=logger)
 
         del params
-        aggressive_empty_cache(force_sync=True)
+        if self.offload_param:
+            offload_fsdp_model_to_cpu(self.module)
+        get_torch_device().empty_cache()
         log_gpu_memory_usage("After del state_dict and empty_cache in sharding manager", logger=logger)
 
         if (
             self.multi_stage_wake_up
             and self.rollout_config.free_cache_engine
-            and self.device_mesh["infer_tp"].get_local_rank() == 0
+            and self.inference_engine is not None
         ):
             await self.inference_engine.resume_memory_occupation(tags=["kv_cache"])
             log_gpu_memory_usage("After resume SGLang kv_cache in sharding manager", logger=logger)
@@ -192,12 +311,7 @@ class FSDPSGLangShardingManager(BaseShardingManager):
         self.module.train()
 
         # add empty cache after each compute
-        aggressive_empty_cache(force_sync=True)
-
-        # always set _set_allocator_settings to True when using sglang
-        # it is required by fsdp2 to avoid oom
-        logger.debug("fsdp sglang sharding_manager _set_allocator_settings to True")
-        set_expandable_segments(True)
+        get_torch_device().empty_cache()
 
         # restore random states
         if self.device_mesh is not None:

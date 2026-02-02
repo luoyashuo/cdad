@@ -26,11 +26,11 @@ defaults:
 trainer:
   project_name: cot_rewriter_grpo
   experiment_name: qwen3_4b_4gpu_80g
-  total_epochs: 3
-  total_training_steps: null  # Train full epochs
-  save_freq: 100
-  val_freq: 50
-  val_before_train: false
+  total_epochs: 1
+  total_training_steps: 500  # Limit total steps for faster iteration
+  save_freq: 50  # Save checkpoint every 50 steps
+  test_freq: 50  # Validation frequency (verl uses test_freq, not val_freq)
+  val_before_train: false  # Skip validation before training to speed up startup
   device: cuda
   log_freq: 10
   max_actor_ckpt_to_keep: 3
@@ -49,13 +49,13 @@ data:
   train_files: /home/u20240075/luoyashuo/data/cdad/cot_rewrite_max_fsf_v2/train.jsonl
   val_files: /home/u20240075/luoyashuo/data/cdad/cot_rewrite_max_fsf_v2/val.jsonl
   # IMPORTANT: total samples = train_batch_size × rollout.n must be divisible by n_gpus_per_node
-  # With 4 GPUs and rollout.n=8: 8 × 8 = 64, 64 / 4 = 16 ✓
-  # 80G 显存允许更大的 batch size
-  train_batch_size: 8
-  val_batch_size: 16
-  gen_batch_size: 32
-  max_prompt_length: 8192
-  max_response_length: 8192
+  # 快速验证配置: 2 × 2 = 4, 4 × 4 GPUs = 16 samples
+  # 正式训练时改回: train_batch_size=4, rollout.n=8
+  train_batch_size: 2  # 快速验证，正式训练改回 4
+  val_batch_size: 4
+  gen_batch_size: 8
+  max_prompt_length: 5500
+  max_response_length: 4500
   return_raw_chat: true
   dataloader_num_workers: 4
   reward_fn_key: reward_model
@@ -83,12 +83,14 @@ actor_rollout_ref:
     clip_ratio: 0.2
     entropy_coeff: 0.01
     grad_clip: 1.0
-    ppo_mini_batch_size: 8
-    # 80G 显存允许更大的 micro batch
-    ppo_micro_batch_size_per_gpu: 2
+    ppo_mini_batch_size: 1  # 减小以避免 backward OOM
+    # 降低 micro batch size 以减少显存峰值
+    ppo_micro_batch_size_per_gpu: 1
     # FSDP 配置 - 使用 fp16 避免旧驱动的 bfloat16 转换问题
     fsdp_config:
       dtype: float16
+      param_offload: true      # 在 reward 计算时 offload 参数到 CPU
+      optimizer_offload: true  # 在 reward 计算时 offload optimizer 到 CPU
       mixed_precision:
         param_dtype: fp16
         reduce_dtype: fp16
@@ -103,23 +105,32 @@ actor_rollout_ref:
       total_training_steps: -1
 
   rollout:
-    # 使用 vLLM V0 引擎 (通过环境变量 VLLM_USE_V1=0)
+    # 使用 vLLM 引擎
+    # 如需切换到 SGLang，改为 name: sglang
     name: vllm
     tensor_model_parallel_size: 1
-    # 80G 显存全参数训练
-    gpu_memory_utilization: 0.65
+    # vLLM 显存占用 - Actor vLLM 通过 sleep(level=2) 完全释放后
+    # Student vLLM 可以使用全部 GPU 显存，计算完后 cleanup 再 reload Actor vLLM
+    gpu_memory_utilization: 0.7
     dtype: float16
-    log_prob_micro_batch_size_per_gpu: 2
-    n: 8
+    # 降低 log_prob 计算时的 micro batch size
+    log_prob_micro_batch_size_per_gpu: 1
+    n: 4  # 快速验证 (需要满足 ppo_mini_batch_size * n >= n_gpus)，正式训练改回 8
     temperature: 0.7
     top_p: 0.95
-    prompt_length: 8192
-    response_length: 8192
+    prompt_length: 4500
+    response_length: 5500
     # max_model_len = 8192 + 8192 = 16384
-    max_num_batched_tokens: 16384
-    max_model_len: 16384
+    max_num_batched_tokens: 10240
+    max_model_len: 10240
     # 禁用 CUDA Graph 以避免旧驱动兼容性问题
     enforce_eager: true
+    # 启用 vLLM 销毁/重建机制 - 在 reward 计算时销毁 vLLM 释放显存给 Student vLLM
+    # 我们已修改代码来正确重置 vLLM cumem allocator，避免重建失败
+    free_cache_engine: true
+    # sleep_level=2: 完全释放 GPU 显存（丢弃权重+KV cache），wake_up 时从磁盘重新加载
+    # sleep_level=1: 只 offload 到 CPU（需要足够 CPU 内存）
+    sleep_level: 2
     agent:
       num_workers: 1
 
@@ -142,6 +153,10 @@ critic:
 reward_model:
   enable: false
   reward_manager: cot_rewriter
+  # 启用 offload - 在 reward 计算前：
+  # 1. 销毁 Actor vLLM (free_cache_engine=true)
+  # 2. Offload Actor 模型到 CPU
+  # 这样释放足够显存给 Student vLLM 计算 reward
   offload_rollout_for_reward: true
   task_runner_num_gpus: 0
 
@@ -152,16 +167,46 @@ custom_reward_function:
   reward_kwargs:
     student_model_path: /fs/fast/u20240075/hf_home/models/Qwen/Qwen3-1.7B
     fsf_model_path: /fs/fast/u20240075/luoyashuo/checkpoints/cdad/fsf_judge/qwen3_8b_fsf_judge/checkpoint-12000
-    device: cuda:0
+    device: cuda:1
     allow_cpu: true
-    enable_offload: true
+    enable_offload: false
     offload_device: cpu
-    use_remote_student: false
-    student_server_url: "http://localhost:8765"
     lambda_logic: 0.5
     use_logic_reward: false
     alpha: 0.01
     print_samples: 2
+    # Reward 后端选择: sglang 或 vllm
+    # sglang: 使用 SGLang Engine 计算 Student reward 和 FSF Judge
+    # vllm: 使用 vLLM 计算 Student reward，HuggingFace 计算 FSF Judge
+    reward_backend: vllm  # 先用 vllm 验证
+    # SGLang/vLLM 配置
+    # Student Model (1.7B) 在每个 GPU 上都启动一个实例进行并行计算
+    # Actor 引擎已通过 sleep 机制完全释放 GPU 显存
+    #
+    # 显存预算计算 (80GB GPU):
+    #   - vLLM sleep 后释放: ~55GB
+    #   - FSDP 残留 (metadata, buffers, CUDA context): ~10-15GB
+    #   - 可用显存: ~65-70GB
+    #   - Student vLLM 需要:
+    #     - Model Weights (1.7B FP16): ~3.5GB
+    #     - KV Cache: gpu_memory_utilization * 80GB
+    #     - logprobs 计算临时显存: ~10GB
+    #   - 安全计算: (65 - 3.5 - 10) / 80 ≈ 0.4
+    #
+    # 设置 0.4 确保 Student vLLM + logprobs 计算不会 OOM
+    # 如果仍然 OOM，可以进一步降到 0.35
+    sglang_gpu_memory_utilization: 0.4  # SGLang 后端使用
+    vllm_gpu_memory_utilization: 0.4    # vLLM 后端使用 (从 0.5 降到 0.4 避免 OOM)
+    # 在所有 4 个 GPU 上启动 Student vLLM，实现数据并行
+    # 每个 GPU 一个 Student vLLM 实例，计算完成后自动 cleanup 释放显存
+    student_devices: ["cuda:0", "cuda:1", "cuda:2", "cuda:3"]
+    # 计算完成后清理 Student vLLM 以释放 GPU 显存给 Actor vLLM 重载
+    cleanup_after_compute: true
+    # GPU batch size for forward pass (仅当 use_multi_gpu=true 时生效)
+    gpu_batch_size: 1
+    # 截断惩罚：被截断的 response 直接返回此 reward，不调用 Student model
+    # 截断检测：response 未以 EOS 结尾或达到 max_response_length
+    truncation_penalty: -1.0
     field_mapping:
       prompt_key: problem
       reward_model_key: reward_model
@@ -177,26 +222,7 @@ reward_manager:
     path: /home/u20240075/luoyashuo/projects/cdad/cot_rewriter_grpo/verl/verl/experimental/reward/cot_rewriter/reward_manager.py
 
 # ============ Ray Configuration ============
-ray_kwargs:
-  ray_init:
-    _temp_dir: null
-    include_dashboard: false
-    dashboard_host: ""
-    dashboard_port: null
-    ignore_reinit_error: true
-    logging_level: "warning"
-    local_mode: false
-    namespace: "cot_rewriter_grpo"
-    _system_config:
-      enable_metrics_collection: false
-      agent_register_timeout_ms: 120000
-    runtime_env:
-      env_vars:
-        PYTHONPATH: "/home/u20240075/luoyashuo/projects/cdad/cot_rewriter_grpo/.venv/lib/python3.12/site-packages:/home/u20240075/luoyashuo/projects/cdad/cot_rewriter_grpo:/home/u20240075/luoyashuo/projects/cdad/cot_rewriter_grpo/src:/home/u20240075/luoyashuo/projects/cdad/cot_rewriter_grpo/verl"
-        TOKENIZERS_PARALLELISM: "false"
-        RAY_DEDUP_LOGS: "1"
-        RAY_DASHBOARD_HOST: ""
-        RAY_enable_dashboard: "0"
-        CUDA_VISIBLE_DEVICES: "0,1,2,3"
-        RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO: "0"
+# verl 0.5.0 expects ray_init at top level, not under ray_kwargs
+ray_init:
+  num_cpus: null
   timeline_json_file: null

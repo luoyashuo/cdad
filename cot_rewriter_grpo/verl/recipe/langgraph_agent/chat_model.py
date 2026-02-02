@@ -38,7 +38,6 @@ from pydantic import Field
 
 from verl.experimental.agent_loop.agent_loop import AgentLoopOutput, AsyncLLMServerManager
 from verl.experimental.agent_loop.tool_parser import ToolParser
-from verl.experimental.agent_loop.utils import add_generation_prompt_for_gpt_oss, format_gpt_oss_tool_response_manually
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -139,11 +138,11 @@ class ChatModel(BaseChatModel):
         if "sampling_params" in kwargs:
             sampling_params.update(kwargs["sampling_params"])
 
-        output = await self.client.generate(
+        response_ids = await self.client.generate(
             request_id=request_id, prompt_ids=prompt_ids, sampling_params=sampling_params
         )
 
-        message = await self._postprocess(request_id, prompt_ids, response_mask, output.token_ids, **kwargs)
+        message = await self._postprocess(request_id, prompt_ids, response_mask, response_ids, **kwargs)
         generation = ChatGeneration(message=message)
         return ChatResult(generations=[generation])
 
@@ -203,39 +202,13 @@ class ChatModel(BaseChatModel):
 
         # encode tool response
         tool_responses = convert_to_openai_messages(messages[i + 1 :])
-        if self.tool_parser == "hermes":
-            tool_response_ids = await loop.run_in_executor(
-                None,
-                lambda messages=tool_responses: self.tokenizer.apply_chat_template(
-                    messages, add_generation_prompt=True, tokenize=True
-                ),
-            )
-            tool_response_ids = tool_response_ids[len(kwargs["system_prompt"]) :]
-        elif self.tool_parser == "gpt-oss":
-            # Format tool responses manually
-            # since gpt-oss chat template requires tool call messages to parse tool response messages
-            # we need to format the tool response messages manually
-            tool_response_texts = []
-            for tool_msg in tool_responses:
-                if tool_msg["role"] == "tool":
-                    # Use tool message's name if available (for multiple tool calls)
-                    actual_tool_name = tool_msg.get("name", "unknown")
-                    if actual_tool_name == "unknown":
-                        logger.error(f"actual_tool_name: {actual_tool_name}")
-                    formatted = format_gpt_oss_tool_response_manually(tool_msg["content"], actual_tool_name)
-                    tool_response_texts.append(formatted)
-
-            # Tokenize the manually formatted tool responses
-            tool_response_text = "".join(tool_response_texts)
-            # need to add generation tokens for gpt-oss manually since add_generation_prompt is True
-            tool_response_text = add_generation_prompt_for_gpt_oss(tool_response_text)
-            logger.debug(f"tool_response_text: {tool_response_text}")
-
-            tool_response_ids = await loop.run_in_executor(
-                None, lambda: self.tokenizer.encode(tool_response_text, add_special_tokens=False)
-            )
-        else:
-            raise ValueError(f"Unsupported tool parser: {self.tool_parser}")
+        tool_response_ids = await loop.run_in_executor(
+            None,
+            lambda messages=tool_responses: self.tokenizer.apply_chat_template(
+                messages, add_generation_prompt=True, tokenize=True
+            ),
+        )
+        tool_response_ids = tool_response_ids[len(kwargs["system_prompt"]) :]
 
         # stop generation if response length exceeds max response length
         if len(messages[i].response_metadata["response_mask"]) + len(tool_response_ids) >= self.max_tokens:
@@ -275,34 +248,25 @@ class ChatModel(BaseChatModel):
         content, function_calls = await tool_parser.extract_tool_calls(response_ids)
 
         tool_calls, invalid_tool_calls = [], []
-
         for function_call in function_calls:
-            error = None
             try:
                 args = json.loads(function_call.arguments)
                 if not isinstance(args, dict):
-                    error = f"Tool arguments must be a JSON object, got {type(args).__name__}"
+                    raise json.JSONDecodeError(f"Invalid json tool arguments: {args}")
+                tool_call = ToolCall(
+                    args=args,
+                    name=function_call.name,
+                    id=str(uuid.uuid4()),
+                )
+                tool_calls.append(tool_call)
             except json.JSONDecodeError as e:
-                error = f"Invalid JSON tool arguments: {e}"
-
-            if error:
-                logger.warning(error)
-                invalid_tool_calls.append(
-                    InvalidToolCall(
-                        name=function_call.name,
-                        args=function_call.arguments,
-                        id=str(uuid.uuid4()),
-                        error=error,
-                    )
+                logger.warning(f"Invalid json tool arguments: {e}")
+                tool_call = InvalidToolCall(
+                    args=function_call.arguments,
+                    name=function_call.name,
+                    error=f"Invalid json tool arguments: {e}",
                 )
-            else:
-                tool_calls.append(
-                    ToolCall(
-                        name=function_call.name,
-                        args=args,
-                        id=str(uuid.uuid4()),
-                    )
-                )
+                invalid_tool_calls.append(tool_call)
 
         message = AIMessage(
             content=content,

@@ -1,495 +1,353 @@
 """
-Student Reward (Cognitive Reward) Module
+Student Reward (Cognitive Reward) Module - vLLM Version
 
 Computes R_cog = log P_student(Answer | Question, Rewrite_CoT)
-using a frozen Student Model with HuggingFace Transformers directly.
+using vLLM for fast log prob computation.
 
 The cognitive reward encourages the rewritten CoT to help the
 Student Model predict the correct answer with higher confidence.
 
-Supports multiple modes:
-1. Local persistent mode: Load model to GPU and keep it there
-2. Local offload mode: Load model to CPU, temporarily move to GPU for computation
-3. Remote mode: Call a separate GPU server via HTTP
+Uses Ray actors for multi-GPU parallelism, with each GPU running
+a separate vLLM instance.
 """
 
-import gc
-import torch
-import requests
 from typing import Any, Dict, List, Optional
-from transformers import AutoTokenizer, AutoModelForCausalLM
+import ray
 
 from verl.experimental.reward.cot_rewriter.logging_config import logger
 
 
-def get_available_device(preferred_device: str = "cuda:3", allow_cpu: bool = True) -> torch.device:
+@ray.remote
+class VLLMWorkerActor:
     """
-    Get available device for model loading.
-
-    Args:
-        preferred_device: Preferred CUDA device (e.g., "cuda:3", "cuda:0")
-        allow_cpu: If True, fallback to CPU when CUDA is not available.
-                  If False, raise RuntimeError when CUDA is not available.
-
-    Returns:
-        torch.device: Available device (CUDA or CPU)
-
-    Raises:
-        RuntimeError: If CUDA is not available and allow_cpu is False
-    """
-    if not torch.cuda.is_available():
-        if allow_cpu:
-            logger.info(f"[HFStudentRewardClient] CUDA is not available. Using CPU as fallback.")
-            return torch.device("cpu")
-        else:
-            raise RuntimeError(
-                "[HFStudentRewardClient] CUDA is not available. "
-                "Student Reward model requires GPU to run. "
-                "Please ensure CUDA_VISIBLE_DEVICES is set correctly in ray_kwargs.ray_init.runtime_env.env_vars "
-                "Or set reward_kwargs.allow_cpu=true to allow CPU fallback (slower)."
-            )
-
-    try:
-        device = torch.device(preferred_device)
-        # Test if device is accessible by creating a small tensor
-        _ = torch.tensor([1.0], device=device)
-        return device
-    except RuntimeError as e:
-        # Preferred device not available, try cuda:0
-        try:
-            device = torch.device("cuda:0")
-            _ = torch.tensor([1.0], device=device)
-            logger.info(f"[HFStudentRewardClient] Preferred device {preferred_device} not available, using cuda:0")
-            return device
-        except RuntimeError:
-            if allow_cpu:
-                logger.info(f"[HFStudentRewardClient] No CUDA device available, using CPU as fallback")
-                return torch.device("cpu")
-            raise RuntimeError(
-                f"[HFStudentRewardClient] No CUDA device available. "
-                f"Preferred device {preferred_device} failed with: {e}"
-            ) from e
-
-
-class HFStudentRewardClient:
-    """
-    HuggingFace Student Reward Client
-
-    Calculates cognitive reward using Student Model's log probability.
-    Uses HuggingFace Transformers directly (no vLLM dependency).
-
-    Supports two modes:
-    1. Persistent mode (enable_offload=False): Model stays on GPU
-    2. Offload mode (enable_offload=True): Model on CPU, loads to GPU on demand
-
-    When auto_offload=False (default), caller must manually call load_to_gpu() before
-    computing rewards and offload_to_cpu() after all batches are processed.
-    This avoids repeated load/offload overhead when processing multiple batches.
+    Ray actor that runs vLLM on a specific GPU.
+    Each actor is a separate process with its own vLLM instance.
     """
 
     def __init__(
         self,
-        model_path: str = "./models/Qwen3-1.7B",
-        device: str = "cuda:3",
-        dtype: torch.dtype = torch.bfloat16,
-        allow_cpu: bool = True,
-        enable_offload: bool = False,
-        offload_device: str = "cpu",
-        auto_offload: bool = False,
+        model_path: str,
+        gpu_id: int,
+        gpu_memory_utilization: float = 0.4,
+        dtype: str = "float16",
+        max_model_len: int = 8192,
     ):
-        """
-        Initialize HuggingFace Student Reward Client.
+        import os
+        import subprocess
+        os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+        # Force vLLM V0 engine to avoid V1 serialization bugs
+        # (msgspec.ValidationError: Expected `float`, got `str`)
+        os.environ["VLLM_USE_V1"] = "0"
 
-        Args:
-            model_path: Path to Student Model
-            device: Preferred device to run model on (will fall back to CPU if not available)
-            dtype: Precision (bfloat16 recommended for GPU, float32 for CPU)
-            allow_cpu: If True, allow fallback to CPU when CUDA is not available
-            enable_offload: If True, enable load/offload mechanism for GPU memory saving
-            offload_device: Device to offload model when not in use (default: "cpu")
-            auto_offload: If True, automatically offload after each batch (slower but simpler).
-                         If False (default), caller must manually call load_to_gpu/offload_to_cpu.
-        """
-        self.model_path = model_path
-        self.enable_offload = enable_offload
-        self.offload_device = torch.device(offload_device)
-        self.auto_offload = auto_offload
+        from vllm import LLM
+        from transformers import AutoTokenizer
+        import torch
 
-        # Determine compute device
-        if enable_offload:
+        # Log GPU memory status BEFORE loading model
+        def get_nvidia_smi_memory_for_gpu(gpu_idx):
+            """Get GPU memory from nvidia-smi for a specific GPU"""
             try:
-                self.compute_device = torch.device(device)
-                _ = torch.tensor([1.0], device=self.compute_device)
-            except RuntimeError:
-                if allow_cpu:
-                    logger.info(f"[HFStudentRewardClient] Device {device} not available, using CPU")
-                    self.compute_device = torch.device("cpu")
-                    self.enable_offload = False
-                else:
-                    raise
-        else:
-            self.compute_device = get_available_device(device, allow_cpu=allow_cpu)
+                result = subprocess.run(
+                    ['nvidia-smi', '--query-gpu=index,memory.used,memory.total', '--format=csv,noheader,nounits'],
+                    capture_output=True, text=True, timeout=5
+                )
+                lines = result.stdout.strip().split('\n')
+                for line in lines:
+                    parts = line.split(',')
+                    if len(parts) >= 3 and int(parts[0].strip()) == gpu_idx:
+                        used_mb = int(parts[1].strip())
+                        total_mb = int(parts[2].strip())
+                        used_gb = used_mb / 1024
+                        total_gb = total_mb / 1024
+                        return f"GPU {gpu_idx}: {used_gb:.1f}GB / {total_gb:.1f}GB ({used_mb}MB used)"
+                return f"GPU {gpu_idx}: not found"
+            except Exception as e:
+                return f"nvidia-smi error: {e}"
 
-        # Alias for compatibility
-        self.device = self.compute_device
+        print(f"[VLLMWorker-{gpu_id}] ========== GPU MEMORY CHECK ==========", flush=True)
+        mem_before = get_nvidia_smi_memory_for_gpu(gpu_id)
+        print(f"[VLLMWorker-{gpu_id}] BEFORE loading Student vLLM: {mem_before}", flush=True)
+        print(f"[VLLMWorker-{gpu_id}] gpu_memory_utilization={gpu_memory_utilization}, max_model_len={max_model_len}", flush=True)
+        print(f"[VLLMWorker-{gpu_id}] Initializing vLLM on GPU {gpu_id}...", flush=True)
 
-        # Use float32 for CPU (bfloat16 not well supported on CPU)
-        if self.compute_device.type == "cpu":
-            self.dtype = torch.float32
-            logger.info(f"[HFStudentRewardClient] Using float32 for CPU")
-        else:
-            self.dtype = dtype
-
-        logger.info(f"[HFStudentRewardClient] Initializing Student Reward Client")
-        logger.info(f"  Model Path: {model_path}")
-        logger.info(f"  Compute Device: {self.compute_device}")
-        logger.info(f"  Offload Enabled: {self.enable_offload}")
-        if self.enable_offload:
-            logger.info(f"  Offload Device: {self.offload_device}")
-
-        # Load tokenizer (always keep in memory)
-        logger.info(f"Loading tokenizer from {model_path}...")
+        self.gpu_id = gpu_id
+        self._get_nvidia_smi = get_nvidia_smi_memory_for_gpu  # Save for later use
         self.tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+        self.llm = LLM(
+            model=model_path,
+            tensor_parallel_size=1,
+            gpu_memory_utilization=gpu_memory_utilization,
+            dtype=dtype,
+            max_model_len=max_model_len,
+            trust_remote_code=True,
+            enforce_eager=True,
+        )
+        print(f"[VLLMWorker-{gpu_id}] vLLM initialized successfully", flush=True)
+        print(f"[VLLMWorker-{gpu_id}] nvidia-smi AFTER loading Student vLLM:", flush=True)
+        print(f"[VLLMWorker-{gpu_id}] {get_nvidia_smi_memory_for_gpu(gpu_id)}", flush=True)
+        print(f"[VLLMWorker-{gpu_id}] ========================================", flush=True)
 
-        # Set pad_token if not set (important for batch processing)
-        if self.tokenizer.pad_token is None:
-            self.tokenizer.pad_token = self.tokenizer.eos_token
-
-        # Load model
-        self.model = None
-        if self.enable_offload:
-            # Load model to offload device (CPU) initially
-            logger.info(f"Loading model to {self.offload_device} (will load to GPU on demand)...")
-            self._load_model_to_device(self.offload_device)
-        else:
-            # Load model to compute device and keep it there
-            logger.info(f"Loading model to {self.compute_device} (persistent mode)...")
-            self._load_model_to_device(self.compute_device)
-
-    def _load_model_to_device(self, target_device: torch.device):
-        """Load model to specified device."""
-        if target_device.type == "cpu":
-            # For CPU, load with float32 and move to CPU
-            self.model = AutoModelForCausalLM.from_pretrained(
-                self.model_path,
-                trust_remote_code=True,
-                torch_dtype=torch.float32,
-            )
-            self.model = self.model.to(target_device)
-        else:
-            # For GPU, use device_map
-            self.model = AutoModelForCausalLM.from_pretrained(
-                self.model_path,
-                trust_remote_code=True,
-                torch_dtype=self.dtype,
-                device_map=target_device,
-            )
-        self.model.eval()
-
-    def load_to_gpu(self):
-        """Load model from CPU to GPU (only effective when enable_offload=True)."""
-        if not self.enable_offload:
-            return
-
-        if self.model is None:
-            raise RuntimeError("Model is None, cannot load to GPU")
-
-        logger.info(f"[HFStudentRewardClient] Loading model to {self.compute_device}...")
-
-        # Convert dtype if needed (CPU uses float32, GPU uses bfloat16)
-        if self.compute_device.type != "cpu" and self.model.dtype != self.dtype:
-            self.model = self.model.to(dtype=self.dtype)
-
-        # Move to GPU
-        self.model = self.model.to(self.compute_device)
-
-        # Clear CPU cache
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-
-        logger.info(f"[HFStudentRewardClient] Model loaded to {self.compute_device}")
-
-    def offload_to_cpu(self):
-        """Offload model from GPU to CPU (only effective when enable_offload=True)."""
-        if not self.enable_offload:
-            return
-
-        if self.model is None:
-            raise RuntimeError("Model is None, cannot offload")
-
-        logger.info(f"[HFStudentRewardClient] Offloading model to {self.offload_device}...")
-
-        # Convert to float32 for CPU
-        if self.offload_device.type == "cpu":
-            self.model = self.model.to(dtype=torch.float32)
-
-        # Move to CPU
-        self.model = self.model.to(self.offload_device)
-
-        # Clear GPU cache
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-
-        logger.info(f"[HFStudentRewardClient] Model offloaded to {self.offload_device}")
-
-    @torch.no_grad()
-    def _compute_single_log_prob(
+    def compute_logprobs(
         self,
-        question: str,
-        cot: str,
-        answer: str,
-    ) -> Dict[str, Any]:
+        prompts: List[str],
+        answer_starts: List[int],
+    ) -> List[Dict[str, Any]]:
         """
-        Compute log P(Answer | Question, CoT) for a single sample.
-
-        Uses Qwen3 chat template with reasoning_content field:
-        - User message: question
-        - Assistant message: answer with reasoning_content=cot
-
-        Format:
-            <|im_start|>user
-            {question}<|im_end|>
-            <|im_start|>assistant
-            <think>
-            {cot}
-            </think>
-
-            {answer}<|im_end|>
-
-        Args:
-            question: The input question
-            cot: The chain-of-thought reasoning (will be in <think> block)
-            answer: The ground truth answer
+        Compute log probs for a batch of prompts.
 
         Returns:
-            dict with:
-                - mean_log_prob: float, answer 部分 token logprob 的平均值
-                - sum_log_prob: float, answer 部分 token logprob 的总和
-                - token_log_probs: List[float], 每个 answer token 的 logprob
-                - token_ids: List[int], answer 部分的 token IDs
+            List of dicts, each containing:
+                - mean_log_prob: float
+                - min_log_prob: float
+                - token_log_probs: List[float]
         """
-        # 使用 Qwen3 chat template 格式
+        from vllm import SamplingParams
+        import time
+
+        sampling_params = SamplingParams(
+            max_tokens=1,
+            prompt_logprobs=1,
+            temperature=0,
+        )
+
+        # Log GPU memory before generation
+        print(f"[VLLMWorker-{self.gpu_id}] Processing {len(prompts)} prompts...", flush=True)
+        if hasattr(self, '_get_nvidia_smi'):
+            print(f"[VLLMWorker-{self.gpu_id}] GPU memory BEFORE generate: {self._get_nvidia_smi(self.gpu_id)}", flush=True)
+
+        start_time = time.time()
+
+        outputs = self.llm.generate(prompts, sampling_params)
+
+        elapsed = time.time() - start_time
+        speed = len(prompts) / elapsed if elapsed > 0 else 0
+        print(f"[VLLMWorker-{self.gpu_id}] Done: {len(prompts)} prompts in {elapsed:.2f}s ({speed:.1f} samples/s)")
+
+        # Extract log probs with mean and min
+        results = []
+        for output, ans_start in zip(outputs, answer_starts):
+            logprobs = self._extract_answer_logprobs(output.prompt_logprobs, ans_start)
+            if logprobs:
+                results.append({
+                    "mean_log_prob": sum(logprobs) / len(logprobs),
+                    "min_log_prob": min(logprobs),
+                    "token_log_probs": logprobs,
+                })
+            else:
+                results.append({
+                    "mean_log_prob": -100.0,
+                    "min_log_prob": -100.0,
+                    "token_log_probs": [],
+                })
+
+        return results
+
+    def _extract_answer_logprobs(self, prompt_logprobs, answer_start_idx: int) -> List[float]:
+        """Extract log probabilities for the answer portion."""
+        if not prompt_logprobs:
+            return []
+
+        log_probs = []
+        for i in range(answer_start_idx, len(prompt_logprobs)):
+            token_logprob = prompt_logprobs[i]
+            if token_logprob is not None:
+                # Get the log prob of the actual token
+                if hasattr(token_logprob, 'values'):
+                    # vLLM 0.8.x format - values() returns Logprob objects
+                    value = list(token_logprob.values())[0]
+                    # Extract float from Logprob object if needed
+                    if hasattr(value, 'logprob'):
+                        log_probs.append(float(value.logprob))
+                    else:
+                        log_probs.append(float(value))
+                elif isinstance(token_logprob, dict):
+                    value = list(token_logprob.values())[0]
+                    if hasattr(value, 'logprob'):
+                        log_probs.append(float(value.logprob))
+                    else:
+                        log_probs.append(float(value))
+                elif isinstance(token_logprob, (list, tuple)) and len(token_logprob) > 0:
+                    value = token_logprob[0]
+                    if hasattr(value, 'logprob'):
+                        log_probs.append(float(value.logprob))
+                    else:
+                        log_probs.append(float(value))
+
+        return log_probs if log_probs else [-100.0]
+
+
+class VLLMStudentRewardClient:
+    """
+    Multi-GPU vLLM-based Student Reward Client using Ray actors.
+
+    Each GPU runs a separate vLLM instance in its own Ray actor process.
+    This avoids conflicts with the main Ray cluster and allows true parallelism.
+
+    Benefits:
+    1. Each GPU has its own vLLM instance (no TP coordination overhead)
+    2. True data parallelism across GPUs
+    3. vLLM's efficient batching within each GPU
+    """
+
+    def __init__(
+        self,
+        model_path: str,
+        tensor_parallel_size: int = 1,  # Ignored, always 1 per actor
+        gpu_memory_utilization: float = 0.4,
+        dtype: str = "float16",
+        max_model_len: int = 8192,
+        devices: Optional[List[str]] = None,
+    ):
+        """
+        Initialize Multi-GPU vLLM Student Reward Client with Ray actors.
+
+        Args:
+            model_path: Path to the student model
+            tensor_parallel_size: Ignored (each actor uses TP=1)
+            gpu_memory_utilization: Fraction of GPU memory to use per actor
+            dtype: Data type for the model
+            max_model_len: Maximum sequence length
+            devices: List of CUDA devices (e.g., ["cuda:0", "cuda:1", "cuda:2", "cuda:3"])
+        """
+        import torch
+
+        self.model_path = model_path
+        self.gpu_memory_utilization = gpu_memory_utilization
+        self.dtype = dtype
+        self.max_model_len = max_model_len
+
+        # Auto-detect devices if not specified
+        if devices is None:
+            num_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 0
+            devices = [f"cuda:{i}" for i in range(num_gpus)] if num_gpus > 0 else []
+        self.devices = devices
+        self.num_gpus = len(devices)
+        self.gpu_ids = [int(d.split(":")[-1]) for d in devices]
+
+        self.workers: List[ray.actor.ActorHandle] = []
+        self.tokenizer = None
+        self._initialized = False
+
+        logger.info(f"[VLLMStudentReward] Will use {self.num_gpus} Ray actors on GPUs: {self.gpu_ids}")
+
+    def cleanup(self):
+        """Cleanup Ray vLLM actors to release GPU memory."""
+        import subprocess
+        import time
+
+        if not self._initialized:
+            return
+
+        def get_nvidia_smi():
+            try:
+                result = subprocess.run(
+                    ['nvidia-smi', '--query-gpu=index,memory.used,memory.total', '--format=csv,noheader,nounits'],
+                    capture_output=True, text=True, timeout=5
+                )
+                lines = result.stdout.strip().split('\n')
+                output = []
+                for line in lines:
+                    parts = line.split(',')
+                    if len(parts) >= 3:
+                        gpu_idx = parts[0].strip()
+                        used_mb = int(parts[1].strip())
+                        used_gb = used_mb / 1024
+                        output.append(f"GPU {gpu_idx}: {used_gb:.1f}GB")
+                return ", ".join(output)
+            except:
+                return "nvidia-smi unavailable"
+
+        logger.info(f"[VLLMStudentReward] Cleaning up {len(self.workers)} vLLM Ray actors...")
+        logger.info(f"[VLLMStudentReward] nvidia-smi BEFORE cleanup: {get_nvidia_smi()}")
+
+        # Kill all Ray actors to release GPU memory
+        for i, worker in enumerate(self.workers):
+            try:
+                ray.kill(worker)
+                logger.info(f"[VLLMStudentReward] Killed worker {i}")
+            except Exception as e:
+                logger.warning(f"[VLLMStudentReward] Error killing worker {i}: {e}")
+
+        self.workers = []
+        self._initialized = False
+
+        # Force garbage collection and CUDA cache cleanup
+        import gc
+        import torch
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+        # Wait for GPU memory to be released
+        logger.info(f"[VLLMStudentReward] Waiting for GPU memory release...")
+        time.sleep(2)
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+        logger.info(f"[VLLMStudentReward] nvidia-smi AFTER cleanup: {get_nvidia_smi()}")
+        logger.info(f"[VLLMStudentReward] Cleanup completed")
+
+    def initialize(self):
+        """Lazy initialization of Ray vLLM actors."""
+        if self._initialized:
+            return
+
+        from transformers import AutoTokenizer
+
+        logger.info(f"[VLLMStudentReward] Initializing {self.num_gpus} vLLM Ray actors...")
+
+        # Initialize tokenizer (shared, for prompt building)
+        self.tokenizer = AutoTokenizer.from_pretrained(self.model_path, trust_remote_code=True)
+
+        # Create Ray actors, one per GPU
+        for gpu_id in self.gpu_ids:
+            logger.info(f"[VLLMStudentReward] Creating actor for GPU {gpu_id}...")
+            # Note: num_gpus=0 because we set CUDA_VISIBLE_DEVICES inside the actor
+            worker = VLLMWorkerActor.options(num_gpus=0, num_cpus=1).remote(
+                model_path=self.model_path,
+                gpu_id=gpu_id,
+                gpu_memory_utilization=self.gpu_memory_utilization,
+                dtype=self.dtype,
+                max_model_len=self.max_model_len,
+            )
+            self.workers.append(worker)
+
+        # Wait for all actors to initialize
+        logger.info(f"[VLLMStudentReward] Waiting for actors to initialize...")
+        ray.get([w.compute_logprobs.remote(["test"], [0]) for w in self.workers])
+        logger.info(f"[VLLMStudentReward] All {self.num_gpus} actors initialized successfully")
+
+        self._initialized = True
+
+    def _build_prompt(self, question: str, cot: str, answer: str) -> tuple[str, int]:
+        """
+        Build the full prompt and compute the answer start position.
+
+        Returns:
+            tuple: (full_prompt, answer_start_token_idx)
+        """
+        # Build full prompt using chat template
         messages = [
             {'role': 'user', 'content': question},
             {'role': 'assistant', 'content': answer, 'reasoning_content': cot}
         ]
-
-        # 应用 chat template
         full_text = self.tokenizer.apply_chat_template(
-            messages,
-            tokenize=False,
-            add_generation_prompt=False,
+            messages, tokenize=False, add_generation_prompt=False
         )
 
-        # 构建 prefix（不包含 answer）用于定位 answer 开始位置
-        prefix_messages = [
-            {'role': 'user', 'content': question},
-        ]
+        # Build prefix to find where answer starts
+        prefix_messages = [{'role': 'user', 'content': question}]
         prefix_base = self.tokenizer.apply_chat_template(
-            prefix_messages,
-            tokenize=False,
-            add_generation_prompt=True,
+            prefix_messages, tokenize=False, add_generation_prompt=True
         )
         prefix_with_think = prefix_base + f"<think>\n{cot}\n</think>\n\n"
 
-        # Tokenize 完整文本
-        inputs = self.tokenizer(
-            full_text,
-            return_tensors="pt",
-            truncation=True,
-            max_length=4096,
-        ).to(self.model.device)
+        # Tokenize to get positions
+        prefix_token_ids = self.tokenizer.encode(prefix_with_think, add_special_tokens=False)
+        answer_start_idx = len(prefix_token_ids)
 
-        # Forward pass to get logits
-        outputs = self.model(**inputs)
-        logits = outputs.logits[:, :-1, :]
-        all_token_ids = inputs["input_ids"][:, 1:]
-
-        # Calculate log probabilities
-        log_probs = torch.nn.functional.log_softmax(logits, dim=-1)
-        token_log_probs = log_probs.gather(2, all_token_ids.unsqueeze(2)).squeeze(2)
-
-        # 计算 prefix 的 token 长度
-        prefix_token_ids = self.tokenizer(
-            prefix_with_think,
-            return_tensors="pt",
-            truncation=True,
-            max_length=4096,
-        )["input_ids"][0]
-        prefix_len = len(prefix_token_ids) - 1
-
-        # Extract answer token logprobs and IDs
-        answer_log_probs = token_log_probs[0, prefix_len:].tolist()
-        answer_token_ids = all_token_ids[0, prefix_len:].tolist()
-
-        # 移除末尾的特殊 token
-        im_end_token_id = self.tokenizer.convert_tokens_to_ids("<|im_end|>")
-        eos_token_id = self.tokenizer.eos_token_id
-        special_ids = {im_end_token_id, eos_token_id}
-        if im_end_token_id is None:
-            special_ids = {eos_token_id}
-
-        while answer_token_ids and answer_token_ids[-1] in special_ids:
-            answer_token_ids.pop()
-            answer_log_probs.pop()
-
-        if answer_log_probs:
-            return {
-                "mean_log_prob": sum(answer_log_probs) / len(answer_log_probs),
-                "sum_log_prob": sum(answer_log_probs),
-                "token_log_probs": answer_log_probs,
-                "token_ids": answer_token_ids,
-            }
-
-        return {
-            "mean_log_prob": -100.0,
-            "sum_log_prob": -100.0,
-            "token_log_probs": [],
-            "token_ids": [],
-        }
-
-    @torch.no_grad()
-    def compute_cognitive_reward_batch(
-        self,
-        questions: List[str],
-        rewrite_cots: List[str],
-        answers: List[str],
-        original_cots: Optional[List[str]] = None,
-    ) -> Dict[str, Any]:
-        """
-        Batch computation of cognitive rewards.
-
-        计算 rewrite_cot 和 original_cot 条件下 answer 的 mean log prob，
-        然后比较两者来决定 reward。
-
-        When enable_offload=True:
-        - Automatically loads model to GPU before computation
-        - Automatically offloads model to CPU after computation
-
-        Reward 逻辑:
-            如果 rewrite_mean_log_prob > original_mean_log_prob → reward = 1
-            否则 → reward = 0
-
-        Args:
-            questions: List of questions
-            rewrite_cots: List of rewritten CoTs (Actor 生成)
-            answers: List of ground truth answers
-            original_cots: List of original CoTs (用于比较，可选)
-
-        Returns:
-            dict with:
-                - rewards: List[float], 0 或 1 的 reward
-                - rewrite_mean_log_probs: List[float], rewrite_cot 条件下的 mean log prob
-                - original_mean_log_probs: List[float], original_cot 条件下的 mean log prob
-                - rewrite_token_log_probs: List[List[float]], rewrite 的 token-level logprob
-                - rewrite_token_ids: List[List[int]], rewrite 的 answer token IDs
-        """
-        # Auto load to GPU if offload enabled and auto_offload mode
-        if self.enable_offload and self.auto_offload:
-            self.load_to_gpu()
-
-        try:
-            rewards = []
-            rewrite_mean_log_probs = []
-            original_mean_log_probs = []
-            rewrite_token_log_probs = []
-            rewrite_token_ids = []
-
-            for i, (q, rewrite_cot, ans) in enumerate(zip(questions, rewrite_cots, answers)):
-                try:
-                    # 计算 rewrite_cot 条件下的 log prob
-                    rewrite_result = self._compute_single_log_prob(q, rewrite_cot, ans)
-                    rewrite_mean = rewrite_result["mean_log_prob"]
-                    rewrite_mean_log_probs.append(rewrite_mean)
-                    rewrite_token_log_probs.append(rewrite_result["token_log_probs"])
-                    rewrite_token_ids.append(rewrite_result["token_ids"])
-
-                    # 如果提供了 original_cot，计算比较
-                    if original_cots and i < len(original_cots) and original_cots[i]:
-                        original_result = self._compute_single_log_prob(q, original_cots[i], ans)
-                        original_mean = original_result["mean_log_prob"]
-                        original_mean_log_probs.append(original_mean)
-
-                        # Reward: 如果 rewrite 的 log prob 更高（更好），给 reward = 1
-                        reward = 1.0 if rewrite_mean > original_mean else 0.0
-                        rewards.append(reward)
-                    else:
-                        # No original_cot to compare with
-                        # R_cog should be 0 or 1 based on comparison, but without original_cot
-                        # we use rewrite_mean_log_prob directly (normalized)
-                        # Higher log_prob (closer to 0) is better, so we use it as reward signal
-                        original_mean_log_probs.append(-100.0)
-                        # Use rewrite_mean as reward (already in log space, typically -100 to 0)
-                        # Note: This preserves the original behavior for backwards compatibility
-                        # If you want strict 0/1 rewards, set a threshold or always provide original_cot
-                        rewards.append(rewrite_mean)
-
-                except Exception as e:
-                    logger.error(f"[StudentReward] Error computing log_prob for sample {i}: {e}")
-                    rewards.append(0.0)
-                    rewrite_mean_log_probs.append(-100.0)
-                    original_mean_log_probs.append(-100.0)
-                    rewrite_token_log_probs.append([])
-                    rewrite_token_ids.append([])
-
-            return {
-                "rewards": rewards,
-                "rewrite_mean_log_probs": rewrite_mean_log_probs,
-                "original_mean_log_probs": original_mean_log_probs,
-                "rewrite_token_log_probs": rewrite_token_log_probs,
-                "rewrite_token_ids": rewrite_token_ids,
-                # 向后兼容
-                "log_probs": rewrite_mean_log_probs,
-                "token_log_probs": rewrite_token_log_probs,
-                "token_ids": rewrite_token_ids,
-            }
-        finally:
-            # Auto offload to CPU after computation (only if auto_offload enabled)
-            if self.enable_offload and self.auto_offload:
-                self.offload_to_cpu()
-
-
-class RemoteStudentRewardClient:
-    """
-    Remote Student Reward Client
-
-    Calls a separate HTTP server running on GPU to compute log probabilities.
-    This allows reward computation to run on GPU even when the calling process
-    (RewardLoopWorker) doesn't have GPU access.
-
-    Usage:
-        1. Start the server: CUDA_VISIBLE_DEVICES=5 python -m verl.experimental.reward.cot_rewriter.student_reward_server --port 8765
-        2. Use this client in reward computation
-    """
-
-    def __init__(
-        self,
-        server_url: str = "http://localhost:8765",
-        timeout: float = 30.0,
-    ):
-        """
-        Initialize Remote Student Reward Client.
-
-        Args:
-            server_url: URL of the student reward server
-            timeout: Request timeout in seconds
-        """
-        self.server_url = server_url.rstrip("/")
-        self.timeout = timeout
-        self._check_server_health()
-
-    def _check_server_health(self):
-        """Check if the server is healthy."""
-        try:
-            response = requests.get(f"{self.server_url}/health", timeout=5)
-            response.raise_for_status()
-            health = response.json()
-            logger.info(f"[RemoteStudentRewardClient] Server healthy: {health}")
-        except Exception as e:
-            logger.warning(f"[RemoteStudentRewardClient] Warning: Server health check failed: {e}")
-            logger.warning(f"[RemoteStudentRewardClient] Make sure the server is running at {self.server_url}")
+        return full_text, answer_start_idx
 
     def compute_cognitive_reward_batch(
         self,
@@ -497,100 +355,165 @@ class RemoteStudentRewardClient:
         rewrite_cots: List[str],
         answers: List[str],
         original_cots: Optional[List[str]] = None,
+        alpha_cog: float = 0.01,
+        **kwargs,  # Accept extra args for compatibility
     ) -> Dict[str, Any]:
         """
-        Batch computation of cognitive rewards via HTTP.
+        Compute cognitive rewards for a batch using multi-GPU vLLM Ray actors.
 
-        如果提供了 original_cots，会比较 rewrite 和 original 的 mean log prob：
-        - 如果 rewrite_mean > original_mean → reward = 1
-        - 否则 → reward = 0
+        Each Ray actor runs vLLM on a separate GPU. We split the batch across
+        all actors for true data parallelism.
 
         Args:
             questions: List of questions
             rewrite_cots: List of rewritten CoTs
             answers: List of ground truth answers
-            original_cots: List of original CoTs (用于比较，可选)
+            original_cots: Optional list of original CoTs
+            alpha_cog: Weight for min log prob term
 
         Returns:
-            dict with:
-                - rewards: List[float], 0 或 1 的 reward
-                - rewrite_mean_log_probs: List[float], rewrite 的 mean log prob
-                - original_mean_log_probs: List[float], original 的 mean log prob
-                - rewrite_token_log_probs: List[List[float]], token-level logprob
-                - rewrite_token_ids: List[List[int]], token IDs
+            Dict containing rewards and log probs
         """
-        try:
-            request_data = {
-                "questions": questions,
-                "rewrite_cots": rewrite_cots,
-                "answers": answers,
-            }
-            if original_cots:
-                request_data["original_cots"] = original_cots
+        import time
 
-            response = requests.post(
-                f"{self.server_url}/compute_log_probs",
-                json=request_data,
-                timeout=self.timeout,
-            )
-            response.raise_for_status()
-            result = response.json()
-            return {
-                "rewards": result["rewards"],
-                "rewrite_mean_log_probs": result["rewrite_mean_log_probs"],
-                "original_mean_log_probs": result["original_mean_log_probs"],
-                "rewrite_token_log_probs": result["rewrite_token_log_probs"],
-                "rewrite_token_ids": result["rewrite_token_ids"],
-                # 向后兼容
-                "log_probs": result["log_probs"],
-                "token_log_probs": result["token_log_probs"],
-                "token_ids": result["token_ids"],
-            }
-        except Exception as e:
-            logger.error(f"[RemoteStudentRewardClient] Error calling server: {e}")
-            batch_size = len(questions)
-            return {
-                "rewards": [0.0] * batch_size,
-                "rewrite_mean_log_probs": [-100.0] * batch_size,
-                "original_mean_log_probs": [-100.0] * batch_size,
-                "rewrite_token_log_probs": [[] for _ in range(batch_size)],
-                "rewrite_token_ids": [[] for _ in range(batch_size)],
-                "log_probs": [-100.0] * batch_size,
-                "token_log_probs": [[] for _ in range(batch_size)],
-                "token_ids": [[] for _ in range(batch_size)],
-            }
+        self.initialize()
 
+        batch_size = len(questions)
+        logger.info(f"[VLLMStudentReward] Computing rewards for {batch_size} samples on {self.num_gpus} GPUs")
 
-# Global singleton
-_student_client: Optional[HFStudentRewardClient] = None
-_remote_student_client: Optional[RemoteStudentRewardClient] = None
+        start_time = time.time()
 
+        # Phase 1: Build all prompts (CPU)
+        logger.info(f"[VLLMStudentReward] Phase 1: Building prompts...")
+        rewrite_prompts = []
+        rewrite_ans_starts = []
+        original_prompts = []
+        original_ans_starts = []
+        original_indices = []  # Track which indices have original_cot
 
-def get_student_client(
-    model_path: str = "./models/Qwen3-1.7B",
-    use_remote: bool = False,
-    server_url: str = "http://localhost:8765",
-    **kwargs,
-) -> HFStudentRewardClient | RemoteStudentRewardClient:
-    """
-    Get or create Student Reward client singleton.
+        for i in range(batch_size):
+            # Rewrite prompt
+            rewrite_prompt, rewrite_ans_start = self._build_prompt(questions[i], rewrite_cots[i], answers[i])
+            rewrite_prompts.append(rewrite_prompt)
+            rewrite_ans_starts.append(rewrite_ans_start)
 
-    Args:
-        model_path: Path to the student model (for local mode)
-        use_remote: If True, use remote HTTP server instead of local model
-        server_url: URL of the remote server (only used if use_remote=True)
-        **kwargs: Additional arguments for HFStudentRewardClient
+            # Original prompt (if provided)
+            if original_cots and i < len(original_cots) and original_cots[i]:
+                orig_prompt, orig_ans_start = self._build_prompt(questions[i], original_cots[i], answers[i])
+                original_prompts.append(orig_prompt)
+                original_ans_starts.append(orig_ans_start)
+                original_indices.append(i)
 
-    Returns:
-        Student reward client (local or remote)
-    """
-    global _student_client, _remote_student_client
+        prep_time = time.time() - start_time
+        logger.info(f"[VLLMStudentReward] Phase 1 done: {prep_time:.2f}s")
 
-    if use_remote:
-        if _remote_student_client is None:
-            _remote_student_client = RemoteStudentRewardClient(server_url=server_url)
-        return _remote_student_client
-    else:
-        if _student_client is None:
-            _student_client = HFStudentRewardClient(model_path=model_path, **kwargs)
-        return _student_client
+        # Phase 2: Distribute work to Ray actors
+        logger.info(f"[VLLMStudentReward] Phase 2: Distributing work to {self.num_gpus} Ray actors...")
+        inference_start = time.time()
+
+        # Split rewrite prompts across workers
+        rewrite_chunks = self._split_into_chunks(rewrite_prompts, self.num_gpus)
+        rewrite_ans_start_chunks = self._split_into_chunks(rewrite_ans_starts, self.num_gpus)
+
+        # Submit rewrite tasks to all workers in parallel
+        rewrite_futures = []
+        for worker_idx, (prompts_chunk, ans_starts_chunk) in enumerate(zip(rewrite_chunks, rewrite_ans_start_chunks)):
+            if prompts_chunk:
+                future = self.workers[worker_idx].compute_logprobs.remote(prompts_chunk, ans_starts_chunk)
+                rewrite_futures.append((worker_idx, len(prompts_chunk), future))
+
+        # Split original prompts across workers (if any)
+        original_futures = []
+        if original_prompts:
+            original_chunks = self._split_into_chunks(original_prompts, self.num_gpus)
+            original_ans_start_chunks = self._split_into_chunks(original_ans_starts, self.num_gpus)
+
+            for worker_idx, (prompts_chunk, ans_starts_chunk) in enumerate(zip(original_chunks, original_ans_start_chunks)):
+                if prompts_chunk:
+                    future = self.workers[worker_idx].compute_logprobs.remote(prompts_chunk, ans_starts_chunk)
+                    original_futures.append((worker_idx, len(prompts_chunk), future))
+
+        # Gather rewrite results
+        logger.info(f"[VLLMStudentReward] Waiting for {len(rewrite_futures)} rewrite tasks...")
+        rewrite_results = [None] * batch_size
+        for worker_idx, chunk_size, future in rewrite_futures:
+            chunk_results = ray.get(future)
+            # Place results back in original order
+            start_idx = sum(len(rewrite_chunks[i]) for i in range(worker_idx))
+            for i, result in enumerate(chunk_results):
+                rewrite_results[start_idx + i] = result
+
+        # Gather original results
+        original_results_map = {}
+        if original_futures:
+            logger.info(f"[VLLMStudentReward] Waiting for {len(original_futures)} original tasks...")
+            for worker_idx, chunk_size, future in original_futures:
+                chunk_results = ray.get(future)
+                start_idx = sum(len(original_chunks[i]) for i in range(worker_idx))
+                for i, result in enumerate(chunk_results):
+                    original_idx = original_indices[start_idx + i]
+                    original_results_map[original_idx] = result
+
+        inference_time = time.time() - inference_start
+        total_time = time.time() - start_time
+        logger.info(f"[VLLMStudentReward] Phase 2 done: {inference_time:.2f}s inference, {total_time:.2f}s total")
+
+        # Phase 3: Compute rewards
+        logger.info(f"[VLLMStudentReward] Phase 3: Computing rewards with alpha_cog={alpha_cog}...")
+        rewards = []
+        rewrite_mean_log_probs = []
+        original_mean_log_probs = []
+        all_token_log_probs = []
+        all_token_ids = []
+
+        for i in range(batch_size):
+            # Get rewrite result
+            rewrite_result = rewrite_results[i]
+            rewrite_mean = rewrite_result["mean_log_prob"]
+            rewrite_min = rewrite_result["min_log_prob"]
+            rewrite_answer_log_prob = rewrite_mean + alpha_cog * rewrite_min
+
+            # Get original result (if available)
+            if i in original_results_map:
+                original_result = original_results_map[i]
+                original_mean = original_result["mean_log_prob"]
+                original_min = original_result["min_log_prob"]
+                original_answer_log_prob = original_mean + alpha_cog * original_min
+                reward = rewrite_answer_log_prob - original_answer_log_prob
+            else:
+                original_mean = -100.0
+                reward = rewrite_answer_log_prob
+
+            rewards.append(reward)
+            rewrite_mean_log_probs.append(rewrite_mean)
+            original_mean_log_probs.append(original_mean)
+            all_token_log_probs.append(rewrite_result.get("token_log_probs", []))
+            all_token_ids.append([])  # Token IDs not needed for reward
+
+        logger.info(f"[VLLMStudentReward] All {batch_size} rewards computed")
+
+        return {
+            "rewards": rewards,
+            "rewrite_mean_log_probs": rewrite_mean_log_probs,
+            "original_mean_log_probs": original_mean_log_probs,
+            "rewrite_token_log_probs": all_token_log_probs,
+            "rewrite_token_ids": all_token_ids,
+            "log_probs": rewrite_mean_log_probs,
+            "token_log_probs": all_token_log_probs,
+            "token_ids": all_token_ids,
+        }
+
+    def _split_into_chunks(self, items: List, num_chunks: int) -> List[List]:
+        """Split items into roughly equal chunks."""
+        if num_chunks <= 0:
+            return [items]
+        chunk_size = max(1, len(items) // num_chunks)
+        chunks = []
+        for i in range(num_chunks):
+            start = i * chunk_size
+            if i == num_chunks - 1:
+                end = len(items)
+            else:
+                end = min(start + chunk_size, len(items))
+            chunks.append(items[start:end])
+        return chunks

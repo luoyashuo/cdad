@@ -13,13 +13,12 @@ import torch
 
 from verl import DataProto
 from verl.workers.reward_manager import register
-from verl.workers.reward_manager.abstract import AbstractRewardManager
 
 from verl.experimental.reward.cot_rewriter.logging_config import logger
 
 
 @register("cot_rewriter")
-class CoTRewriterRewardManager(AbstractRewardManager):
+class CoTRewriterRewardManager:
     """Reward manager specifically designed for CoT Rewriter GRPO training.
 
     This manager directly calls compute_cot_rewriter_reward with the full DataProto

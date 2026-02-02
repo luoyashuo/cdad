@@ -12,27 +12,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .reward_manager import RewardManagerWorker
-from .reward_model import RewardModelManager
-
 # CoT Rewriter Reward Module
 from .cot_rewriter import (
     compute_cot_rewriter_reward,
     CombinedRewardComputer,
     CoTRewriterRewardManager,
-    HFStudentRewardClient,
-    RemoteStudentRewardClient,
+    VLLMStudentRewardClient,
     HFFSFJudge,
 )
 
 __all__ = [
-    "RewardModelManager",
-    "RewardManagerWorker",
     # CoT Rewriter exports
     "compute_cot_rewriter_reward",
     "CombinedRewardComputer",
     "CoTRewriterRewardManager",
-    "HFStudentRewardClient",
-    "RemoteStudentRewardClient",
+    "VLLMStudentRewardClient",
     "HFFSFJudge",
 ]

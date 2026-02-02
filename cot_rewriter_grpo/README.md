@@ -118,8 +118,8 @@ source .venv/bin/activate
 # 安装 VERL 框架（在父目录的 verl 中）
 cd verl
 uv pip install -e .
-uv pip install vllm==0.8.5.post1
-uv pip install "sglang[all]==0.5.2"
+uv pip install vllm==0.8.3
+uv pip install sglang[all]==0.4.6.post5
 uv pip install transformers==4.55.0
 uv pip install zmq
 uv pip install swanlab
@@ -139,3 +139,15 @@ uv pip install loguru
 2. RUC服务器上VLLM运行必须开：
   - VLLM_USE_V1=0 - 强制使用 vLLM V0 引擎                                                                                                                    
   - VLLM_ATTENTION_BACKEND=FLASH_ATTN - 使用 Flash Attention 后端 
+  - FSDP必须用fp16，不能用bf16:
+  ```
+    fsdp_config:
+      dtype: float16
+      mixed_precision:
+        param_dtype: fp16
+        reduce_dtype: fp16
+        buffer_dtype: fp16
+    ```
+3. VLLM SLEEP失效：
+  - https://github.com/vllm-project/vllm-ascend/issues/977
+  - https://github.com/vllm-project/vllm/issues/15254

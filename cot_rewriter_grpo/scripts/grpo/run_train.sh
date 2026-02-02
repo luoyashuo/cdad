@@ -68,14 +68,24 @@ export PYTORCH_CUDA_ALLOC_CONF=backend:native,expandable_segments:False
 export NCCL_P2P_DISABLE=1
 export NCCL_IB_DISABLE=1
 export NCCL_SHM_DISABLE=0
-# 禁用 CUDA 内存缓存以避免驱动兼容性问题
-export PYTORCH_NO_CUDA_MEMORY_CACHING=1
+# 注意: 不要设置 PYTORCH_NO_CUDA_MEMORY_CACHING=1
+# 这会禁用 PyTorch CUDA 内存缓存，与 vLLM cumem allocator 一起使用时会导致冲突
+# export PYTORCH_NO_CUDA_MEMORY_CACHING=1
 # 禁用 torch.compile 以避免 CUDA Graph 问题
 export TORCH_COMPILE_DISABLE=1
-# vLLM 配置 - 使用 V0 引擎以避免 CUDA Graph 兼容性问题
-export VLLM_USE_V1=0
+# vLLM 配置 - 使用 V1 引擎以获得更好的 sleep mode 支持
+# 注意: 配置文件中 enforce_eager=True 会禁用 CUDA Graph，避免兼容性问题
+# export VLLM_USE_V1=0  # 不再使用 V0 引擎
 # 禁用 vLLM 的 flashinfer 后端（可能有兼容性问题）
 export VLLM_ATTENTION_BACKEND=FLASH_ATTN
+# NOTE: 不要禁用 vLLM 的 cumem allocator (VLLM_DISABLE_CUMEM=1)
+# 因为 enable_sleep_mode 功能依赖 cumem allocator 来管理 GPU 内存
+# 如果禁用，sleep(level=2) 无法释放 GPU 内存
+#
+# 如果遇到 PyTorch CUDA MemPool 冲突 (captures_underway.empty() assertion),
+# 考虑使用 PYTORCH_CUDA_ALLOC_CONF=backend:native 来缓解
+# export VLLM_DISABLE_CUMEM=1  # DO NOT SET - breaks sleep mode
+export VLLM_WORKER_MULTIPROC_METHOD=spawn
 
 # CRITICAL: Disable Ray Dashboard to avoid OpenTelemetry version conflicts
 # This prevents: TypeError: Meter.create_histogram() got an unexpected keyword argument

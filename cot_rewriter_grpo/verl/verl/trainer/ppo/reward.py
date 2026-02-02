@@ -12,25 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import importlib.util
-import inspect
 import multiprocessing
 import os
-import sys
-import warnings
 from functools import partial
-from typing import Any, Optional
 
 import ray
-import torch
-from omegaconf import DictConfig
 
 from verl import DataProto
 from verl.utils.reward_score import default_compute_score
-from verl.utils.transferqueue_utils import tqbridge
-from verl.workers.reward_manager import get_reward_manager_cls
-from verl.workers.reward_manager.abstract import AbstractRewardManager, RawRewardFn
-from verl.workers.reward_manager.registry import REWARD_MANAGER_REGISTRY
 
 
 def _call_with_kwargs(raw_fn, extra_kwargs, *args, **kwargs):
@@ -42,16 +31,7 @@ def _call_with_kwargs(raw_fn, extra_kwargs, *args, **kwargs):
     return raw_fn(*args, **merged_kwargs)
 
 
-async def _call_with_kwargs_async(raw_fn, extra_kwargs, *args, **kwargs):
-    """Calls `raw_fn` by merging `extra_kwargs` into call-time `kwargs`, with `extra_kwargs` taking precedence.
-
-    This function is used to merge additional keyword arguments with the original function's arguments.
-    """
-    merged_kwargs = {**kwargs, **extra_kwargs}
-    return await raw_fn(*args, **merged_kwargs)
-
-
-def get_custom_reward_fn(config: DictConfig) -> Optional[RawRewardFn]:
+def get_custom_reward_fn(config):
     """Load and return a custom reward function from external file.
 
     Dynamically imports a reward function from a specified file path and wraps
@@ -70,47 +50,73 @@ def get_custom_reward_fn(config: DictConfig) -> Optional[RawRewardFn]:
         RuntimeError: If there's an error loading the module from file.
         AttributeError: If the specified function name isn't found in the module.
     """
+    import importlib.util
+    import sys
 
     reward_fn_config = config.get("custom_reward_function") or {}
     file_path = reward_fn_config.get("path")
     if not file_path:
         return None
 
+    if not os.path.exists(file_path):
+        raise FileNotFoundError(f"Reward function file '{file_path}' not found.")
+
+    spec = importlib.util.spec_from_file_location("custom_module", file_path)
+    module = importlib.util.module_from_spec(spec)
+    try:
+        sys.modules["custom_module"] = module
+        spec.loader.exec_module(module)
+    except Exception as e:
+        raise RuntimeError(f"Error loading module from '{file_path}': {e}") from e
+
     function_name = reward_fn_config.get("name")
-    assert function_name is not None
-
-    module = sys.modules.get("custom_module", None)
-    if module is None:
-        if not os.path.exists(file_path):
-            raise FileNotFoundError(f"Reward function file '{file_path}' not found.")
-
-        spec = importlib.util.spec_from_file_location("custom_module", file_path)
-        assert spec is not None
-        module = importlib.util.module_from_spec(spec)
-        try:
-            sys.modules["custom_module"] = module
-            assert spec.loader is not None
-            spec.loader.exec_module(module)
-        except Exception as e:
-            raise RuntimeError(f"Error loading module from '{file_path}': {e}") from e
-
     if not hasattr(module, function_name):
-        raise AttributeError(f"Reward function '{function_name}' not found in '{module.__file__}'.")
+        raise AttributeError(f"Reward function '{function_name}' not found in '{file_path}'.")
 
-    print(f"using customized reward function '{function_name}' from '{module.__file__}'")
+    print(f"using customized reward function '{function_name}' from '{file_path}'")
     raw_fn = getattr(module, function_name)
 
     reward_kwargs = dict(reward_fn_config.get("reward_kwargs", {}))
 
-    if not inspect.iscoroutinefunction(raw_fn):
-        return partial(_call_with_kwargs, raw_fn, reward_kwargs)
-    else:
-        return partial(_call_with_kwargs_async, raw_fn, reward_kwargs)
+    return partial(_call_with_kwargs, raw_fn, reward_kwargs)
 
 
-def load_reward_manager(
-    config: DictConfig, tokenizer: Any, num_examine: int, **reward_kwargs: Any
-) -> AbstractRewardManager:
+def _load_custom_reward_manager_module(config):
+    """Load custom reward manager module from config if specified.
+
+    This allows users to define custom reward managers in external files
+    and have them automatically imported and registered.
+
+    Args:
+        config: Configuration object that may contain 'reward_manager' with
+                'module.path' specifying the file to import.
+    """
+    import importlib.util
+    import sys
+
+    reward_manager_config = config.get("reward_manager") or {}
+    module_config = reward_manager_config.get("module") or {}
+    file_path = module_config.get("path")
+
+    if not file_path:
+        return
+
+    if not os.path.exists(file_path):
+        print(f"Warning: Custom reward manager module '{file_path}' not found, skipping import.")
+        return
+
+    try:
+        module_name = f"custom_reward_manager_{hash(file_path)}"
+        spec = importlib.util.spec_from_file_location(module_name, file_path)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[module_name] = module
+        spec.loader.exec_module(module)
+        print(f"Loaded custom reward manager module from '{file_path}'")
+    except Exception as e:
+        print(f"Warning: Failed to load custom reward manager module from '{file_path}': {e}")
+
+
+def load_reward_manager(config, tokenizer, num_examine, **reward_kwargs):
     """
     Load and initialize a reward manager based on the configuration.
 
@@ -123,11 +129,11 @@ def load_reward_manager(
     Returns:
         An instance of the specified reward manager class.
     """
+    # First, try to load custom reward manager module if specified
+    # This ensures the @register decorator runs before we try to get the class
+    _load_custom_reward_manager_module(config)
 
-    # Try to get a custom reward function based on the configuration
-    # user defined reward manager can be registered in custom_reward_fn
-    compute_score = get_custom_reward_fn(config)
-    final_compute_score = compute_score
+    from verl.workers.reward_manager import get_reward_manager_cls
 
     # The list of pre-defined reward managers are defined in `verl/workers/reward_manager/`:
     # naive: NaiveRewardManager
@@ -138,51 +144,16 @@ def load_reward_manager(
     # registered via `verl.workers.reward_manager.register`
     # By default reward_manager is set to naive (NaiveRewardManager)
     reward_manager_name = config.reward_model.get("reward_manager", "naive")
-
-    # Auto-import custom reward manager module if specified in config
-    # This allows custom reward managers to be registered before get_reward_manager_cls is called
-    # Skip if the reward manager is already registered (e.g., via package __init__.py import)
-    reward_manager_config = config.get("reward_manager")
-    if reward_manager_config is not None and reward_manager_name not in REWARD_MANAGER_REGISTRY:
-        reward_manager_module = reward_manager_config.get("module") if hasattr(reward_manager_config, "get") else None
-        if reward_manager_module is not None:
-            module_path = reward_manager_module.get("path") if hasattr(reward_manager_module, "get") else None
-            if module_path and os.path.exists(module_path):
-                module_name = f"custom_reward_manager_{reward_manager_name}"
-                if module_name not in sys.modules:
-                    spec = importlib.util.spec_from_file_location(module_name, module_path)
-                    if spec and spec.loader:
-                        module = importlib.util.module_from_spec(spec)
-                        sys.modules[module_name] = module
-                        spec.loader.exec_module(module)
-                        print(f"Loaded custom reward manager module from '{module_path}'")
-
-    # Also try to auto-import if the reward manager name matches a known pattern
-    # and the custom_reward_function path is in the same directory
-    # Skip if the reward manager is already registered (e.g., via package __init__.py import)
-    if reward_manager_name not in ["naive", "prime", "batch", "dapo"] and reward_manager_name not in REWARD_MANAGER_REGISTRY:
-        reward_fn_config = config.get("custom_reward_function")
-        reward_fn_path = reward_fn_config.get("path") if reward_fn_config and hasattr(reward_fn_config, "get") else None
-        if reward_fn_path:
-            # Try to find reward_manager.py in the same directory
-            reward_fn_dir = os.path.dirname(reward_fn_path)
-            reward_manager_path = os.path.join(reward_fn_dir, "reward_manager.py")
-            if os.path.exists(reward_manager_path):
-                module_name = f"custom_reward_manager_{reward_manager_name}"
-                if module_name not in sys.modules:
-                    spec = importlib.util.spec_from_file_location(module_name, reward_manager_path)
-                    if spec and spec.loader:
-                        module = importlib.util.module_from_spec(spec)
-                        sys.modules[module_name] = module
-                        spec.loader.exec_module(module)
-                        print(f"Auto-loaded custom reward manager module from '{reward_manager_path}'")
-
     reward_manager_cls = get_reward_manager_cls(reward_manager_name)
+
+    # Try to get a custom reward function based on the configuration
+    compute_score = get_custom_reward_fn(config)
+    final_compute_score = compute_score
 
     if compute_score is None:
         sandbox_config = config.reward_model.get("sandbox_fusion")
         sandbox_url = sandbox_config.get("url") if sandbox_config else None
-        memory_limit_mb = sandbox_config.get("memory_limit_mb", 1024) if sandbox_config else 1024
+        memory_limit_mb = sandbox_config.get("memory_limit_mb", 1024)
         if sandbox_url:
             sandbox_manager = multiprocessing.Manager()
             # Create a semaphore to control concurrent access to the sandbox
@@ -206,8 +177,7 @@ def load_reward_manager(
     )
 
 
-@tqbridge(put_data=False)
-def compute_reward(data: DataProto, reward_fn: AbstractRewardManager) -> tuple[torch.Tensor, dict[str, Any]]:
+def compute_reward(data: DataProto, reward_fn):
     """
     Compute reward for a batch of data.
     Args:
@@ -238,6 +208,7 @@ def compute_reward_async(data: DataProto, config=None, tokenizer=None, reward_fn
         assert config is not None and tokenizer is not None, (
             "config and tokenizer must not be None when reward_fn is None"
         )
+        import warnings
 
         warnings.warn("using config and tokenizer with compute_reward_async is deprecated", stacklevel=2)
         reward_fn = load_reward_manager(

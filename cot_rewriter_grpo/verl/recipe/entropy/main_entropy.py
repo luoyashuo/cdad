@@ -17,7 +17,6 @@ Note that we don't combine the main with ray_trainer as ray_trainer is used by o
 
 import hydra
 import ray
-from omegaconf import OmegaConf
 
 from .entropy_ray_trainer import RayEntropyTrainer
 from .reward import load_reward_manager
@@ -31,19 +30,17 @@ def main(config):
 def run_ppo(config) -> None:
     if not ray.is_initialized():
         # this is for local ray cluster
-        default_runtime_env = {
-            "env_vars": {
-                "TOKENIZERS_PARALLELISM": "true",
-                "NCCL_DEBUG": "WARN",
-                "VLLM_LOGGING_LEVEL": "WARN",
-            }
-        }
-        ray_init_kwargs = config.ray_kwargs.get("ray_init", {})
-        runtime_env_kwargs = ray_init_kwargs.get("runtime_env", {})
-        runtime_env = OmegaConf.merge(default_runtime_env, runtime_env_kwargs)
-        ray_init_kwargs = OmegaConf.create({**ray_init_kwargs, "runtime_env": runtime_env})
-        print(f"ray init kwargs: {ray_init_kwargs}")
-        ray.init(**OmegaConf.to_container(ray_init_kwargs))
+        ray.init(
+            runtime_env={
+                "env_vars": {
+                    "TOKENIZERS_PARALLELISM": "true",
+                    "NCCL_DEBUG": "WARN",
+                    "VLLM_LOGGING_LEVEL": "WARN",
+                    "WANDB_API_KEY": "YOUR_WANDB_API_KEY",
+                }
+            },
+            num_cpus=config.ray_init.num_cpus,
+        )
 
     runner = TaskRunner.remote()
     ray.get(runner.run.remote(config))
@@ -102,11 +99,11 @@ class TaskRunner:
 
         elif config.actor_rollout_ref.actor.strategy == "megatron":
             assert config.actor_rollout_ref.actor.strategy == config.critic.strategy
-            from verl.single_controller.ray import RayWorkerGroup
+            from verl.single_controller.ray.megatron import NVMegatronRayWorkerGroup
             from verl.workers.megatron_workers import ActorRolloutRefWorker, CriticWorker
 
             actor_rollout_cls = ActorRolloutRefWorker
-            ray_worker_group_cls = RayWorkerGroup
+            ray_worker_group_cls = NVMegatronRayWorkerGroup
 
         else:
             raise NotImplementedError
@@ -161,16 +158,8 @@ class TaskRunner:
 
         from verl.utils.dataset.rl_dataset import collate_fn
 
-        train_dataset = create_rl_dataset(
-            config.data.train_files,
-            config.data,
-            tokenizer,
-            processor,
-            max_samples=config.data.get("train_max_samples", -1),
-        )
-        val_dataset = create_rl_dataset(
-            config.data.val_files, config.data, tokenizer, processor, max_samples=config.data.get("val_max_samples", -1)
-        )
+        train_dataset = create_rl_dataset(config.data.train_files, config.data, tokenizer, processor)
+        val_dataset = create_rl_dataset(config.data.val_files, config.data, tokenizer, processor)
         train_sampler = create_rl_sampler(config.data, train_dataset)
         trainer = RayEntropyTrainer(
             config=config,
@@ -190,7 +179,7 @@ class TaskRunner:
         trainer.fit()
 
 
-def create_rl_dataset(data_paths, data_config, tokenizer, processor, max_samples: int = -1):
+def create_rl_dataset(data_paths, data_config, tokenizer, processor):
     """Create a dataset.
 
     Arguments:
@@ -223,7 +212,6 @@ def create_rl_dataset(data_paths, data_config, tokenizer, processor, max_samples
         tokenizer=tokenizer,
         processor=processor,
         config=data_config,
-        max_samples=max_samples,
     )
 
     return dataset
@@ -245,9 +233,7 @@ def create_rl_sampler(data_config, dataset):
     # use sampler for better ckpt resume
     if data_config.shuffle:
         train_dataloader_generator = torch.Generator()
-        seed = data_config.get("seed")
-        if seed is not None:
-            train_dataloader_generator.manual_seed(seed)
+        train_dataloader_generator.manual_seed(data_config.get("seed", 1))
         sampler = RandomSampler(data_source=dataset, generator=train_dataloader_generator)
     else:
         sampler = SequentialSampler(data_source=dataset)
