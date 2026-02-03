@@ -55,6 +55,8 @@ class CombinedRewardComputer:
         sglang_gpu_memory_utilization: float = 0.4,
         student_max_model_len: int = 8192,  # NEW: max model len for Student vLLM
         student_micro_batch_size: int = 4,  # NEW: micro batch size for Student vLLM
+        student_max_num_seqs: int = 1,  # NEW: limit concurrent sequences in vLLM
+        student_tensor_parallel_size: int = 1,  # NEW: TP size for Student vLLM (1=disable)
         **kwargs,  # Ignore deprecated params
     ):
         """
@@ -73,6 +75,8 @@ class CombinedRewardComputer:
             vllm_gpu_memory_utilization: GPU memory fraction for vLLM per device (default: 0.3)
             reward_backend: Backend to use - "sglang" or "vllm" (default: "vllm")
             sglang_gpu_memory_utilization: GPU memory fraction for SGLang per device (default: 0.4)
+            student_max_num_seqs: Maximum concurrent sequences in vLLM (lower saves memory)
+            student_tensor_parallel_size: Tensor parallelism size for Student vLLM (default: 1)
         """
         self.lambda_logic = lambda_logic
         self.use_logic_reward = use_logic_reward
@@ -88,6 +92,7 @@ class CombinedRewardComputer:
         logger.info(f"  Student Devices: {student_devices}")
         logger.info(f"  Student Max Model Len: {student_max_model_len}")
         logger.info(f"  Student Micro Batch Size: {student_micro_batch_size}")
+        logger.info(f"  Student Max Num Seqs: {student_max_num_seqs}")
         logger.info(f"  Reward Micro Batch Size: {reward_micro_batch_size}")
         logger.info(f"  GPU Batch Size: {gpu_batch_size}")
 
@@ -104,13 +109,17 @@ class CombinedRewardComputer:
         else:
             logger.info(f"[CombinedRewardComputer] Using vLLM student reward (FAST mode)")
             logger.info(f"  vLLM GPU Memory Utilization: {vllm_gpu_memory_utilization}")
+            logger.info(f"  Student Tensor Parallel Size: {student_tensor_parallel_size}")
+
             from verl.experimental.reward.cot_rewriter.student_reward import VLLMStudentRewardClient
             self.student_client = VLLMStudentRewardClient(
                 model_path=student_model_path,
+                tensor_parallel_size=student_tensor_parallel_size,
                 gpu_memory_utilization=vllm_gpu_memory_utilization,
                 max_model_len=student_max_model_len,
                 devices=student_devices,
                 micro_batch_size=student_micro_batch_size,
+                max_num_seqs=student_max_num_seqs,
             )
 
         # Initialize FSF Judge client (if needed)
@@ -315,6 +324,8 @@ def compute_cot_rewriter_reward(
     sglang_gpu_memory_utilization: float = 0.4,
     student_max_model_len: int = 8192,  # NEW: max model len for Student vLLM
     student_micro_batch_size: int = 4,  # NEW: micro batch size for Student vLLM
+    student_max_num_seqs: int = 1,  # NEW: limit concurrent sequences in vLLM
+    student_tensor_parallel_size: int = 1,  # NEW: TP size for Student vLLM
     **kwargs,
 ) -> Dict[str, Any]:
     """
@@ -342,6 +353,7 @@ def compute_cot_rewriter_reward(
             to release GPU memory for Actor reload. Default is True.
         reward_backend: Backend to use - "sglang" or "vllm" (default: "vllm")
         sglang_gpu_memory_utilization: GPU memory fraction for SGLang per device
+        student_max_num_seqs: Maximum concurrent sequences in vLLM (lower saves memory)
 
     Returns:
         Dictionary with:
@@ -514,6 +526,8 @@ def compute_cot_rewriter_reward(
             sglang_gpu_memory_utilization=sglang_gpu_memory_utilization,
             student_max_model_len=student_max_model_len,
             student_micro_batch_size=student_micro_batch_size,
+            student_max_num_seqs=student_max_num_seqs,
+        student_tensor_parallel_size=student_tensor_parallel_size,
         )
 
         # Filter data for non-truncated samples

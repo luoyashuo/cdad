@@ -52,10 +52,9 @@ data:
   train_files: /data-share/yeesuanAI08/lihaitao/luoys/data/cdad/cot_rewrite_max_fsf/train.jsonl
   val_files: /data-share/yeesuanAI08/lihaitao/luoys/data/cdad/cot_rewrite_max_fsf/val.jsonl
   # IMPORTANT: total samples = train_batch_size × rollout.n must be divisible by n_gpus_per_node
-  # With 2 GPUs and rollout.n=8: 2 × 8 = 16, 16 / 2 = 8 ✓
+  # n=4 最保险配置
   # Batch sizes for training
-  # Input tokens < 4200, output tokens < 5000
-  train_batch_size: 1  # 最小化 batch_size，保持 rollout.n=8 和 max_model_len=10240
+  train_batch_size: 1
   val_batch_size: 8
   gen_batch_size: 8
   max_prompt_length: 5500
@@ -125,7 +124,9 @@ actor_rollout_ref:
 
   rollout:
     name: vllm
-    tensor_model_parallel_size: 1
+    # 【TP配置】启用 Tensor Parallelism=2，2张卡作为一个资源组
+    # 模型权重分片到2张卡，每张卡存一半参数，降低单卡显存压力
+    tensor_model_parallel_size: 2
     # 降低 vLLM 显存占用，为 actor update 预留显存
     # 0.65 确保 KV cache 足够，同时为梯度更新预留空间
     gpu_memory_utilization: 0.45  # 从 0.65 降低到 0.45，为 backward 预留更多显存
@@ -136,13 +137,17 @@ actor_rollout_ref:
     # CRITICAL: 启用 layered_summon，只同步 LoRA 参数而非整个模型
     layered_summon: true
     log_prob_micro_batch_size_per_gpu: 1  # 降低避免 OOM
-    n: 4  # GRPO requires multiple samples per prompt, n=8 提供最佳组内对比
+    # 【注意】TP=2时，world_size=2，n必须能被TP整除
+    # n=4 表示每张TP组处理4个样本（总共还是4个，因为TP组内共享）
+    # 如果OOM仍发生，需要进一步降低n或启用ZeRO-3
+    n: 4
     temperature: 0.7
     top_p: 0.95
     prompt_length: 5500
     response_length: 5500  # 同步降低
     # vLLM requires max_num_batched_tokens >= max_model_len when chunked prefill is enabled
-    max_num_batched_tokens: 11000  # 5500 + 5500
+    # TP=2时，vLLM会在2张卡间分片，max_num_batched_tokens仍需>=max_model_len
+    max_num_batched_tokens: 11000
     # Explicitly set max_model_len to match our sequence length requirements
     max_model_len: 11000  # 匹配 prompt + response
     # 禁用 CUDA Graph 以避免兼容性问题
@@ -154,7 +159,8 @@ actor_rollout_ref:
     # sleep_level=2: 完全丢弃权重，wake_up 时重新初始化（会导致乱码！）
     sleep_level: 1
     agent:
-      num_workers: 1
+      # TP=2时，需要2个worker来支持tensor parallelism
+      num_workers: 2
 
   ref:
     enable: false
@@ -218,12 +224,22 @@ custom_reward_function:
     # Reward 后端选择: vllm 或 sglang
     reward_backend: vllm
     # vLLM GPU memory utilization for Student Model
-    vllm_gpu_memory_utilization: 0.35  # 从 0.5 降低到 0.35，释放显存给主模型
+    # 【关键】Student vLLM OOM，进一步降低显存占用
+    # 从 0.35 降到 0.25，为logprobs计算预留更多空间
+    vllm_gpu_memory_utilization: 0.25
     # 避免超长序列 (prompt+response > 8000) 导致 KV Cache 爆炸
-    student_max_model_len: 8000
+    # 【关键】降低max_model_len减少KV cache，避免logprobs计算OOM
+    student_max_model_len: 6000
     # Student vLLM micro batch size - 降低此值可避免 prompt_logprobs 计算时 OOM
     # 每个 micro-batch 处理的 prompt 数量，越小越安全但越慢
+    # 保持micro_batch_size=1，但降低max_model_len更关键
     student_micro_batch_size: 1
+    # 【关键】限制vLLM并发序列数，降低logprobs计算时的显存峰值
+    student_max_num_seqs: 1
+    # 【关键】Student vLLM Tensor Parallelism 配置
+    # 设为 2 表示跨 2 张卡分片模型，每张卡显存占用减半（适合 OOM 场景）
+    # 设为 1 表示每张卡独立运行（默认）
+    student_tensor_parallel_size: 2
     # ===== Student Model GPU 配置 =====
     # 使用物理 GPU 编号（不是 CUDA_VISIBLE_DEVICES 映射后的索引）
     # 必须与启动脚本中的 ALL_GPUS 一致

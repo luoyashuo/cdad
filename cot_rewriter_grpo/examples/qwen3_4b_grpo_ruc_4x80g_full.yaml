@@ -182,8 +182,13 @@ custom_reward_function:
     # 避免超长序列 (prompt+response > 8000) 导致 KV Cache 爆炸
     student_max_model_len: 8000
     # 【关键优化】Student vLLM micro batch size
-    # 每个 GPU worker 每次只处理 2 个样本，降低显存峰值
-    student_micro_batch_size: 2
+    # TP=4 时只有 1 个 actor 处理全部数据，可以调大 micro_batch_size 提高吞吐量
+    student_micro_batch_size: 8
+    # 【Tensor Parallelism 配置】
+    # TP=1: 4 个独立 vLLM actor，每个 1 GPU（吞吐量高）
+    # TP=2: 2 个 vLLM actor，每个 2 GPU（显存减半）
+    # TP=4: 1 个 vLLM actor，4 GPU（显存最省，最保险）
+    student_tensor_parallel_size: 4
     student_devices: ["cuda:0", "cuda:1", "cuda:2", "cuda:3"]
     cleanup_after_compute: true
     truncation_penalty: -1.0
