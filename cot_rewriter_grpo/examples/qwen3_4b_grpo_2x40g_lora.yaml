@@ -55,13 +55,13 @@ data:
   # With 2 GPUs and rollout.n=8: 2 × 8 = 16, 16 / 2 = 8 ✓
   # Batch sizes for training
   # Input tokens < 4200, output tokens < 5000
-  train_batch_size: 2  # 最小化 batch_size，保持 rollout.n=8 和 max_model_len=10240
+  train_batch_size: 1  # 最小化 batch_size，保持 rollout.n=8 和 max_model_len=10240
   val_batch_size: 8
-  gen_batch_size: 16
-  max_prompt_length: 6000
-  max_response_length: 5000
+  gen_batch_size: 8
+  max_prompt_length: 5500
+  max_response_length: 5500  # 从 6700 降低到 5500，减少显存占用
   return_raw_chat: true
-  dataloader_num_workers: 4
+  dataloader_num_workers: 2  # 降低减少内存压力
   reward_fn_key: reward_model
   prompt_key: problem  # Specify that 'problem' field contains the prompt (not 'prompt')
   # Disable Qwen3 thinking mode during rollout (prevents <think> tags in output)
@@ -105,9 +105,15 @@ actor_rollout_ref:
     clip_ratio: 0.2
     entropy_coeff: 0.01
     grad_clip: 1.0
-    ppo_mini_batch_size: 2  # 必须 <= train_batch_size
+    ppo_mini_batch_size: 1  # 必须 <= train_batch_size
     # 降低 micro batch size 避免 OOM
     ppo_micro_batch_size_per_gpu: 1
+
+    # FSDP 配置 - 关键：启用 param_offload 在 reward 计算时释放 GPU 显存
+    # 这样 Student vLLM 才能在同一个 GPU 上运行
+    fsdp_config:
+      param_offload: true       # 在 reward 计算时 offload 参数到 CPU
+      optimizer_offload: true   # 在 reward 计算时 offload optimizer 到 CPU
 
     optim:
       lr: 1e-5
@@ -122,7 +128,7 @@ actor_rollout_ref:
     tensor_model_parallel_size: 1
     # 降低 vLLM 显存占用，为 actor update 预留显存
     # 0.65 确保 KV cache 足够，同时为梯度更新预留空间
-    gpu_memory_utilization: 0.65
+    gpu_memory_utilization: 0.45  # 从 0.65 降低到 0.45，为 backward 预留更多显存
     dtype: bfloat16
     # CRITICAL: 使用 auto 让 vLLM 直接从磁盘加载基础模型权重
     # 这样 base_sync_done=True，只需同步 LoRA 参数而非整个模型，避免 OOM
@@ -130,16 +136,15 @@ actor_rollout_ref:
     # CRITICAL: 启用 layered_summon，只同步 LoRA 参数而非整个模型
     layered_summon: true
     log_prob_micro_batch_size_per_gpu: 1  # 降低避免 OOM
-    n: 8  # GRPO requires multiple samples per prompt, n=8 提供最佳组内对比
+    n: 4  # GRPO requires multiple samples per prompt, n=8 提供最佳组内对比
     temperature: 0.7
     top_p: 0.95
-    prompt_length: 4500
-    response_length: 5500
-    # max_model_len = prompt_length(4500) + response_length(5500) = 10000
+    prompt_length: 5500
+    response_length: 5500  # 同步降低
     # vLLM requires max_num_batched_tokens >= max_model_len when chunked prefill is enabled
-    max_num_batched_tokens: 10240
+    max_num_batched_tokens: 11000  # 5500 + 5500
     # Explicitly set max_model_len to match our sequence length requirements
-    max_model_len: 10240
+    max_model_len: 11000  # 匹配 prompt + response
     # 禁用 CUDA Graph 以避免兼容性问题
     enforce_eager: true
     # 启用 vLLM 缓存释放机制 - 在 reward 计算时释放显存给 Student vLLM
@@ -213,7 +218,12 @@ custom_reward_function:
     # Reward 后端选择: vllm 或 sglang
     reward_backend: vllm
     # vLLM GPU memory utilization for Student Model
-    vllm_gpu_memory_utilization: 0.3
+    vllm_gpu_memory_utilization: 0.35  # 从 0.5 降低到 0.35，释放显存给主模型
+    # 避免超长序列 (prompt+response > 8000) 导致 KV Cache 爆炸
+    student_max_model_len: 8000
+    # Student vLLM micro batch size - 降低此值可避免 prompt_logprobs 计算时 OOM
+    # 每个 micro-batch 处理的 prompt 数量，越小越安全但越慢
+    student_micro_batch_size: 1
     # ===== Student Model GPU 配置 =====
     # 使用物理 GPU 编号（不是 CUDA_VISIBLE_DEVICES 映射后的索引）
     # 必须与启动脚本中的 ALL_GPUS 一致
@@ -221,8 +231,6 @@ custom_reward_function:
     student_devices: ["cuda:0", "cuda:5"]
     # 计算完成后清理 Student vLLM 以释放 GPU 显存给 Actor vLLM 重载
     cleanup_after_compute: true
-    # GPU batch size for forward pass
-    gpu_batch_size: 8
     # 截断惩罚：被截断的 response 直接返回此 reward，不调用 Student model
     truncation_penalty: -1.0
     field_mapping:

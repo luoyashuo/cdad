@@ -53,6 +53,8 @@ class CombinedRewardComputer:
         vllm_gpu_memory_utilization: float = 0.3,
         reward_backend: str = "vllm",  # "sglang" or "vllm"
         sglang_gpu_memory_utilization: float = 0.4,
+        student_max_model_len: int = 8192,  # NEW: max model len for Student vLLM
+        student_micro_batch_size: int = 4,  # NEW: micro batch size for Student vLLM
         **kwargs,  # Ignore deprecated params
     ):
         """
@@ -84,6 +86,8 @@ class CombinedRewardComputer:
         logger.info(f"  Device (FSF): {device}")
         logger.info(f"  Alpha Cog: {alpha_cog}")
         logger.info(f"  Student Devices: {student_devices}")
+        logger.info(f"  Student Max Model Len: {student_max_model_len}")
+        logger.info(f"  Student Micro Batch Size: {student_micro_batch_size}")
         logger.info(f"  Reward Micro Batch Size: {reward_micro_batch_size}")
         logger.info(f"  GPU Batch Size: {gpu_batch_size}")
 
@@ -104,7 +108,9 @@ class CombinedRewardComputer:
             self.student_client = VLLMStudentRewardClient(
                 model_path=student_model_path,
                 gpu_memory_utilization=vllm_gpu_memory_utilization,
+                max_model_len=student_max_model_len,
                 devices=student_devices,
+                micro_batch_size=student_micro_batch_size,
             )
 
         # Initialize FSF Judge client (if needed)
@@ -307,6 +313,8 @@ def compute_cot_rewriter_reward(
     cleanup_after_compute: bool = True,
     reward_backend: str = "vllm",  # "sglang" or "vllm"
     sglang_gpu_memory_utilization: float = 0.4,
+    student_max_model_len: int = 8192,  # NEW: max model len for Student vLLM
+    student_micro_batch_size: int = 4,  # NEW: micro batch size for Student vLLM
     **kwargs,
 ) -> Dict[str, Any]:
     """
@@ -504,6 +512,8 @@ def compute_cot_rewriter_reward(
             vllm_gpu_memory_utilization=vllm_gpu_memory_utilization,
             reward_backend=reward_backend,
             sglang_gpu_memory_utilization=sglang_gpu_memory_utilization,
+            student_max_model_len=student_max_model_len,
+            student_micro_batch_size=student_micro_batch_size,
         )
 
         # Filter data for non-truncated samples

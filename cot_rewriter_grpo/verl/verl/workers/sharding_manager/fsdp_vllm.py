@@ -125,7 +125,7 @@ class FSDPVLLMShardingManager(BaseShardingManager):
 
     @GPUMemoryLogger(role="fsdp vllm sharding_manager", logger=logger)
     def __enter__(self):
-        print(f"[FSDPVLLMShardingManager] __enter__ called, free_cache_engine={self.rollout_config.free_cache_engine}", flush=True)
+        print(f"[FSDPVLLMShardingManager] __enter__ called, free_cache_engine={self.rollout_config.free_cache_engine}, offload_param={self.offload_param}", flush=True)
         def __collect_lora_params() -> OrderedDict:
             """
             collect lora params or full params if base model is not ready in vllm
@@ -196,7 +196,9 @@ class FSDPVLLMShardingManager(BaseShardingManager):
 
             log_gpu_memory_usage("Before state_dict() in sharding manager memory", logger=logger)
             if self.offload_param:
+                print(f"[FSDPVLLMShardingManager] Loading FSDP model to GPU (offload_param=True)...", flush=True)
                 load_fsdp_model_to_gpu(self.module)
+                print(f"[FSDPVLLMShardingManager] FSDP model loaded to GPU", flush=True)
 
             peft_config = None
             peft_model = getattr(self.module, "_fsdp_wrapped_module", self.module)
@@ -249,7 +251,9 @@ class FSDPVLLMShardingManager(BaseShardingManager):
             log_gpu_memory_usage("After sync model weights in sharding manager", logger=logger)
             del params
             if self.offload_param:
+                print(f"[FSDPVLLMShardingManager] Offloading FSDP model to CPU (offload_param=True)...", flush=True)
                 offload_fsdp_model_to_cpu(self.module)
+                print(f"[FSDPVLLMShardingManager] FSDP model offloaded to CPU", flush=True)
             get_torch_device().empty_cache()
 
             if (

@@ -31,13 +31,26 @@ class VLLMWorkerActor:
         self,
         model_path: str,
         gpu_id: int,
+        logical_gpu_id: int,  # NEW: logical GPU ID within CUDA_VISIBLE_DEVICES
         gpu_memory_utilization: float = 0.4,
         dtype: str = "float16",
         max_model_len: int = 8192,
+        micro_batch_size: int = 4,  # NEW: micro batch size to avoid OOM
     ):
         import os
         import subprocess
-        os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+
+        # Ray actor inherits CUDA_VISIBLE_DEVICES from parent process
+        # e.g., CUDA_VISIBLE_DEVICES="0,5" means GPU 0 -> logical 0, GPU 5 -> logical 1
+        # We set CUDA_VISIBLE_DEVICES to the logical GPU ID to isolate this actor
+        parent_cuda_devices = os.environ.get("CUDA_VISIBLE_DEVICES", "")
+        print(f"[VLLMWorker-{gpu_id}] Parent CUDA_VISIBLE_DEVICES={parent_cuda_devices}", flush=True)
+
+        # CRITICAL: Set CUDA_VISIBLE_DEVICES to only the logical GPU for this actor
+        # This isolates vLLM to a single GPU and avoids interference
+        os.environ["CUDA_VISIBLE_DEVICES"] = str(logical_gpu_id)
+        print(f"[VLLMWorker-{gpu_id}] Set CUDA_VISIBLE_DEVICES={logical_gpu_id} (logical GPU for physical GPU {gpu_id})", flush=True)
+
         # Force vLLM V0 engine to avoid V1 serialization bugs
         # (msgspec.ValidationError: Expected `float`, got `str`)
         os.environ["VLLM_USE_V1"] = "0"
@@ -70,11 +83,16 @@ class VLLMWorkerActor:
         print(f"[VLLMWorker-{gpu_id}] ========== GPU MEMORY CHECK ==========", flush=True)
         mem_before = get_nvidia_smi_memory_for_gpu(gpu_id)
         print(f"[VLLMWorker-{gpu_id}] BEFORE loading Student vLLM: {mem_before}", flush=True)
-        print(f"[VLLMWorker-{gpu_id}] gpu_memory_utilization={gpu_memory_utilization}, max_model_len={max_model_len}", flush=True)
+        print(f"[VLLMWorker-{gpu_id}] gpu_memory_utilization={gpu_memory_utilization}, max_model_len={max_model_len}, micro_batch_size={micro_batch_size}", flush=True)
         print(f"[VLLMWorker-{gpu_id}] Initializing vLLM on GPU {gpu_id}...", flush=True)
 
         self.gpu_id = gpu_id
         self._get_nvidia_smi = get_nvidia_smi_memory_for_gpu  # Save for later use
+
+        # Log CUDA environment
+        print(f"[VLLMWorker-{gpu_id}] CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES')}", flush=True)
+        print(f"[VLLMWorker-{gpu_id}] PyTorch sees {torch.cuda.device_count()} GPU(s)", flush=True)
+
         self.tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
         self.llm = LLM(
             model=model_path,
@@ -85,6 +103,7 @@ class VLLMWorkerActor:
             trust_remote_code=True,
             enforce_eager=True,
         )
+        self.micro_batch_size = micro_batch_size
         print(f"[VLLMWorker-{gpu_id}] vLLM initialized successfully", flush=True)
         print(f"[VLLMWorker-{gpu_id}] nvidia-smi AFTER loading Student vLLM:", flush=True)
         print(f"[VLLMWorker-{gpu_id}] {get_nvidia_smi_memory_for_gpu(gpu_id)}", flush=True)
@@ -97,6 +116,8 @@ class VLLMWorkerActor:
     ) -> List[Dict[str, Any]]:
         """
         Compute log probs for a batch of prompts.
+        
+        Uses micro-batching to avoid OOM with long sequences.
 
         Returns:
             List of dicts, each containing:
@@ -114,21 +135,38 @@ class VLLMWorkerActor:
         )
 
         # Log GPU memory before generation
-        print(f"[VLLMWorker-{self.gpu_id}] Processing {len(prompts)} prompts...", flush=True)
+        print(f"[VLLMWorker-{self.gpu_id}] Processing {len(prompts)} prompts (micro_batch_size={self.micro_batch_size})...", flush=True)
         if hasattr(self, '_get_nvidia_smi'):
             print(f"[VLLMWorker-{self.gpu_id}] GPU memory BEFORE generate: {self._get_nvidia_smi(self.gpu_id)}", flush=True)
 
-        start_time = time.time()
+        # Micro-batch processing to avoid OOM
+        all_outputs = []
+        total_time = 0
+        micro_batch_size = self.micro_batch_size
+        
+        for i in range(0, len(prompts), micro_batch_size):
+            batch_prompts = prompts[i:i + micro_batch_size]
+            batch_ans_starts = answer_starts[i:i + micro_batch_size]
+            
+            print(f"[VLLMWorker-{self.gpu_id}] Processing micro-batch {i//micro_batch_size + 1}/{(len(prompts)-1)//micro_batch_size + 1} ({len(batch_prompts)} prompts)...", flush=True)
+            
+            start_time = time.time()
+            batch_outputs = self.llm.generate(batch_prompts, sampling_params)
+            elapsed = time.time() - start_time
+            total_time += elapsed
+            
+            all_outputs.extend(batch_outputs)
+            
+            # Log memory after each micro-batch
+            if hasattr(self, '_get_nvidia_smi'):
+                print(f"[VLLMWorker-{self.gpu_id}] Micro-batch done in {elapsed:.2f}s, GPU: {self._get_nvidia_smi(self.gpu_id)}", flush=True)
 
-        outputs = self.llm.generate(prompts, sampling_params)
-
-        elapsed = time.time() - start_time
-        speed = len(prompts) / elapsed if elapsed > 0 else 0
-        print(f"[VLLMWorker-{self.gpu_id}] Done: {len(prompts)} prompts in {elapsed:.2f}s ({speed:.1f} samples/s)")
+        speed = len(prompts) / total_time if total_time > 0 else 0
+        print(f"[VLLMWorker-{self.gpu_id}] Done: {len(prompts)} prompts in {total_time:.2f}s ({speed:.1f} samples/s)")
 
         # Extract log probs with mean and min
         results = []
-        for output, ans_start in zip(outputs, answer_starts):
+        for output, ans_start in zip(all_outputs, answer_starts):
             logprobs = self._extract_answer_logprobs(output.prompt_logprobs, ans_start)
             if logprobs:
                 results.append({
@@ -200,6 +238,7 @@ class VLLMStudentRewardClient:
         dtype: str = "float16",
         max_model_len: int = 8192,
         devices: Optional[List[str]] = None,
+        micro_batch_size: int = 4,  # NEW: micro batch size per GPU worker
     ):
         """
         Initialize Multi-GPU vLLM Student Reward Client with Ray actors.
@@ -211,6 +250,7 @@ class VLLMStudentRewardClient:
             dtype: Data type for the model
             max_model_len: Maximum sequence length
             devices: List of CUDA devices (e.g., ["cuda:0", "cuda:1", "cuda:2", "cuda:3"])
+            micro_batch_size: Batch size for each micro-batch to avoid OOM
         """
         import torch
 
@@ -218,6 +258,7 @@ class VLLMStudentRewardClient:
         self.gpu_memory_utilization = gpu_memory_utilization
         self.dtype = dtype
         self.max_model_len = max_model_len
+        self.micro_batch_size = micro_batch_size
 
         # Auto-detect devices if not specified
         if devices is None:
@@ -232,6 +273,7 @@ class VLLMStudentRewardClient:
         self._initialized = False
 
         logger.info(f"[VLLMStudentReward] Will use {self.num_gpus} Ray actors on GPUs: {self.gpu_ids}")
+        logger.info(f"[VLLMStudentReward] Micro batch size per worker: {self.micro_batch_size}")
 
     def cleanup(self):
         """Cleanup Ray vLLM actors to release GPU memory."""
@@ -303,16 +345,34 @@ class VLLMStudentRewardClient:
         # Initialize tokenizer (shared, for prompt building)
         self.tokenizer = AutoTokenizer.from_pretrained(self.model_path, trust_remote_code=True)
 
+        # Compute logical GPU IDs from CUDA_VISIBLE_DEVICES
+        import os
+        cuda_visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES", "")
+        if cuda_visible_devices:
+            # Parse physical GPU IDs from CUDA_VISIBLE_DEVICES
+            available_gpus = [int(x.strip()) for x in cuda_visible_devices.split(",") if x.strip()]
+            logger.info(f"[VLLMStudentReward] CUDA_VISIBLE_DEVICES={cuda_visible_devices}, available_gpus={available_gpus}")
+
+            # Map physical GPU IDs to logical indices
+            physical_to_logical = {gpu: idx for idx, gpu in enumerate(available_gpus)}
+        else:
+            # No CUDA_VISIBLE_DEVICES set, assume physical == logical
+            physical_to_logical = {gpu: gpu for gpu in self.gpu_ids}
+            logger.info(f"[VLLMStudentReward] No CUDA_VISIBLE_DEVICES set, using physical GPU IDs directly")
+
         # Create Ray actors, one per GPU
         for gpu_id in self.gpu_ids:
-            logger.info(f"[VLLMStudentReward] Creating actor for GPU {gpu_id}...")
+            logical_gpu_id = physical_to_logical.get(gpu_id, 0)
+            logger.info(f"[VLLMStudentReward] Creating actor for physical GPU {gpu_id} (logical GPU {logical_gpu_id})...")
             # Note: num_gpus=0 because we set CUDA_VISIBLE_DEVICES inside the actor
             worker = VLLMWorkerActor.options(num_gpus=0, num_cpus=1).remote(
                 model_path=self.model_path,
                 gpu_id=gpu_id,
+                logical_gpu_id=logical_gpu_id,
                 gpu_memory_utilization=self.gpu_memory_utilization,
                 dtype=self.dtype,
                 max_model_len=self.max_model_len,
+                micro_batch_size=self.micro_batch_size,
             )
             self.workers.append(worker)
 

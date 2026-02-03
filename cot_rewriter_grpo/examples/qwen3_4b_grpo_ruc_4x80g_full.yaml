@@ -1,9 +1,15 @@
-# CoT Rewriter GRPO Training Configuration
+# CoT Rewriter GRPO Training Configuration (Optimized for OOM)
 # Hardware: 4 x 80GB A100/H100 GPUs
 # Model: Qwen3-4B Full Parameter Training (无 LoRA)
 #
+# 优化点 (解决 Step 20 OOM):
+# 1. 开启 Actor param_offload + optimizer_offload - reward 计算时 offload 到 CPU
+# 2. 降低 Student vLLM gpu_memory_utilization 从 0.3 到 0.25
+# 3. 限制 Student vLLM max_model_len 避免过长序列
+# 4. 保持 rollout.n=8 不变
+#
 # Usage:
-#   bash scripts/grpo/start_4gpu_80g.sh
+#   bash scripts/grpo/start_ruc_4gpu_80g.sh
 #
 # Architecture (Offload Mode):
 #   GPU 0,1,2,3: Actor Model (Qwen3-4B 全参数) + Rollout Engine
@@ -21,33 +27,28 @@ defaults:
 # ============ Experiment Configuration ============
 trainer:
   project_name: cot_rewriter_grpo
-  experiment_name: qwen3_4b_4gpu_80g_full
+  experiment_name: qwen3_4b_4gpu_80g_full_optimized
   total_epochs: 1
-  total_training_steps: 500  # Limit total steps for faster iteration
-  save_freq: 50  # Save checkpoint every 50 steps
-  test_freq: 50  # Validation frequency (verl uses test_freq, not val_freq)
-  val_before_train: false  # Skip validation before training to speed up startup
+  total_training_steps: 500
+  save_freq: 50
+  test_freq: 50
+  val_before_train: false
   device: cuda
   log_freq: 10
   max_actor_ckpt_to_keep: 3
-  # Output directory
   default_local_dir: /fs/fast/u20240075/luoyashuo/checkpoints/cdad/rewrite/qwen3_4b_grpo_4gpu_80g/${trainer.project_name}/${trainer.experiment_name}
-  # 4 GPUs for training
   n_gpus_per_node: 4
   nnodes: 1
   logger: ["swanlab","console"]
 
-  # Rollout data logging
   rollout_data_dir: /fs/fast/u20240075/luoyashuo/checkpoints/cdad/rewrite/qwen3_4b_grpo_4gpu_80g/rollout_data
   validation_data_dir: /fs/fast/u20240075/luoyashuo/checkpoints/cdad/rewrite/qwen3_4b_grpo_4gpu_80g/validation_data
 
 data:
   train_files: /home/u20240075/luoyashuo/data/cdad/cot_rewrite_max_fsf_v2/train.jsonl
   val_files: /home/u20240075/luoyashuo/data/cdad/cot_rewrite_max_fsf_v2/val.jsonl
-  # IMPORTANT: total samples = train_batch_size × rollout.n must be divisible by n_gpus_per_node
-  # 快速验证配置: 2 × 2 = 4, 4 × 4 GPUs = 16 samples
-  # 正式训练时改回: train_batch_size=4, rollout.n=8
-  train_batch_size: 4  # 快速验证，正式训练改回 4
+  # 保持 train_batch_size=2, rollout.n=8 -> 每步 16 个 samples
+  train_batch_size: 2
   val_batch_size: 4
   gen_batch_size: 8
   max_prompt_length: 5500
@@ -72,31 +73,29 @@ actor_rollout_ref:
     trust_remote_code: true
     enable_gradient_checkpointing: true
     use_remove_padding: false
-    # Full parameter training (no LoRA)
 
   actor:
-    # strategy: fsdp # 不要用fsdp2, 接口改动太多
     ppo_epochs: 1
     clip_ratio: 0.2
     entropy_coeff: 0.01
     grad_clip: 1.0
-    ppo_mini_batch_size: 2  # 减小以避免 backward OOM (从 4 降到 2)
-    # 降低 micro batch size 以减少显存峰值
-    ppo_micro_batch_size_per_gpu: 1  # 从 2 降到 1，减少 backward 显存峰值
-    # FSDP 配置
+    ppo_mini_batch_size: 2
+    ppo_micro_batch_size_per_gpu: 1
+    # FSDP 配置 - 开启 offload 释放显存给 Student vLLM
     fsdp_config:
-      dtype: bfloat16           # bf16 动态范围更大，训练更稳定
-      # fsdp1尽量不要开，可能会导致梯度回传出bug：https://www.linkedin.com/pulse/rl-system-deep-dive-fsdp-training-backend-chenyang-zhao-jjeoe
-      # 似乎fsdp2修复了这个问题
-      param_offload: false      # 在 reward 计算时 offload 参数到 CPU
-      optimizer_offload: false  # 在 reward 计算时 offload optimizer 到 CPU
+      dtype: bfloat16
+      # 【关键优化】开启 param_offload 和 optimizer_offload
+      # 在 reward 计算时将 Actor 参数 offload 到 CPU，释放显存给 Student vLLM
+      # 训练时会自动加载回 GPU，带来轻微性能损耗但避免 OOM
+      param_offload: true      # 开启参数 offload
+      optimizer_offload: true  # 开启优化器状态 offload
       mixed_precision:
-        param_dtype: bf16       # bf16 比 fp16 更稳定
-        reduce_dtype: fp32      # reduce 保持 fp32 精度
+        param_dtype: bf16
+        reduce_dtype: fp32
         buffer_dtype: bf16
 
     optim:
-      lr: 5e-6              # 从 1e-5 降到 5e-6，避免 GRPO 训练不稳定
+      lr: 5e-6
       weight_decay: 0.01
       lr_scheduler_type: cosine
       lr_warmup_steps_ratio: 0.03
@@ -104,39 +103,21 @@ actor_rollout_ref:
       total_training_steps: -1
 
   rollout:
-    # 使用 vLLM 引擎
-    # 如需切换到 SGLang，改为 name: sglang
     name: vllm
     tensor_model_parallel_size: 1
-    # vLLM 显存占用 - Actor vLLM 通过 sleep(level=2) 完全释放后
-    # Student vLLM 可以使用全部 GPU 显存，计算完后 cleanup 再 reload Actor vLLM
-    gpu_memory_utilization: 0.5  # 从 0.6 降到 0.5，为训练 backward 留更多显存
-    dtype: bfloat16             # bf16 与训练精度一致
-    # 降低 log_prob 计算时的 micro batch size
-    log_prob_micro_batch_size_per_gpu: 1  # 从 2 降到 1
-    n: 8  # 快速验证 (需要满足 ppo_mini_batch_size * n >= n_gpus)，正式训练改回 8
+    # 降低 Actor vLLM 显存占用，为 Student 留更多空间
+    gpu_memory_utilization: 0.45  # 从 0.5 降到 0.45
+    dtype: bfloat16
+    log_prob_micro_batch_size_per_gpu: 1
+    n: 8  # 保持 8 不变
     temperature: 0.7
     top_p: 0.95
     prompt_length: 5500
     response_length: 6700
     max_num_batched_tokens: 12288
     max_model_len: 12288
-    # 禁用 CUDA Graph 以避免旧驱动兼容性问题
     enforce_eager: true
-    # 启用 vLLM 销毁/重建机制 - 在 reward 计算时销毁 vLLM 释放显存给 Student vLLM
-    # 我们已修改代码来正确重置 vLLM cumem allocator，避免重建失败
     free_cache_engine: true
-    # ===== 重要：sleep_level 必须设为 1，不能用 2 =====
-    # sleep_level=1: 权重 offload 到 CPU，wake_up 时从 CPU 恢复（推荐）
-    # sleep_level=2: 完全丢弃权重，wake_up 时重新初始化
-    #
-    # 【BUG】sleep_level=2 会导致第二个 step 开始输出乱码！
-    # 原因：wake_up 重新初始化模型时使用 dummy 权重，虽然 update_params 会用
-    # 训练后的权重覆盖，但由于 vLLM 内部实现问题，部分权重可能未被正确同步，
-    # 导致模型输出变成乱码（如 "1 2 the def2 `` ## over..."）
-    #
-    # sleep_level=1 只比 sleep_level=2 多占用约 1-2GB GPU 显存（模型元数据），
-    # 在 80GB GPU 上完全足够，且能保证权重正确恢复。
     sleep_level: 1
     agent:
       num_workers: 1
@@ -150,7 +131,7 @@ algorithm:
   norm_adv_by_std_in_grpo: true
   gamma: 1.0
   lam: 1.0
-  use_kl_in_reward: false                                                                                                                                   
+  use_kl_in_reward: false                                                                                                                                     
   kl_penalty: kl                                                                                                                                           
   kl_ctrl:                                                                                                                                                 
     type: fixed                                                                                                                                            
@@ -164,10 +145,6 @@ critic:
 reward_model:
   enable: false
   reward_manager: cot_rewriter
-  # 启用 offload - 在 reward 计算前：
-  # 1. 销毁 Actor vLLM (free_cache_engine=true)
-  # 2. Offload Actor 模型到 CPU
-  # 这样释放足够显存给 Student vLLM 计算 reward
   offload_rollout_for_reward: true
   task_runner_num_gpus: 0
 
@@ -186,37 +163,29 @@ custom_reward_function:
     use_logic_reward: false
     alpha: 0.01
     print_samples: 2
-    # Reward 后端选择: sglang 或 vllm
-    # sglang: 使用 SGLang Engine 计算 Student reward 和 FSF Judge
-    # vllm: 使用 vLLM 计算 Student reward，HuggingFace 计算 FSF Judge
-    reward_backend: vllm  # 先用 vllm 验证
-    # SGLang/vLLM 配置
-    # Student Model (1.7B) 在每个 GPU 上都启动一个实例进行并行计算
-    # Actor 引擎已通过 sleep 机制完全释放 GPU 显存
-    #
-    # 显存预算计算 (80GB GPU):
-    #   - vLLM sleep 后释放: ~55GB
-    #   - FSDP 残留 (metadata, buffers, CUDA context): ~10-15GB
-    #   - 可用显存: ~65-70GB
+    reward_backend: vllm
+    
+    # 【关键优化】降低 Student vLLM 显存占用
+    # 显存预算计算 (80GB GPU, 开启 Actor offload 后):
+    #   - Actor vLLM sleep: ~36GB (gpu_memory_utilization=0.45)
+    #   - FSDP 残留: ~5GB (开启 offload 后大幅降低)
+    #   - 可用显存: ~75GB
     #   - Student vLLM 需要:
     #     - Model Weights (1.7B FP16): ~3.5GB
-    #     - KV Cache: gpu_memory_utilization * 80GB
-    #     - logprobs 计算临时显存: ~10GB
-    #   - 安全计算: (65 - 3.5 - 10) / 80 ≈ 0.4
-    #
-    # 设置 0.4 确保 Student vLLM + logprobs 计算不会 OOM
-    # 如果仍然 OOM，可以进一步降到 0.35
-    sglang_gpu_memory_utilization: 0.3  # SGLang 后端使用
-    vllm_gpu_memory_utilization: 0.3    # vLLM 后端使用 (从 0.5 降到 0.4 避免 OOM)
-    # 在所有 4 个 GPU 上启动 Student vLLM，实现数据并行
-    # 每个 GPU 一个 Student vLLM 实例，计算完成后自动 cleanup 释放显存
+    #     - KV Cache: 0.25 * 80GB = 20GB
+    #     - logprobs 计算临时显存: ~10-15GB
+    #   - 安全计算: (75 - 3.5 - 15) / 80 ≈ 0.25
+    sglang_gpu_memory_utilization: 0.25  # 从 0.3 降到 0.25
+    vllm_gpu_memory_utilization: 0.25    # 从 0.3 降到 0.25
+    
+    # 【关键优化】限制 Student vLLM 最大序列长度
+    # 避免超长序列 (prompt+response > 8000) 导致 KV Cache 爆炸
+    student_max_model_len: 8000
+    # 【关键优化】Student vLLM micro batch size
+    # 每个 GPU worker 每次只处理 2 个样本，降低显存峰值
+    student_micro_batch_size: 2
     student_devices: ["cuda:0", "cuda:1", "cuda:2", "cuda:3"]
-    # 计算完成后清理 Student vLLM 以释放 GPU 显存给 Actor vLLM 重载
     cleanup_after_compute: true
-    # GPU batch size for forward pass (仅当 use_multi_gpu=true 时生效)
-    gpu_batch_size: 1
-    # 截断惩罚：被截断的 response 直接返回此 reward，不调用 Student model
-    # 截断检测：response 未以 EOS 结尾或达到 max_response_length
     truncation_penalty: -1.0
     field_mapping:
       prompt_key: problem
@@ -233,7 +202,6 @@ reward_manager:
     path: /home/u20240075/luoyashuo/projects/cdad/cot_rewriter_grpo/verl/verl/experimental/reward/cot_rewriter/reward_manager.py
 
 # ============ Ray Configuration ============
-# verl 0.5.0 expects ray_init at top level, not under ray_kwargs
 ray_init:
   num_cpus: null
   timeline_json_file: null

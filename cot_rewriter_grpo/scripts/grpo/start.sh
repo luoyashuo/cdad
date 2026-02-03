@@ -100,6 +100,12 @@ bash scripts/train_fsf_judge/stop_all_train.sh --gpus ${ALL_GPUS}
 sleep 2
 
 # ============ 步骤 2: 启动 GRPO 训练 ============
+# 配置优化 (解决 OOM):
+#   - gpu_memory_utilization: 0.65 -> 0.45 (为 backward 预留显存)
+#   - vllm_gpu_memory_utilization: 0.5 -> 0.35 (Student 降低显存)
+#   - max_response_length: 6700 -> 5500 (降低序列长度)
+#   - max_model_len: 12200 -> 11000 (匹配新长度)
+#   - dataloader_num_workers: 4 -> 2 (减少内存压力)
 CONFIG_NAME="qwen3_4b_grpo_2x40g_lora"
 echo ""
 echo "[Step 2/2] 启动 GRPO 训练 (GPUs ${ALL_GPUS}, Config: ${CONFIG_NAME})..."

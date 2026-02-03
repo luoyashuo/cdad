@@ -166,6 +166,8 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         if self._is_actor:
             self._is_offload_param = self.config.actor.fsdp_config.get("param_offload", False)
             self._is_offload_optimizer = self.config.actor.fsdp_config.get("optimizer_offload", False)
+            print(f"[FSDPWorker] Actor offload config: param_offload={self._is_offload_param}, optimizer_offload={self._is_offload_optimizer}", flush=True)
+            print(f"[FSDPWorker] fsdp_config: {dict(self.config.actor.fsdp_config)}", flush=True)
         elif self._is_ref:
             # TODO: it seems that manual offload is slowly than FSDP offload
             self._is_offload_param = self.config.ref.fsdp_config.get("param_offload", False)

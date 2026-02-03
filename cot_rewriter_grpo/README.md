@@ -129,7 +129,7 @@ uv pip install https://github.com/Dao-AILab/flash-attention/releases/download/v2
 
 uv pip install opentelemetry-api==1.34.1 opentelemetry-sdk==1.34.1 opentelemetry-exporter-otlp==1.34.1
 uv pip install loguru
-
+uv pip install cachetools==5.3.3 # 修复LRUCache报错
 ```
 
 
