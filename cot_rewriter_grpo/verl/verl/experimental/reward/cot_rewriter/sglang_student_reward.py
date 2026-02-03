@@ -1,11 +1,14 @@
 """
 Student Reward (Cognitive Reward) Module - SGLang Version
 
-Computes R_cog = log P_student(Answer | Question, Rewrite_CoT)
+Computes R_cog = answer_log_prob(Q, Rewritten_CoT, A) - answer_log_prob(Q, Original_CoT, A)
 using SGLang for fast log prob computation.
 
+其中 answer_log_prob = avg(token_log_probs) + alpha_cog * min(token_log_probs)
+
 The cognitive reward encourages the rewritten CoT to help the
-Student Model predict the correct answer with higher confidence.
+Student Model predict the correct answer with higher confidence
+compared to the original CoT.
 
 Uses Ray actors for multi-GPU parallelism, with each GPU running
 a separate SGLang Engine instance.
@@ -504,16 +507,29 @@ class SGLangStudentRewardClient:
             rewrite_min = rewrite_result["min_log_prob"]
             rewrite_answer_log_prob = rewrite_mean + alpha_cog * rewrite_min
 
-            # R_cog = rewrite_log_prob (不再减去 original_log_prob)
-            # 直接使用 rewrite 的 answer log prob 作为 reward
-            reward = rewrite_answer_log_prob
-
-            # 仍然记录 original 的 log prob 用于日志分析（如果有的话）
+            # Get original result (if available)
             if i in original_results_map:
                 original_result = original_results_map[i]
                 original_mean = original_result["mean_log_prob"]
+                original_min = original_result["min_log_prob"]
+                original_answer_log_prob = original_mean + alpha_cog * original_min
             else:
                 original_mean = -100.0
+                original_answer_log_prob = -100.0
+
+            # ===== R_cog 计算公式 =====
+            # R_cog = answer_log_prob(Q, Rewritten_CoT, A) - answer_log_prob(Q, Original_CoT, A)
+            # 其中 answer_log_prob = mean(token_log_probs) + alpha_cog * min(token_log_probs)
+            #
+            # 这个差值公式鼓励 rewrite 后的 CoT 比 original CoT 更能帮助 Student Model 预测答案
+            # 如果 rewrite 后答案的 log prob 更高，说明 rewrite 质量更好，reward 为正
+            # 如果 rewrite 后答案的 log prob 更低，说明 rewrite 质量更差，reward 为负
+            reward = rewrite_answer_log_prob - original_answer_log_prob
+
+            # ===== 旧的实现（仅使用 rewrite log prob，不减去 original）=====
+            # R_cog = rewrite_log_prob (不减去 original_log_prob)
+            # 直接使用 rewrite 的 answer log prob 作为 reward
+            # reward = rewrite_answer_log_prob
 
             rewards.append(reward)
             rewrite_mean_log_probs.append(rewrite_mean)

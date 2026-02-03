@@ -21,7 +21,7 @@ defaults:
 # ============ Experiment Configuration ============
 trainer:
   project_name: cot_rewriter_grpo
-  experiment_name: qwen3_4b_4gpu_80g
+  experiment_name: qwen3_4b_4gpu_80g_full
   total_epochs: 1
   total_training_steps: 500  # Limit total steps for faster iteration
   save_freq: 50  # Save checkpoint every 50 steps

@@ -100,10 +100,11 @@ bash scripts/train_fsf_judge/stop_all_train.sh --gpus ${ALL_GPUS}
 sleep 2
 
 # ============ 步骤 2: 启动 GRPO 训练 ============
+CONFIG_NAME="qwen3_4b_grpo_2x40g_lora"
 echo ""
-echo "[Step 2/2] 启动 GRPO 训练 (GPUs ${ALL_GPUS}, Offload 模式)..."
-nohup bash scripts/grpo/run_train.sh qwen3_4b_grpo_2gpu ${ALL_GPUS} \
-    > "${PROJECT_ROOT}/logs/grpo/qwen3_4b_grpo_2gpu.log" 2>&1 &
+echo "[Step 2/2] 启动 GRPO 训练 (GPUs ${ALL_GPUS}, Config: ${CONFIG_NAME})..."
+nohup bash scripts/grpo/run_train.sh ${CONFIG_NAME} ${ALL_GPUS} \
+    > "${PROJECT_ROOT}/logs/grpo/${CONFIG_NAME}.log" 2>&1 &
 GRPO_PID=$!
 echo "GRPO Training PID: ${GRPO_PID}"
 
@@ -113,10 +114,10 @@ echo "启动完成！"
 echo "  GRPO Training: GPUs ${ALL_GPUS}, PID ${GRPO_PID}"
 echo ""
 echo "日志文件:"
-echo "  GRPO: ${PROJECT_ROOT}/logs/grpo/qwen3_4b_grpo_2gpu.log"
+echo "  GRPO: ${PROJECT_ROOT}/logs/grpo/${CONFIG_NAME}.log"
 echo ""
 echo "实时查看日志:"
-echo "  tail -f ${PROJECT_ROOT}/logs/grpo/qwen3_4b_grpo_2gpu.log"
+echo "  tail -f ${PROJECT_ROOT}/logs/grpo/${CONFIG_NAME}.log"
 echo "============================================================"
 
 # 等待 GRPO 训练完成（关闭 set -e 以确保后续占卡命令能执行）

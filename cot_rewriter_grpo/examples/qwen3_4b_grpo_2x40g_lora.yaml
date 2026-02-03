@@ -25,11 +25,11 @@ defaults:
 # ============ Experiment Configuration ============
 trainer:
   project_name: cot_rewriter_grpo
-  experiment_name: qwen3_4b_2gpu
+  experiment_name: qwen3_4b_2gpu_lora
   total_epochs: 1
   total_training_steps: 500  # Limit total steps for faster iteration
   save_freq: 50  # Save checkpoint every 50 steps
-  val_freq: 50
+  test_freq: 50  # Validation frequency (verl uses test_freq, not val_freq)
   val_before_train: false  # Skip validation before training to speed up startup
   device: cuda
   log_freq: 10
@@ -127,8 +127,7 @@ actor_rollout_ref:
     # CRITICAL: 使用 auto 让 vLLM 直接从磁盘加载基础模型权重
     # 这样 base_sync_done=True，只需同步 LoRA 参数而非整个模型，避免 OOM
     load_format: auto
-    # CRITICAL: 启用 layered_summon 使 sleep_level=1，避免 vLLM 销毁基础模型权重
-    # 这样在 rollout 切换时只需同步 LoRA 参数，大幅减少内存压力
+    # CRITICAL: 启用 layered_summon，只同步 LoRA 参数而非整个模型
     layered_summon: true
     log_prob_micro_batch_size_per_gpu: 1  # 降低避免 OOM
     n: 8  # GRPO requires multiple samples per prompt, n=8 提供最佳组内对比
@@ -141,6 +140,14 @@ actor_rollout_ref:
     max_num_batched_tokens: 10240
     # Explicitly set max_model_len to match our sequence length requirements
     max_model_len: 10240
+    # 禁用 CUDA Graph 以避免兼容性问题
+    enforce_eager: true
+    # 启用 vLLM 缓存释放机制 - 在 reward 计算时释放显存给 Student vLLM
+    free_cache_engine: true
+    # ===== 重要：sleep_level 必须设为 1，不能用 2 =====
+    # sleep_level=1: 权重 offload 到 CPU，wake_up 时从 CPU 恢复（推荐）
+    # sleep_level=2: 完全丢弃权重，wake_up 时重新初始化（会导致乱码！）
+    sleep_level: 1
     agent:
       num_workers: 1
 
@@ -154,6 +161,10 @@ algorithm:
   gamma: 1.0
   lam: 1.0
   use_kl_in_reward: false
+  kl_penalty: kl
+  kl_ctrl:
+    type: fixed
+    kl_coef: 0.02
 
 # ============ Critic Configuration (GRPO doesn't need) ============
 critic:
@@ -195,15 +206,25 @@ custom_reward_function:
 
     lambda_logic: 0.5
     use_logic_reward: false
-    # Alpha for cognitive reward formula: R_cog = avg(log P) + alpha * min(avg(log P))
+    # Alpha for cognitive reward formula: R_cog = avg(log P) + alpha * min(log P)
     alpha: 0.01
     # Number of rollout samples to print for review (0 to disable)
     print_samples: 2
-    # 多 GPU 并行加速 Student Reward 计算 (自动检测可用 GPU)
-    use_multi_gpu: true
-      # GPU batch size for forward pass (higher = better GPU utilization, more memory)
-    # 每次 GPU forward 处理的样本数，控制内存使用和 GPU 利用率
-    gpu_batch_size: 16
+    # Reward 后端选择: vllm 或 sglang
+    reward_backend: vllm
+    # vLLM GPU memory utilization for Student Model
+    vllm_gpu_memory_utilization: 0.3
+    # ===== Student Model GPU 配置 =====
+    # 使用物理 GPU 编号（不是 CUDA_VISIBLE_DEVICES 映射后的索引）
+    # 必须与启动脚本中的 ALL_GPUS 一致
+    # 例如：ALL_GPUS="0,5" → student_devices: ["cuda:0", "cuda:5"]
+    student_devices: ["cuda:0", "cuda:5"]
+    # 计算完成后清理 Student vLLM 以释放 GPU 显存给 Actor vLLM 重载
+    cleanup_after_compute: true
+    # GPU batch size for forward pass
+    gpu_batch_size: 8
+    # 截断惩罚：被截断的 response 直接返回此 reward，不调用 Student model
+    truncation_penalty: -1.0
     field_mapping:
       prompt_key: problem
       # Use reward_model dict structure (dataset puts thought -> reward_model["original_cot"])

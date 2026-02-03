@@ -15,7 +15,7 @@ set -e
 # 默认 GPU 配置 (可通过命令行参数覆盖)
 ALL_GPUS="${1:-0,1,2,3}"
 NUM_GPUS=4
-CONFIG_NAME="qwen3_4b_grpo_ruc_4gpu_80g"
+CONFIG_NAME="qwen3_4b_grpo_ruc_4x80g_full"
 # ======================================
 
 export DISABLE_VERSION_CHECK=1

@@ -43,8 +43,9 @@ tail -f logs/grpo/qwen3_4b_grpo_2gpu.log
 └─────────────────────────┘           └──────────────────────────┘
 
 奖励公式:
-R_cog = answer_log_prob(rewritten) - answer_log_prob(original)
+R_cog = answer_log_prob(Q, Rewritten_CoT, A) - answer_log_prob(Q, Original_CoT, A)
       其中: answer_log_prob = avg(token_log_probs) + α * min(token_log_probs)
+      含义: rewrite 后答案 log prob 更高 → reward 为正（改写质量好）
 R_logic = 1 if FSF(rewrite_cot) < FSF(original_cot) else 0
 R_total = R_cog + λ * R_logic
 ```

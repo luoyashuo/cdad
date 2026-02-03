@@ -3,10 +3,14 @@ Combined Reward Function for CoT Rewriter GRPO
 
 Reward 计算逻辑:
 - 使用 Qwen3 chat template 格式计算 Student Model 的 log prob
-- R_cog = avg(log P_student(Answer | Question, Rewrite_CoT)) + alpha_cog * min(token_log_probs)
-- R_cog = answer_log_prob(rewritten)  # 直接使用 rewrite 的 log prob
+- answer_log_prob(Q, CoT, A) = avg(token_log_probs) + alpha_cog * min(token_log_probs)
+- R_cog = answer_log_prob(Q, Rewritten_CoT, A) - answer_log_prob(Q, Original_CoT, A)
 - alpha_cog 为可配置参数，默认为 0.01
 - (可选) R_logic: FSF Judge 比较失败分支比例
+
+差值公式的含义:
+- 如果 rewrite 后答案的 log prob 更高，说明 rewrite 质量更好，reward 为正
+- 如果 rewrite 后答案的 log prob 更低，说明 rewrite 质量更差，reward 为负
 
 This module provides the VERL-compatible interface for reward computation.
 
@@ -137,8 +141,8 @@ class CombinedRewardComputer:
         Compute combined reward.
 
         Reward 逻辑:
-        - answer_log_prob(q, cot, a) = avg(token_log_probs) + alpha_cog × min(token_log_probs)
-        - R_cog = answer_log_prob(rewritten)  # 直接使用 rewrite 的 log prob
+        - answer_log_prob(Q, CoT, A) = avg(token_log_probs) + alpha_cog × min(token_log_probs)
+        - R_cog = answer_log_prob(Q, Rewritten_CoT, A) - answer_log_prob(Q, Original_CoT, A)
         - (可选) R_logic = FSF based reward
         - Total = R_cog + lambda * R_logic
 
@@ -155,8 +159,10 @@ class CombinedRewardComputer:
         logger.info(f"[REWARD] Computing reward for batch_size={batch_size}")
 
         # Compute cognitive reward
+        # R_cog = answer_log_prob(Q, Rewritten_CoT, A) - answer_log_prob(Q, Original_CoT, A)
+        # 其中 answer_log_prob = avg(token_log_probs) + alpha_cog * min(token_log_probs)
         logger.info(f"[REWARD] Computing cognitive reward with vLLM...")
-        logger.info(f"[REWARD] Formula: reward = (avg + {self.alpha_cog}*min)(rewritten) - (avg + {self.alpha_cog}*min)(original)")
+        logger.info(f"[REWARD] Formula: R_cog = (avg + {self.alpha_cog}*min)(rewritten) - (avg + {self.alpha_cog}*min)(original)")
         cog_result = self.student_client.compute_cognitive_reward_batch(
             questions=questions,
             rewrite_cots=rewrite_cots,
