@@ -79,7 +79,7 @@ actor_rollout_ref:
   rollout:
     n: 8                 # GRPO 采样数
     free_cache_engine: true
-    sleep_level: 2
+    sleep_level: 1       # 必须用 1，不能用 2（见常见问题）
 
 reward_model:
   task_runner_num_gpus: 1              # TaskRunner GPU 资源
@@ -132,3 +132,24 @@ VERL_ROLLOUT_LOGGING_LEVEL=INFO       # vLLM 详细日志
 | OOM | 启用 LoRA、降低 batch size、调低 `gpu_memory_utilization` |
 | vLLM 无法释放内存 | 启用 `offload_rollout_for_reward: true` |
 | NVIDIA 驱动版本低 | 升级到 535+ (RUC 服务器需使用 fp16 而非 bf16) |
+| **第二个 step 开始输出乱码** | **必须设置 `sleep_level: 1`，不能用 2**（见下方详解） |
+
+### sleep_level=2 导致乱码问题（重要）
+
+**现象**：训练第一个 step 正常，第二个 step 开始 rollout 输出变成乱码（如 `"1 2 the def2 `` ## over..."`）
+
+**原因**：
+- `sleep_level=2` 会完全丢弃 vLLM 的模型权重
+- `wake_up` 时需要重新初始化模型，此时使用 dummy 权重
+- 虽然 `update_params` 会用训练后的权重覆盖，但 vLLM 内部实现有 bug，部分权重未被正确同步
+- 结果是模型部分权重是随机值，输出乱码
+
+**解决方案**：
+```yaml
+actor_rollout_ref:
+  rollout:
+    sleep_level: 1  # 权重 offload 到 CPU，wake_up 时从 CPU 恢复（正确）
+    # sleep_level: 2  # 完全丢弃权重，wake_up 有 bug（错误）
+```
+
+**显存影响**：`sleep_level=1` 只比 `sleep_level=2` 多占用约 1-2GB GPU 显存，在 80GB GPU 上完全足够。

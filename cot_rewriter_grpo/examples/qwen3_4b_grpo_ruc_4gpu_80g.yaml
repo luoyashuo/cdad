@@ -51,7 +51,7 @@ data:
   val_batch_size: 4
   gen_batch_size: 8
   max_prompt_length: 5500
-  max_response_length: 5500
+  max_response_length: 6700
   return_raw_chat: true
   dataloader_num_workers: 4
   reward_fn_key: reward_model
@@ -80,23 +80,23 @@ actor_rollout_ref:
     clip_ratio: 0.2
     entropy_coeff: 0.01
     grad_clip: 1.0
-    ppo_mini_batch_size: 4  # 减小以避免 backward OOM
+    ppo_mini_batch_size: 2  # 减小以避免 backward OOM (从 4 降到 2)
     # 降低 micro batch size 以减少显存峰值
-    ppo_micro_batch_size_per_gpu: 2
-    # FSDP 配置 - 使用 fp16 避免旧驱动的 bfloat16 转换问题
+    ppo_micro_batch_size_per_gpu: 1  # 从 2 降到 1，减少 backward 显存峰值
+    # FSDP 配置
     fsdp_config:
-      dtype: float16
+      dtype: bfloat16           # bf16 动态范围更大，训练更稳定
       # fsdp1尽量不要开，可能会导致梯度回传出bug：https://www.linkedin.com/pulse/rl-system-deep-dive-fsdp-training-backend-chenyang-zhao-jjeoe
       # 似乎fsdp2修复了这个问题
       param_offload: false      # 在 reward 计算时 offload 参数到 CPU
       optimizer_offload: false  # 在 reward 计算时 offload optimizer 到 CPU
       mixed_precision:
-        param_dtype: fp16
-        reduce_dtype: fp16
-        buffer_dtype: fp16
+        param_dtype: bf16       # bf16 比 fp16 更稳定
+        reduce_dtype: fp32      # reduce 保持 fp32 精度
+        buffer_dtype: bf16
 
     optim:
-      lr: 1e-5
+      lr: 5e-6              # 从 1e-5 降到 5e-6，避免 GRPO 训练不稳定
       weight_decay: 0.01
       lr_scheduler_type: cosine
       lr_warmup_steps_ratio: 0.03
@@ -110,15 +110,15 @@ actor_rollout_ref:
     tensor_model_parallel_size: 1
     # vLLM 显存占用 - Actor vLLM 通过 sleep(level=2) 完全释放后
     # Student vLLM 可以使用全部 GPU 显存，计算完后 cleanup 再 reload Actor vLLM
-    gpu_memory_utilization: 0.6
-    dtype: float16
+    gpu_memory_utilization: 0.5  # 从 0.6 降到 0.5，为训练 backward 留更多显存
+    dtype: bfloat16             # bf16 与训练精度一致
     # 降低 log_prob 计算时的 micro batch size
-    log_prob_micro_batch_size_per_gpu: 2
+    log_prob_micro_batch_size_per_gpu: 1  # 从 2 降到 1
     n: 8  # 快速验证 (需要满足 ppo_mini_batch_size * n >= n_gpus)，正式训练改回 8
     temperature: 0.7
     top_p: 0.95
     prompt_length: 5500
-    response_length: 5500
+    response_length: 6700
     max_num_batched_tokens: 12288
     max_model_len: 12288
     # 禁用 CUDA Graph 以避免旧驱动兼容性问题
@@ -126,9 +126,18 @@ actor_rollout_ref:
     # 启用 vLLM 销毁/重建机制 - 在 reward 计算时销毁 vLLM 释放显存给 Student vLLM
     # 我们已修改代码来正确重置 vLLM cumem allocator，避免重建失败
     free_cache_engine: true
-    # sleep_level=2: 完全释放 GPU 显存（丢弃权重+KV cache），wake_up 时从磁盘重新加载
-    # sleep_level=1: 只 offload 到 CPU（需要足够 CPU 内存）
-    sleep_level: 2
+    # ===== 重要：sleep_level 必须设为 1，不能用 2 =====
+    # sleep_level=1: 权重 offload 到 CPU，wake_up 时从 CPU 恢复（推荐）
+    # sleep_level=2: 完全丢弃权重，wake_up 时重新初始化
+    #
+    # 【BUG】sleep_level=2 会导致第二个 step 开始输出乱码！
+    # 原因：wake_up 重新初始化模型时使用 dummy 权重，虽然 update_params 会用
+    # 训练后的权重覆盖，但由于 vLLM 内部实现问题，部分权重可能未被正确同步，
+    # 导致模型输出变成乱码（如 "1 2 the def2 `` ## over..."）
+    #
+    # sleep_level=1 只比 sleep_level=2 多占用约 1-2GB GPU 显存（模型元数据），
+    # 在 80GB GPU 上完全足够，且能保证权重正确恢复。
+    sleep_level: 1
     agent:
       num_workers: 1
 
@@ -141,7 +150,11 @@ algorithm:
   norm_adv_by_std_in_grpo: true
   gamma: 1.0
   lam: 1.0
-  use_kl_in_reward: false
+  use_kl_in_reward: false                                                                                                                                   
+  kl_penalty: kl                                                                                                                                           
+  kl_ctrl:                                                                                                                                                 
+    type: fixed                                                                                                                                            
+    kl_coef: 0.02             
 
 # ============ Critic Configuration (GRPO doesn't need) ============
 critic:

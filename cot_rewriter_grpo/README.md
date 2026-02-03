@@ -139,15 +139,7 @@ uv pip install loguru
 2. RUC服务器上VLLM运行必须开：
   - VLLM_USE_V1=0 - 强制使用 vLLM V0 引擎                                                                                                                    
   - VLLM_ATTENTION_BACKEND=FLASH_ATTN - 使用 Flash Attention 后端 
-  - FSDP必须用fp16，不能用bf16:
-  ```
-    fsdp_config:
-      dtype: float16
-      mixed_precision:
-        param_dtype: fp16
-        reduce_dtype: fp16
-        buffer_dtype: fp16
-    ```
+
 3. VLLM SLEEP失效：
   - https://github.com/vllm-project/vllm-ascend/issues/977
   - https://github.com/vllm-project/vllm/issues/15254

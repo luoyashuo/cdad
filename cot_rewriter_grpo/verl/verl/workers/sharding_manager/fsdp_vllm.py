@@ -204,7 +204,34 @@ class FSDPVLLMShardingManager(BaseShardingManager):
                 peft_config = peft_model.peft_config.get("default", None)
                 params = __collect_lora_params()
             else:
-                params = self.module.state_dict()
+                # 全参数训练：需要使用 summon_full_params 获取完整参数
+                # 否则多 GPU 训练时 state_dict() 返回分片参数，导致 vLLM 输出乱码
+                if fsdp_version(self.module) == 1 and not self.full_params:
+                    # FSDP1: 必须同时使用 FULL_STATE_DICT 类型和 summon_full_params
+                    # 仅用 summon_full_params 不够，因为 state_dict() 的行为取决于 set_state_dict_type
+                    # 如果之前设置了 SHARDED_STATE_DICT，即使在 summon_full_params 上下文中，
+                    # state_dict() 仍会返回分片参数，导致 vLLM 同步后输出乱码
+                    with FSDP.state_dict_type(
+                        self.module,
+                        state_dict_type=StateDictType.FULL_STATE_DICT,
+                        state_dict_config=FullStateDictConfig(offload_to_cpu=False, rank0_only=False)
+                    ):
+                        params = {
+                            name: param.detach().clone()
+                            for name, param in self.module.state_dict().items()
+                            if "_flat_param" not in name
+                        }
+                elif fsdp_version(self.module) == 2 and not self.full_params:
+                    # FSDP2: 使用 summon_full_params 和 full_tensor()
+                    with FSDP.summon_full_params(self.module, writeback=False):
+                        params = {
+                            name: param.full_tensor().detach().clone()
+                            if hasattr(param, "full_tensor") else param.detach().clone()
+                            for name, param in self.module.state_dict().items()
+                            if "_flat_param" not in name
+                        }
+                else:
+                    params = self.module.state_dict()
             params = convert_weight_keys(params, getattr(self.module, "_fsdp_wrapped_module", self.module))
             log_gpu_memory_usage("After state_dict() in sharding manager memory", logger=logger)
 

@@ -4,7 +4,7 @@ Combined Reward Function for CoT Rewriter GRPO
 Reward 计算逻辑:
 - 使用 Qwen3 chat template 格式计算 Student Model 的 log prob
 - R_cog = avg(log P_student(Answer | Question, Rewrite_CoT)) + alpha_cog * min(token_log_probs)
-- R_cog = answer_log_prob(rewritten) - answer_log_prob(original)
+- R_cog = answer_log_prob(rewritten)  # 直接使用 rewrite 的 log prob
 - alpha_cog 为可配置参数，默认为 0.01
 - (可选) R_logic: FSF Judge 比较失败分支比例
 
@@ -138,7 +138,7 @@ class CombinedRewardComputer:
 
         Reward 逻辑:
         - answer_log_prob(q, cot, a) = avg(token_log_probs) + alpha_cog × min(token_log_probs)
-        - R_cog = answer_log_prob(rewritten) - answer_log_prob(original)
+        - R_cog = answer_log_prob(rewritten)  # 直接使用 rewrite 的 log prob
         - (可选) R_logic = FSF based reward
         - Total = R_cog + lambda * R_logic
 

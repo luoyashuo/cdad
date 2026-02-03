@@ -250,16 +250,14 @@ R_cog = answer_log_prob(Q, Rewritten_CoT, A) - answer_log_prob(Q, Original_CoT, 
 │  │  构建 prompt: "<Question> <think>CoT</think> <Answer>"              │   │
 │  │                                                                     │   │
 │  │  P(Answer | Q, Rewritten_CoT) ──► rewrite_log_prob                 │   │
-│  │  P(Answer | Q, Original_CoT)  ──► original_log_prob                │   │
 │  │                                                                     │   │
 │  │  answer_log_prob = mean + 0.01 × min                               │   │
 │  │                                                                     │   │
-│  │  R_cog = rewrite_log_prob - original_log_prob                      │   │
+│  │  R_cog = rewrite_log_prob (直接使用 rewrite 的 log prob)           │   │
 │  └─────────────────────────────────────────────────────────────────────┘   │
 │                                                                             │
 │  特殊情况:                                                                  │
 │    • 截断的 response → R = -1.0 (跳过 Student 计算)                         │
-│    • original_cot 为空 → R = rewrite_log_prob (不做差值)                    │
 │                                                                             │
 │  输出: R_total = R_cog                                                      │
 │                                                                             │

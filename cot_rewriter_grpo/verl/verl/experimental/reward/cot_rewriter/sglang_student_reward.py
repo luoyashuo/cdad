@@ -504,16 +504,16 @@ class SGLangStudentRewardClient:
             rewrite_min = rewrite_result["min_log_prob"]
             rewrite_answer_log_prob = rewrite_mean + alpha_cog * rewrite_min
 
-            # Get original result (if available)
+            # R_cog = rewrite_log_prob (不再减去 original_log_prob)
+            # 直接使用 rewrite 的 answer log prob 作为 reward
+            reward = rewrite_answer_log_prob
+
+            # 仍然记录 original 的 log prob 用于日志分析（如果有的话）
             if i in original_results_map:
                 original_result = original_results_map[i]
                 original_mean = original_result["mean_log_prob"]
-                original_min = original_result["min_log_prob"]
-                original_answer_log_prob = original_mean + alpha_cog * original_min
-                reward = rewrite_answer_log_prob - original_answer_log_prob
             else:
                 original_mean = -100.0
-                reward = rewrite_answer_log_prob
 
             rewards.append(reward)
             rewrite_mean_log_probs.append(rewrite_mean)
