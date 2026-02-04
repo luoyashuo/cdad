@@ -112,8 +112,13 @@ class VLLMWorkerActor:
         print(f"[{worker_name}] CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES')}", flush=True)
         print(f"[{worker_name}] PyTorch sees {torch.cuda.device_count()} GPU(s)", flush=True)
 
+        print(f"[{worker_name}] Loading tokenizer from {model_path}...", flush=True)
         self.tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
-        print(f"[{worker_name}] Initializing with: tensor_parallel_size={tensor_parallel_size}, gpu_memory_utilization={gpu_memory_utilization}, max_model_len={max_model_len}, max_num_seqs={max_num_seqs}", flush=True)
+        print(f"[{worker_name}] Tokenizer loaded", flush=True)
+        
+        print(f"[{worker_name}] Initializing vLLM LLM with: TP={tensor_parallel_size}, gpu_mem={gpu_memory_utilization}, max_len={max_model_len}...", flush=True)
+        import time
+        llm_start = time.time()
         self.llm = LLM(
             model=model_path,
             tensor_parallel_size=tensor_parallel_size,  # Use actual TP size
@@ -125,8 +130,9 @@ class VLLMWorkerActor:
             max_num_seqs=max_num_seqs,
             max_logprobs=1,
         )
+        llm_elapsed = time.time() - llm_start
         self.micro_batch_size = micro_batch_size
-        print(f"[{worker_name}] vLLM initialized successfully with TP={tensor_parallel_size}", flush=True)
+        print(f"[{worker_name}] vLLM LLM initialized successfully in {llm_elapsed:.2f}s", flush=True)
         print(f"[{worker_name}] nvidia-smi AFTER loading Student vLLM:", flush=True)
         print(f"[{worker_name}] {get_all_gpus_memory()}", flush=True)
         print(f"[{worker_name}] ========================================", flush=True)
@@ -150,13 +156,14 @@ class VLLMWorkerActor:
         from vllm import SamplingParams
         import time
 
+        worker_name = self._worker_name
+        print(f"[{worker_name}] compute_logprobs START: {len(prompts)} prompts", flush=True)
+        
         sampling_params = SamplingParams(
             max_tokens=1,
             prompt_logprobs=1,
             temperature=0,
         )
-
-        worker_name = self._worker_name
 
         # Log GPU memory before generation
         print(f"[{worker_name}] Processing {len(prompts)} prompts (micro_batch_size={self.micro_batch_size})...", flush=True)
@@ -205,6 +212,7 @@ class VLLMWorkerActor:
                     "token_log_probs": [],
                 })
 
+        print(f"[{worker_name}] compute_logprobs END: returned {len(results)} results", flush=True)
         return results
 
     def _extract_answer_logprobs(self, prompt_logprobs, answer_start_idx: int) -> List[float]:
@@ -437,7 +445,16 @@ class VLLMStudentRewardClient:
 
         # Wait for all actors to initialize
         logger.info(f"[VLLMStudentReward] Waiting for {self.num_actors} actors to initialize...")
-        ray.get([w.compute_logprobs.remote(["test"], [0]) for w in self.workers])
+        init_futures = [w.compute_logprobs.remote(["test"], [0]) for w in self.workers]
+        logger.info(f"[VLLMStudentReward] Submitted {len(init_futures)} init tasks, waiting for results...")
+        for i, future in enumerate(init_futures):
+            logger.info(f"[VLLMStudentReward] Waiting for worker {i} init...")
+            try:
+                result = ray.get(future, timeout=60)  # 60 second timeout
+                logger.info(f"[VLLMStudentReward] Worker {i} init done")
+            except Exception as e:
+                logger.error(f"[VLLMStudentReward] Worker {i} init FAILED: {e}")
+                raise
         logger.info(f"[VLLMStudentReward] All {self.num_actors} actors initialized successfully (TP={self.tensor_parallel_size})")
 
         self._initialized = True
@@ -559,7 +576,11 @@ class VLLMStudentRewardClient:
         logger.info(f"[VLLMStudentReward] Waiting for {len(rewrite_futures)} rewrite tasks...")
         rewrite_results = [None] * batch_size
         for worker_idx, chunk_size, future in rewrite_futures:
+            logger.info(f"[VLLMStudentReward] Waiting for rewrite result from worker {worker_idx}...")
+            get_start = time.time()
             chunk_results = ray.get(future)
+            get_elapsed = time.time() - get_start
+            logger.info(f"[VLLMStudentReward] Got rewrite result from worker {worker_idx} in {get_elapsed:.2f}s")
             # Place results back in original order
             start_idx = sum(len(rewrite_chunks[i]) for i in range(worker_idx))
             for i, result in enumerate(chunk_results):
@@ -570,7 +591,11 @@ class VLLMStudentRewardClient:
         if original_futures:
             logger.info(f"[VLLMStudentReward] Waiting for {len(original_futures)} original tasks...")
             for worker_idx, chunk_size, future in original_futures:
+                logger.info(f"[VLLMStudentReward] Waiting for original result from worker {worker_idx}...")
+                get_start = time.time()
                 chunk_results = ray.get(future)
+                get_elapsed = time.time() - get_start
+                logger.info(f"[VLLMStudentReward] Got original result from worker {worker_idx} in {get_elapsed:.2f}s")
                 start_idx = sum(len(original_chunks[i]) for i in range(worker_idx))
                 for i, result in enumerate(chunk_results):
                     original_idx = original_indices[start_idx + i]

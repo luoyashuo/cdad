@@ -25,31 +25,36 @@ defaults:
   - _self_
 
 # ============ Experiment Configuration ============
+# 【注意】验证流程说明：
+# 当 test_freq > 0 时，每 N 步会执行一次完整验证，遍历整个验证集
+# val_batch_size 决定每次处理的样本数，较小的值会导致更多循环迭代
+# 如果验证集很大（如 1000+ 条），建议使用较大的 val_batch_size（如 32）
+# 或者暂时禁用验证：test_freq: -1
 trainer:
   project_name: cot_rewriter_grpo
-  experiment_name: qwen3_4b_4gpu_80g_full_optimized
+  experiment_name: qwen3_4b_4gpu_80g_full
   total_epochs: 1
   total_training_steps: 500
   save_freq: 50
-  test_freq: 50
+  test_freq: 50  # 【修复】降低验证频率，与 save_freq 同步
   val_before_train: false
   device: cuda
   log_freq: 10
   max_actor_ckpt_to_keep: 3
-  default_local_dir: /fs/fast/u20240075/luoyashuo/checkpoints/cdad/rewrite/qwen3_4b_grpo_4gpu_80g/${trainer.project_name}/${trainer.experiment_name}
+  default_local_dir: /fs/fast/u20240075/luoyashuo/checkpoints/cdad/${trainer.project_name}/${trainer.experiment_name}
   n_gpus_per_node: 4
   nnodes: 1
   logger: ["swanlab","console"]
 
-  rollout_data_dir: /fs/fast/u20240075/luoyashuo/checkpoints/cdad/rewrite/qwen3_4b_grpo_4gpu_80g/rollout_data
-  validation_data_dir: /fs/fast/u20240075/luoyashuo/checkpoints/cdad/rewrite/qwen3_4b_grpo_4gpu_80g/validation_data
+  rollout_data_dir: /fs/fast/u20240075/luoyashuo/checkpoints/cdad/${trainer.experiment_name}/rollout_data
+  validation_data_dir: /fs/fast/u20240075/luoyashuo/checkpoints/cdad/${trainer.experiment_name}/validation_data
 
 data:
   train_files: /home/u20240075/luoyashuo/data/cdad/cot_rewrite_max_fsf_v2/train.jsonl
-  val_files: /home/u20240075/luoyashuo/data/cdad/cot_rewrite_max_fsf_v2/val.jsonl
+  val_files: /home/u20240075/luoyashuo/data/cdad/cot_rewrite_max_fsf_v2/val_64.jsonl
   # 保持 train_batch_size=2, rollout.n=8 -> 每步 16 个 samples
   train_batch_size: 2
-  val_batch_size: 4
+  val_batch_size: 16  # 【修复】增大验证 batch size，减少验证循环次数
   gen_batch_size: 8
   max_prompt_length: 5500
   max_response_length: 6700
@@ -87,8 +92,12 @@ actor_rollout_ref:
       # 【关键优化】开启 param_offload 和 optimizer_offload
       # 在 reward 计算时将 Actor 参数 offload 到 CPU，释放显存给 Student vLLM
       # 训练时会自动加载回 GPU，带来轻微性能损耗但避免 OOM
-      param_offload: true      # 开启参数 offload
-      optimizer_offload: true  # 开启优化器状态 offload
+      # 【注意】param_offload 与 vLLM sleep 配合时可能导致死锁
+      # 如果启用 param_offload，在验证/保存后 compute_log_prob 加载模型时可能卡住
+      # 解决方案 1: 禁用 param_offload（当前设置，需要确保显存足够）
+      # 解决方案 2: 保持 param_offload=true，但将 save_freq/test_freq 设得更大（如 200+）
+      param_offload: false
+      optimizer_offload: true  # 优化器状态 offload 可以安全启用
       mixed_precision:
         param_dtype: bf16
         reduce_dtype: fp32
@@ -104,7 +113,7 @@ actor_rollout_ref:
 
   rollout:
     name: vllm
-    tensor_model_parallel_size: 1
+    tensor_model_parallel_size: 4
     # 降低 Actor vLLM 显存占用，为 Student 留更多空间
     gpu_memory_utilization: 0.45  # 从 0.5 降到 0.45
     dtype: bfloat16
@@ -124,6 +133,7 @@ actor_rollout_ref:
 
   ref:
     enable: false
+    log_prob_micro_batch_size_per_gpu: 1
 
 # ============ Algorithm Configuration ============
 algorithm:
@@ -131,11 +141,11 @@ algorithm:
   norm_adv_by_std_in_grpo: true
   gamma: 1.0
   lam: 1.0
-  use_kl_in_reward: false                                                                                                                                     
+  use_kl_in_reward: true                                                                                                                                     
   kl_penalty: kl                                                                                                                                           
   kl_ctrl:                                                                                                                                                 
     type: fixed                                                                                                                                            
-    kl_coef: 0.02             
+    kl_coef: 0.01             
 
 # ============ Critic Configuration (GRPO doesn't need) ============
 critic:

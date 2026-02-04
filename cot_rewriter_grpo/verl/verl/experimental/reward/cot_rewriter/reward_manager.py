@@ -86,7 +86,13 @@ class CoTRewriterRewardManager:
         # Call compute_cot_rewriter_reward directly with the full batch
         # The function is wrapped by _call_with_kwargs which merges reward_kwargs
         # We pass data and tokenizer as keyword arguments
+        import time
+        batch_size = len(data)
+        print(f"[REWARD_MANAGER] Starting compute_score for {batch_size} samples...")
+        start_time = time.time()
         result = self.compute_score(data=data, tokenizer=self.tokenizer)
+        elapsed = time.time() - start_time
+        print(f"[REWARD_MANAGER] compute_score completed in {elapsed:.2f}s")
 
         # Process the result
         if isinstance(result, dict):

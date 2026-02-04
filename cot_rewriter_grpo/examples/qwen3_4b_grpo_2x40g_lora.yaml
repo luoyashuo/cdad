@@ -36,7 +36,7 @@ trainer:
   # Checkpoint management
   max_actor_ckpt_to_keep: 3  # Only keep the latest 3 checkpoints
   # Output directory (timestamp will be added by code)
-  default_local_dir: /data-share/yeesuanAI08/lihaitao/luoys/checkpoints/cdad/rewrite/qwen3_4b_grpo_2gpu/${trainer.project_name}/${trainer.experiment_name}
+  default_local_dir: /data-share/yeesuanAI08/lihaitao/luoys/checkpoints/cdad/${trainer.project_name}/${trainer.experiment_name}
   # 训练使用 2 张 GPU (GPU 2,3)
   n_gpus_per_node: 2
   nnodes: 1
@@ -44,19 +44,19 @@ trainer:
   logger: ["swanlab","console"]
 
   # ========== Rollout Data Logging (for human review) ==========
-  rollout_data_dir: /data-share/yeesuanAI08/lihaitao/luoys/checkpoints/cdad/rewrite/qwen3_4b_grpo_2gpu/rollout_data
-  validation_data_dir: /data-share/yeesuanAI08/lihaitao/luoys/checkpoints/cdad/rewrite/qwen3_4b_grpo_2gpu/validation_data
+  rollout_data_dir: /data-share/yeesuanAI08/lihaitao/luoys/checkpoints/cdad/${trainer.project_name}/${trainer.experiment_name}/rollout_data
+  validation_data_dir: /data-share/yeesuanAI08/lihaitao/luoys/checkpoints/cdad/${trainer.project_name}/${trainer.experiment_name}/validation_data
 
 data:
   # Use original JSONL directly (field names will be auto-mapped by custom reward function):
   train_files: /data-share/yeesuanAI08/lihaitao/luoys/data/cdad/cot_rewrite_max_fsf/train.jsonl
-  val_files: /data-share/yeesuanAI08/lihaitao/luoys/data/cdad/cot_rewrite_max_fsf/val.jsonl
+  val_files: /data-share/yeesuanAI08/lihaitao/luoys/data/cdad/cot_rewrite_max_fsf/val_64.jsonl
   # IMPORTANT: total samples = train_batch_size × rollout.n must be divisible by n_gpus_per_node
   # n=4 最保险配置
   # Batch sizes for training
   train_batch_size: 1
-  val_batch_size: 8
-  gen_batch_size: 8
+  val_batch_size: 2
+  gen_batch_size: 2
   max_prompt_length: 5500
   max_response_length: 5500  # 从 6700 降低到 5500，减少显存占用
   return_raw_chat: true
@@ -225,11 +225,10 @@ custom_reward_function:
     reward_backend: vllm
     # vLLM GPU memory utilization for Student Model
     # 【关键】Student vLLM OOM，进一步降低显存占用
-    # 从 0.35 降到 0.25，为logprobs计算预留更多空间
-    vllm_gpu_memory_utilization: 0.25
-    # 避免超长序列 (prompt+response > 8000) 导致 KV Cache 爆炸
+    # 降低到 0.15，让 Student vLLM 使用更少显存
+    vllm_gpu_memory_utilization: 0.15
     # 【关键】降低max_model_len减少KV cache，避免logprobs计算OOM
-    student_max_model_len: 6000
+    student_max_model_len: 7000
     # Student vLLM micro batch size - 降低此值可避免 prompt_logprobs 计算时 OOM
     # 每个 micro-batch 处理的 prompt 数量，越小越安全但越慢
     # 保持micro_batch_size=1，但降低max_model_len更关键

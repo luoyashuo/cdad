@@ -691,6 +691,10 @@ class RayPPOTrainer:
         self.validation_generations_logger.log(self.config.trainer.logger, samples, self.global_steps)
 
     def _validate(self):
+        import time
+        print(f"[VALIDATION] ====== START validation at step {self.global_steps} ======")
+        val_start_time = time.time()
+        
         data_source_lst = []
         reward_extra_infos_dict: dict[str, list] = defaultdict(list)
 
@@ -700,7 +704,12 @@ class RayPPOTrainer:
         sample_scores = []
         sample_turns = []
 
-        for test_data in self.val_dataloader:
+        val_dataloader_len = len(self.val_dataloader)
+        print(f"[VALIDATION] Total validation batches: {val_dataloader_len}, val_batch_size: {self.config.data.val_batch_size}")
+        
+        for batch_idx, test_data in enumerate(self.val_dataloader):
+            batch_start_time = time.time()
+            print(f"[VALIDATION] Processing batch {batch_idx + 1}/{val_dataloader_len}...")
             test_batch = DataProto.from_single_dict(test_data)
 
             # repeat test batch
@@ -752,6 +761,9 @@ class RayPPOTrainer:
                 else self.config.actor_rollout_ref.rollout.agent.num_workers
             )
             test_gen_batch_padded, pad_size = pad_dataproto_to_divisor(test_gen_batch, size_divisor)
+            print(f"[VALIDATION] Batch {batch_idx + 1}: Starting generate_sequences (pad_size={pad_size})...")
+            gen_start = time.time()
+            
             if not self.async_rollout_mode:
                 test_output_gen_batch_padded = self.actor_rollout_wg.generate_sequences(test_gen_batch_padded)
             else:
@@ -759,8 +771,8 @@ class RayPPOTrainer:
 
             # unpad
             test_output_gen_batch = unpad_dataproto(test_output_gen_batch_padded, pad_size=pad_size)
-
-            print("validation generation end")
+            gen_time = time.time() - gen_start
+            print(f"[VALIDATION] Batch {batch_idx + 1}: generate_sequences completed in {gen_time:.2f}s")
 
             # Store generated outputs
             output_ids = test_output_gen_batch.batch["responses"]
@@ -771,7 +783,11 @@ class RayPPOTrainer:
             test_batch.meta_info["validate"] = True
 
             # evaluate using reward_function
+            print(f"[VALIDATION] Batch {batch_idx + 1}: Starting reward function...")
+            reward_start = time.time()
             result = self.val_reward_fn(test_batch, return_dict=True)
+            reward_time = time.time() - reward_start
+            print(f"[VALIDATION] Batch {batch_idx + 1}: reward function completed in {reward_time:.2f}s")
             reward_tensor = result["reward_tensor"]
             scores = reward_tensor.sum(-1).cpu().tolist()
             sample_scores.extend(scores)
@@ -788,7 +804,11 @@ class RayPPOTrainer:
                 sample_turns.append(test_batch.non_tensor_batch["__num_turns__"])
 
             data_source_lst.append(test_batch.non_tensor_batch.get("data_source", ["unknown"] * reward_tensor.shape[0]))
+            
+            batch_time = time.time() - batch_start_time
+            print(f"[VALIDATION] Batch {batch_idx + 1}/{val_dataloader_len} completed in {batch_time:.2f}s")
 
+        print(f"[VALIDATION] All batches processed. Total samples: {len(sample_scores)}")
         self._maybe_log_val_generations(inputs=sample_inputs, outputs=sample_outputs, scores=sample_scores)
 
         # dump generations
@@ -831,6 +851,10 @@ class RayPPOTrainer:
             metric_dict["val-aux/num_turns/max"] = sample_turns.max()
             metric_dict["val-aux/num_turns/mean"] = sample_turns.mean()
 
+        val_total_time = time.time() - val_start_time
+        print(f"[VALIDATION] ====== COMPLETED in {val_total_time:.2f}s ======")
+        print(f"[VALIDATION] Metrics: {list(metric_dict.keys())[:5]}...")
+        
         return metric_dict
 
     def init_workers(self):
@@ -1364,10 +1388,12 @@ class RayPPOTrainer:
                         and self.config.trainer.test_freq > 0
                         and (is_last_step or self.global_steps % self.config.trainer.test_freq == 0)
                     ):
+                        print(f"[TRAINER] Step {self.global_steps}: Starting validation (test_freq={self.config.trainer.test_freq})...")
                         with marked_timer("testing", timing_raw, color="green"):
                             val_metrics: dict = self._validate()
                             if is_last_step:
                                 last_val_metrics = val_metrics
+                        print(f"[TRAINER] Step {self.global_steps}: Validation completed")
                         metrics.update(val_metrics)
 
                     # Check if the ESI (Elastic Server Instance)/training plan is close to expiration.

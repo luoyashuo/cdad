@@ -511,6 +511,8 @@ def compute_cot_rewriter_reward(
         # Get or create reward computer only if there are non-truncated samples
         logger.info(f"[REWARD_FN] Getting reward computer (backend={reward_backend})...")
         logger.info(f"[REWARD_FN] Computing rewards for {len(non_truncated_indices)} non-truncated samples (skipping {len(truncated_indices)} truncated)")
+        import time
+        computer_start = time.time()
         reward_computer = get_reward_computer(
             student_model_path=student_model_path,
             fsf_model_path=fsf_model_path,
@@ -529,6 +531,8 @@ def compute_cot_rewriter_reward(
             student_max_num_seqs=student_max_num_seqs,
         student_tensor_parallel_size=student_tensor_parallel_size,
         )
+        computer_init_time = time.time() - computer_start
+        logger.info(f"[REWARD_FN] get_reward_computer completed in {computer_init_time:.2f}s")
 
         # Filter data for non-truncated samples
         filtered_questions = [questions[i] for i in non_truncated_indices]
@@ -537,14 +541,16 @@ def compute_cot_rewriter_reward(
         filtered_answers = [answers[i] for i in non_truncated_indices]
 
         # Compute rewards only for non-truncated samples
-        logger.info(f"[REWARD_FN] Calling reward_computer.compute_reward()...")
+        logger.info(f"[REWARD_FN] Calling reward_computer.compute_reward() for {len(filtered_questions)} questions...")
+        compute_start = time.time()
         filtered_result = reward_computer.compute_reward(
             questions=filtered_questions,
             original_cots=filtered_original_cots,
             rewrite_cots=filtered_rewrite_cots,
             answers=filtered_answers,
         )
-        logger.info(f"[REWARD_FN] Reward computer returned results for {len(non_truncated_indices)} samples")
+        compute_elapsed = time.time() - compute_start
+        logger.info(f"[REWARD_FN] compute_reward completed in {compute_elapsed:.2f}s for {len(non_truncated_indices)} samples")
     else:
         logger.warning(f"[REWARD_FN] All {batch_size} samples are truncated! Skipping Student model computation.")
         filtered_result = None
