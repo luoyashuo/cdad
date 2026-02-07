@@ -14,7 +14,10 @@ import torch
 from verl import DataProto
 from verl.workers.reward_manager import register
 
-from verl.experimental.reward.cot_rewriter.logging_config import logger
+from verl.experimental.reward.cot_rewriter.training_logger import get_logger
+
+# Training logger
+logger = get_logger("reward_manager")
 
 
 @register("cot_rewriter")
@@ -86,13 +89,7 @@ class CoTRewriterRewardManager:
         # Call compute_cot_rewriter_reward directly with the full batch
         # The function is wrapped by _call_with_kwargs which merges reward_kwargs
         # We pass data and tokenizer as keyword arguments
-        import time
-        batch_size = len(data)
-        print(f"[REWARD_MANAGER] Starting compute_score for {batch_size} samples...")
-        start_time = time.time()
         result = self.compute_score(data=data, tokenizer=self.tokenizer)
-        elapsed = time.time() - start_time
-        print(f"[REWARD_MANAGER] compute_score completed in {elapsed:.2f}s")
 
         # Process the result
         if isinstance(result, dict):
@@ -151,10 +148,6 @@ class CoTRewriterRewardManager:
         rewrite_mean_log_probs = extra_info.get("rewrite_mean_log_probs", [])
         original_mean_log_probs = extra_info.get("original_mean_log_probs", [])
 
-        logger.info(f"\n{'='*80}")
-        logger.info(f"[ROLLOUT SAMPLES] Showing {num_to_print} samples for review")
-        logger.info(f"{'='*80}")
-
         for i in range(num_to_print):
             # Decode prompt and response
             prompt_ids = data.batch["prompts"][i]
@@ -172,21 +165,10 @@ class CoTRewriterRewardManager:
                     if isinstance(rm_item, dict):
                         original_cot = rm_item.get("original_cot", "")
 
-            logger.info(f"\n[Sample {i}]")
-            logger.info(f"[question] {prompt_str[:500]}..." if len(prompt_str) > 500 else f"[question] {prompt_str}")
-            logger.info(f"[rollout_output] {response_str[:800]}..." if len(response_str) > 800 else f"[rollout_output] {response_str}")
-            if original_cot:
-                logger.info(f"[old_cot] {str(original_cot)[:500]}..." if len(str(original_cot)) > 500 else f"[old_cot] {original_cot}")
+            logger.info(f"[Sample {i}] prompt={prompt_str[:100]}... response={response_str[:100]}...")
 
             # Print reward info
             if i < len(total_rewards):
-                logger.info(f"[total_reward] {total_rewards[i]}")
+                logger.info(f"[Sample {i}] total_reward={total_rewards[i]}")
             if i < len(cognitive_rewards):
-                logger.info(f"[cognitive_reward] {cognitive_rewards[i]}")
-            if i < len(rewrite_mean_log_probs):
-                logger.info(f"[rewrite_mean_log_prob] {rewrite_mean_log_probs[i]:.4f}")
-            if i < len(original_mean_log_probs):
-                logger.info(f"[original_mean_log_prob] {original_mean_log_probs[i]:.4f}")
-            logger.info("-" * 80)
-
-        logger.info(f"{'='*80}\n")
+                logger.info(f"[Sample {i}] cognitive_reward={cognitive_rewards[i]}")

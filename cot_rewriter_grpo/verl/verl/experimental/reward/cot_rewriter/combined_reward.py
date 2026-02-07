@@ -25,7 +25,10 @@ import torch
 
 from verl import DataProto
 
-from verl.experimental.reward.cot_rewriter.logging_config import logger
+from verl.experimental.reward.cot_rewriter.training_logger import get_logger
+
+# Training logger for reward computation
+logger = get_logger("reward")
 
 
 class CombinedRewardComputer:
@@ -85,21 +88,8 @@ class CombinedRewardComputer:
         self.gpu_batch_size = gpu_batch_size
         self.reward_backend = reward_backend
 
-        logger.info(f"[CombinedRewardComputer] Initializing")
-        logger.info(f"  Reward Backend: {reward_backend}")
-        logger.info(f"  Device (FSF): {device}")
-        logger.info(f"  Alpha Cog: {alpha_cog}")
-        logger.info(f"  Student Devices: {student_devices}")
-        logger.info(f"  Student Max Model Len: {student_max_model_len}")
-        logger.info(f"  Student Micro Batch Size: {student_micro_batch_size}")
-        logger.info(f"  Student Max Num Seqs: {student_max_num_seqs}")
-        logger.info(f"  Reward Micro Batch Size: {reward_micro_batch_size}")
-        logger.info(f"  GPU Batch Size: {gpu_batch_size}")
-
         # Initialize Student Reward client based on backend
         if reward_backend == "sglang":
-            logger.info(f"[CombinedRewardComputer] Using SGLang student reward (FAST mode)")
-            logger.info(f"  SGLang GPU Memory Utilization: {sglang_gpu_memory_utilization}")
             from verl.experimental.reward.cot_rewriter.sglang_student_reward import SGLangStudentRewardClient
             self.student_client = SGLangStudentRewardClient(
                 model_path=student_model_path,
@@ -107,10 +97,6 @@ class CombinedRewardComputer:
                 devices=student_devices,
             )
         else:
-            logger.info(f"[CombinedRewardComputer] Using vLLM student reward (FAST mode)")
-            logger.info(f"  vLLM GPU Memory Utilization: {vllm_gpu_memory_utilization}")
-            logger.info(f"  Student Tensor Parallel Size: {student_tensor_parallel_size}")
-
             from verl.experimental.reward.cot_rewriter.student_reward import VLLMStudentRewardClient
             self.student_client = VLLMStudentRewardClient(
                 model_path=student_model_path,
@@ -128,7 +114,6 @@ class CombinedRewardComputer:
                 raise ValueError("fsf_model_path must be provided when use_logic_reward=True")
 
             if reward_backend == "sglang":
-                logger.info(f"[CombinedRewardComputer] Using SGLang FSF Judge")
                 from verl.experimental.reward.cot_rewriter.sglang_fsf_reward import SGLangFSFJudge
                 self.fsf_judge = SGLangFSFJudge(
                     model_path=fsf_model_path,
@@ -136,7 +121,6 @@ class CombinedRewardComputer:
                     gpu_memory_utilization=sglang_gpu_memory_utilization,
                 )
             else:
-                logger.info(f"[CombinedRewardComputer] Using HuggingFace FSF Judge")
                 from verl.experimental.reward.cot_rewriter.fsf_reward import HFFSFJudge
                 self.fsf_judge = HFFSFJudge(
                     model_path=fsf_model_path,
@@ -171,13 +155,10 @@ class CombinedRewardComputer:
             Dictionary with reward info and extra metrics
         """
         batch_size = len(questions)
-        logger.info(f"[REWARD] Computing reward for batch_size={batch_size}")
 
         # Compute cognitive reward
         # R_cog = answer_log_prob(Q, Rewritten_CoT, A) - answer_log_prob(Q, Original_CoT, A)
         # 其中 answer_log_prob = avg(token_log_probs) + alpha_cog * min(token_log_probs)
-        logger.info(f"[REWARD] Computing cognitive reward with vLLM...")
-        logger.info(f"[REWARD] Formula: R_cog = (avg + {self.alpha_cog}*min)(rewritten) - (avg + {self.alpha_cog}*min)(original)")
         cog_result = self.student_client.compute_cognitive_reward_batch(
             questions=questions,
             rewrite_cots=rewrite_cots,
@@ -185,7 +166,6 @@ class CombinedRewardComputer:
             original_cots=original_cots,
             alpha_cog=self.alpha_cog,
         )
-        logger.info(f"[REWARD] Cognitive reward computed")
 
         # 获取计算结果
         r_cog = cog_result["rewards"]
@@ -194,12 +174,6 @@ class CombinedRewardComputer:
         token_log_probs = cog_result["rewrite_token_log_probs"]
         token_ids = cog_result["rewrite_token_ids"]
 
-        # Log statistics
-        valid_rewards = [r for r in r_cog if abs(r) < 99.0]
-        if valid_rewards:
-            logger.info(f"[REWARD] R_cog stats: mean={sum(valid_rewards)/len(valid_rewards):.4f}, "
-                       f"min={min(valid_rewards):.4f}, max={max(valid_rewards):.4f}")
-
         # Compute logic reward (if enabled)
         if (
             self.use_logic_reward
@@ -207,7 +181,6 @@ class CombinedRewardComputer:
             and original_cots
             and all(c for c in original_cots)
         ):
-            logger.info(f"[REWARD] Computing logic reward...")
             logic_result = self.fsf_judge.compute_logic_reward(
                 original_cots=original_cots,
                 rewrite_cots=rewrite_cots,
@@ -215,17 +188,13 @@ class CombinedRewardComputer:
             r_logic = logic_result["logic_rewards"]
             original_fsfs = logic_result["original_fsfs"]
             rewrite_fsfs = logic_result["rewrite_fsfs"]
-            logger.info(f"[REWARD] Logic reward computed")
         else:
-            logger.info(f"[REWARD] Skipping logic reward (disabled or no original cots)")
             r_logic = [0.0] * batch_size
             original_fsfs = [0.0] * batch_size
             rewrite_fsfs = [0.0] * batch_size
 
         # Combine rewards: R = R_cog + lambda * R_logic
-        logger.info(f"[REWARD] Combining rewards with lambda_logic={self.lambda_logic}")
         total_rewards = [c + self.lambda_logic * l for c, l in zip(r_cog, r_logic)]
-        logger.info(f"[REWARD] Reward computation completed. Returning results...")
 
         return {
             "cognitive_rewards": r_cog,
@@ -383,10 +352,8 @@ def compute_cot_rewriter_reward(
     use_flat_structure = not reward_model_key or reward_model_key == "null"
 
     batch_size = data.batch["responses"].shape[0]
-    logger.info(f"[REWARD_FN] compute_cot_rewriter_reward called with batch_size={batch_size}")
 
     # Decode prompts and responses
-    logger.info(f"[REWARD_FN] Decoding prompts and responses...")
     prompts = tokenizer.batch_decode(
         data.batch["prompts"],
         skip_special_tokens=True,
@@ -395,7 +362,6 @@ def compute_cot_rewriter_reward(
         data.batch["responses"],
         skip_special_tokens=True,
     )
-    logger.info(f"[REWARD_FN] Decoded {len(prompts)} prompts and {len(rewrite_cots)} responses")
 
     # Detect truncated responses
     # A response is considered truncated if:
@@ -438,12 +404,7 @@ def compute_cot_rewriter_reward(
         if is_truncated:
             truncated_indices.add(i)
 
-    if truncated_indices:
-        logger.warning(f"[REWARD_FN] Detected {len(truncated_indices)} truncated responses (will get reward={truncation_penalty})")
-        logger.info(f"[REWARD_FN] Truncated indices: {sorted(truncated_indices)[:10]}{'...' if len(truncated_indices) > 10 else ''}")
-
     # Extract metadata from non_tensor_batch
-    logger.info(f"[REWARD_FN] Extracting metadata from non_tensor_batch...")
     questions = []
     answers = []
     original_cots = []
@@ -495,13 +456,6 @@ def compute_cot_rewriter_reward(
             question = prompts[i]
         questions.append(question)
 
-    logger.info(f"[REWARD_FN] Extracted {len(questions)} questions, {len(answers)} answers, {len(original_cots)} original_cots")
-
-    non_empty_cots = sum(1 for c in original_cots if c)
-    logger.info(f"[REWARD_FN] Non-empty original_cots: {non_empty_cots}/{len(original_cots)}")
-    if non_empty_cots == 0:
-        logger.warning(f"[REWARD_FN] WARNING: No original_cots found!")
-
     print_samples = kwargs.get("print_samples", 2)
 
     # Filter out truncated samples for reward computation
@@ -509,10 +463,6 @@ def compute_cot_rewriter_reward(
 
     if non_truncated_indices:
         # Get or create reward computer only if there are non-truncated samples
-        logger.info(f"[REWARD_FN] Getting reward computer (backend={reward_backend})...")
-        logger.info(f"[REWARD_FN] Computing rewards for {len(non_truncated_indices)} non-truncated samples (skipping {len(truncated_indices)} truncated)")
-        import time
-        computer_start = time.time()
         reward_computer = get_reward_computer(
             student_model_path=student_model_path,
             fsf_model_path=fsf_model_path,
@@ -531,8 +481,6 @@ def compute_cot_rewriter_reward(
             student_max_num_seqs=student_max_num_seqs,
         student_tensor_parallel_size=student_tensor_parallel_size,
         )
-        computer_init_time = time.time() - computer_start
-        logger.info(f"[REWARD_FN] get_reward_computer completed in {computer_init_time:.2f}s")
 
         # Filter data for non-truncated samples
         filtered_questions = [questions[i] for i in non_truncated_indices]
@@ -541,18 +489,13 @@ def compute_cot_rewriter_reward(
         filtered_answers = [answers[i] for i in non_truncated_indices]
 
         # Compute rewards only for non-truncated samples
-        logger.info(f"[REWARD_FN] Calling reward_computer.compute_reward() for {len(filtered_questions)} questions...")
-        compute_start = time.time()
         filtered_result = reward_computer.compute_reward(
             questions=filtered_questions,
             original_cots=filtered_original_cots,
             rewrite_cots=filtered_rewrite_cots,
             answers=filtered_answers,
         )
-        compute_elapsed = time.time() - compute_start
-        logger.info(f"[REWARD_FN] compute_reward completed in {compute_elapsed:.2f}s for {len(non_truncated_indices)} samples")
     else:
-        logger.warning(f"[REWARD_FN] All {batch_size} samples are truncated! Skipping Student model computation.")
         filtered_result = None
 
     # Build full result arrays with truncation penalties
@@ -583,12 +526,7 @@ def compute_cot_rewriter_reward(
             result["extra_info"]["original_fsfs"][i] = filtered_result["extra_info"]["original_fsfs"][j]
             result["extra_info"]["rewrite_fsfs"][i] = filtered_result["extra_info"]["rewrite_fsfs"][j]
 
-    # Log truncation statistics
-    if truncated_indices:
-        logger.info(f"[REWARD_FN] Truncation summary: {len(truncated_indices)}/{batch_size} samples truncated, assigned reward={truncation_penalty}")
-
     # Convert to tensor
-    logger.info(f"[REWARD_FN] Converting rewards to tensors...")
     device = data.batch["responses"].device
     total_rewards = torch.tensor(
         result["total_rewards"],
@@ -626,24 +564,6 @@ def compute_cot_rewriter_reward(
     for i in range(batch_size):
         token_level_rewards[i, seq_lengths[i]] = total_rewards[i]
 
-    # Print rollout samples with rewards for review
-    if print_samples > 0:
-        logger.info(f"\n{'='*60}")
-        logger.info(f"[ROLLOUT OUTPUT WITH REWARDS] Showing first {min(print_samples, batch_size)} samples:")
-        logger.info(f"[TRUNCATION STATS] {len(truncated_indices)}/{batch_size} truncated")
-        logger.info(f"{'='*60}")
-        for i in range(min(print_samples, batch_size)):
-            truncated_marker = " [TRUNCATED]" if i in truncated_indices else ""
-            logger.info(f"\n[Sample {i}]{truncated_marker}")
-            logger.info(f"[question] {prompts[i][:500]}..." if len(prompts[i]) > 500 else f"[question] {prompts[i]}")
-            logger.info(f"[rollout_output] {rewrite_cots[i][:1000]}..." if len(rewrite_cots[i]) > 1000 else f"[rollout_output] {rewrite_cots[i]}")
-            if i < len(original_cots) and original_cots[i]:
-                logger.info(f"[old_cot] {original_cots[i][:500]}..." if len(original_cots[i]) > 500 else f"[old_cot] {original_cots[i]}")
-            logger.info(f"[total_reward] {result['total_rewards'][i]}{' (truncation penalty)' if i in truncated_indices else ''}")
-            logger.info(f"[cognitive_reward] {result['cognitive_rewards'][i]}")
-            logger.info("-" * 50)
-        logger.info(f"{'='*60}\n")
-
     # Build truncated mask (per-sample, can be chunked by VERL)
     truncated_mask = [1.0 if i in truncated_indices else 0.0 for i in range(batch_size)]
 
@@ -663,11 +583,8 @@ def compute_cot_rewriter_reward(
         },
     }
 
-    logger.info(f"[REWARD_FN] compute_cot_rewriter_reward completed")
-
     # Cleanup Student vLLM to release GPU memory for Actor vLLM reload
     if cleanup_after_compute:
-        logger.info(f"[REWARD_FN] Cleaning up Student vLLM to release GPU memory...")
         cleanup_reward_computer()
 
     return reward_result

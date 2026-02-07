@@ -125,7 +125,6 @@ class FSDPVLLMShardingManager(BaseShardingManager):
 
     @GPUMemoryLogger(role="fsdp vllm sharding_manager", logger=logger)
     def __enter__(self):
-        print(f"[FSDPVLLMShardingManager] __enter__ called, free_cache_engine={self.rollout_config.free_cache_engine}, offload_param={self.offload_param}", flush=True)
         def __collect_lora_params() -> OrderedDict:
             """
             collect lora params or full params if base model is not ready in vllm
@@ -196,9 +195,7 @@ class FSDPVLLMShardingManager(BaseShardingManager):
 
             log_gpu_memory_usage("Before state_dict() in sharding manager memory", logger=logger)
             if self.offload_param:
-                print(f"[FSDPVLLMShardingManager] Loading FSDP model to GPU (offload_param=True)...", flush=True)
                 load_fsdp_model_to_gpu(self.module)
-                print(f"[FSDPVLLMShardingManager] FSDP model loaded to GPU", flush=True)
 
             peft_config = None
             peft_model = getattr(self.module, "_fsdp_wrapped_module", self.module)
@@ -238,31 +235,24 @@ class FSDPVLLMShardingManager(BaseShardingManager):
             log_gpu_memory_usage("After state_dict() in sharding manager memory", logger=logger)
 
             if self.rollout_config.free_cache_engine:
-                print("[FSDPVLLMShardingManager] Waking up vLLM to load weights...", flush=True)
                 if "tags" in inspect.signature(self.inference_engine.wake_up).parameters:
                     self.inference_engine.wake_up(tags=["weights"])
-                    print("[FSDPVLLMShardingManager] wake_up(tags=['weights']) completed", flush=True)
                 else:
                     self.inference_engine.wake_up()
-                    print("[FSDPVLLMShardingManager] wake_up() completed", flush=True)
 
             # update model params
             self.update_params(params, peft_config=peft_config)
             log_gpu_memory_usage("After sync model weights in sharding manager", logger=logger)
             del params
             if self.offload_param:
-                print(f"[FSDPVLLMShardingManager] Offloading FSDP model to CPU (offload_param=True)...", flush=True)
                 offload_fsdp_model_to_cpu(self.module)
-                print(f"[FSDPVLLMShardingManager] FSDP model offloaded to CPU", flush=True)
             get_torch_device().empty_cache()
 
             if (
                 self.rollout_config.free_cache_engine
                 and "tags" in inspect.signature(self.inference_engine.wake_up).parameters
             ):
-                print("[FSDPVLLMShardingManager] Waking up vLLM KV cache...", flush=True)
                 self.inference_engine.wake_up(tags=["kv_cache"])
-                print("[FSDPVLLMShardingManager] wake_up(tags=['kv_cache']) completed", flush=True)
 
             log_gpu_memory_usage("After del state_dict and empty_cache in sharding manager", logger=logger)
 
@@ -299,57 +289,17 @@ class FSDPVLLMShardingManager(BaseShardingManager):
             except Exception as e:
                 return f"nvidia-smi unavailable: {e}"
 
-        print(f"[FSDPVLLMShardingManager] __exit__ called, free_cache_engine={self.rollout_config.free_cache_engine}", flush=True)
-        print(f"[FSDPVLLMShardingManager] inference_engine type: {type(self.inference_engine)}", flush=True)
-
         if self.rollout_config.free_cache_engine:
-            # Log GPU memory before sleep - both PyTorch and nvidia-smi
-            if torch.cuda.is_available():
-                current_device = torch.cuda.current_device()
-                allocated_before = torch.cuda.memory_allocated() / 1024**3
-                reserved_before = torch.cuda.memory_reserved() / 1024**3
-                print(f"[FSDPVLLMShardingManager] Current CUDA device: {current_device}", flush=True)
-                print(f"[FSDPVLLMShardingManager] PyTorch GPU memory BEFORE sleep: allocated={allocated_before:.2f}GB, reserved={reserved_before:.2f}GB", flush=True)
-                print(f"[FSDPVLLMShardingManager] nvidia-smi BEFORE sleep:\n{get_nvidia_smi_memory()}", flush=True)
-
-            # Use level=2 to fully release GPU memory (discard weights + KV cache)
-            # This is better for RLHF scenarios where weights will be updated anyway
-            # level=1 only offloads to CPU, level=2 completely discards weights
             sleep_level = self.rollout_config.get('sleep_level', 2)
-            print(f"[FSDPVLLMShardingManager] Calling sleep(level={sleep_level}) to release GPU memory...", flush=True)
 
-            # Check if inference_engine has sleep method
             if hasattr(self.inference_engine, 'sleep'):
-                print(f"[FSDPVLLMShardingManager] inference_engine.sleep method found", flush=True)
                 self.inference_engine.sleep(level=sleep_level)
-            else:
-                print(f"[FSDPVLLMShardingManager] WARNING: inference_engine has no sleep method!", flush=True)
-            print(f"[FSDPVLLMShardingManager] sleep(level={sleep_level}) completed", flush=True)
 
-            # Force garbage collection
             gc.collect()
-
-            # Wait for memory to be released and clear cache
             import time
-            time.sleep(2)  # Give vLLM more time to release memory
+            time.sleep(2)
             get_torch_device().empty_cache()
             gc.collect()
-
-            # Log GPU memory after sleep - both PyTorch and nvidia-smi
-            if torch.cuda.is_available():
-                allocated_after = torch.cuda.memory_allocated() / 1024**3
-                reserved_after = torch.cuda.memory_reserved() / 1024**3
-                print(f"[FSDPVLLMShardingManager] PyTorch GPU memory AFTER sleep: allocated={allocated_after:.2f}GB, reserved={reserved_after:.2f}GB", flush=True)
-                nvidia_after = get_nvidia_smi_memory()
-                print(f"[FSDPVLLMShardingManager] nvidia-smi AFTER sleep:\n{nvidia_after}", flush=True)
-
-                # Summary
-                print(f"[FSDPVLLMShardingManager] ========== SLEEP SUMMARY ==========", flush=True)
-                print(f"[FSDPVLLMShardingManager] PyTorch reports: {allocated_before:.2f}GB -> {allocated_after:.2f}GB (released {allocated_before - allocated_after:.2f}GB)", flush=True)
-                print(f"[FSDPVLLMShardingManager] NOTE: PyTorch may show 0GB released because vLLM uses cumem allocator, not PyTorch allocator", flush=True)
-                print(f"[FSDPVLLMShardingManager] Check nvidia-smi output above to verify actual GPU memory release", flush=True)
-                print(f"[FSDPVLLMShardingManager] If nvidia-smi shows significant drop (e.g., 52GB -> 5GB), sleep IS working!", flush=True)
-                print(f"[FSDPVLLMShardingManager] ===================================", flush=True)
 
         self.module.train()
 

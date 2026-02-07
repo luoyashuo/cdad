@@ -60,8 +60,12 @@ from verl.utils.metric import (
 from verl.utils.seqlen_balancing import get_seqlen_balanced_partitions, log_seqlen_unbalance
 from verl.utils.torch_functional import masked_mean
 from verl.utils.tracking import ValidationGenerationsLogger
+from verl.experimental.reward.cot_rewriter.training_logger import get_logger as get_training_logger
 
 WorkerType = type[Worker]
+
+# Training logger for key points (rollout, reward, backward)
+training_logger = get_training_logger("trainer")
 
 
 class Role(Enum):
@@ -1187,6 +1191,9 @@ class RayPPOTrainer:
                 if "agent_name" in batch.non_tensor_batch:
                     non_tensor_batch_keys_to_pop.append("agent_name")
 
+                # Save prompts before pop for logging
+                prompts_for_logging = [batch.batch["input_ids"][i] for i in range(len(batch.batch["input_ids"]))]
+                
                 gen_batch = batch.pop(
                     batch_keys=batch_keys_to_pop,
                     non_tensor_batch_keys=non_tensor_batch_keys_to_pop,
@@ -1201,13 +1208,30 @@ class RayPPOTrainer:
                 with marked_timer("step", timing_raw):
                     # generate a batch
                     with marked_timer("gen", timing_raw, color="red"):
-                        print(f"[RayTrainer] step={self.global_steps} BEFORE generate_sequences, async_mode={self.async_rollout_mode}", flush=True)
+                        # === ROLLOUT START ===
+                        training_logger.log_gpu_memory(f"[STEP_{self.global_steps}][ROLLOUT_START]")
+                        training_logger.log_prompt_stats(
+                            prompts=prompts_for_logging,
+                            prefix=f"[STEP_{self.global_steps}][ROLLOUT]",
+                            sample_count=2,
+                            max_tokens_to_print=200,
+                            tokenizer=self.tokenizer
+                        )
+                        
                         if not self.async_rollout_mode:
-                            print(f"[RayTrainer] Calling actor_rollout_wg.generate_sequences...", flush=True)
                             gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch)
-                            print(f"[RayTrainer] generate_sequences DONE", flush=True)
                         else:
                             gen_batch_output = self.async_rollout_manager.generate_sequences(gen_batch)
+                        
+                        # === ROLLOUT END ===
+                        training_logger.log_gpu_memory(f"[STEP_{self.global_steps}][ROLLOUT_END]")
+                        training_logger.log_response_samples(
+                            responses=[gen_batch_output.batch["responses"][i] for i in range(len(gen_batch_output.batch["responses"]))],
+                            prefix=f"[STEP_{self.global_steps}][ROLLOUT]",
+                            sample_count=2,
+                            max_tokens_to_print=200,
+                            tokenizer=self.tokenizer
+                        )
                         timing_raw.update(gen_batch_output.meta_info["timing"])
                         gen_batch_output.meta_info.pop("timing", None)
 
@@ -1250,6 +1274,21 @@ class RayPPOTrainer:
                     batch.meta_info["global_token_num"] = torch.sum(batch.batch["attention_mask"], dim=-1).tolist()
 
                     with marked_timer("reward", timing_raw, color="yellow"):
+                        # === REWARD START ===
+                        training_logger.log_gpu_memory(f"[STEP_{self.global_steps}][REWARD_START]")
+                        training_logger.log_data_stats(
+                            batch, 
+                            prefix=f"[STEP_{self.global_steps}][REWARD]",
+                            tokenizer=self.tokenizer,
+                            field="prompts"
+                        )
+                        training_logger.log_response_preview(
+                            batch.batch["responses"],
+                            prefix=f"[STEP_{self.global_steps}][REWARD]",
+                            tokenizer=self.tokenizer,
+                            num_tokens=10
+                        )
+                        
                         # compute reward model score
                         if self.use_rm:
                             reward_tensor = self.rm_wg.compute_rm_score(batch)
@@ -1259,6 +1298,15 @@ class RayPPOTrainer:
                             future_reward = compute_reward_async.remote(data=batch, reward_fn=self.reward_fn)
                         else:
                             reward_tensor, reward_extra_infos_dict = compute_reward(batch, self.reward_fn)
+                        
+                        # === REWARD END ===
+                        training_logger.log_gpu_memory(f"[STEP_{self.global_steps}][REWARD_END]")
+                        training_logger.log_data_stats(
+                            batch,
+                            prefix=f"[STEP_{self.global_steps}][REWARD_POST]",
+                            tokenizer=self.tokenizer,
+                            field="prompts"
+                        )
 
                     # recompute old_log_probs
                     with marked_timer("old_log_prob", timing_raw, color="blue"):
@@ -1355,10 +1403,17 @@ class RayPPOTrainer:
 
                     # implement critic warmup
                     if self.config.trainer.critic_warmup <= self.global_steps:
+                        # === BACKWARD START ===
+                        training_logger.log_gpu_memory(f"[STEP_{self.global_steps}][BACKWARD_START]")
+                        
                         # update actor
                         with marked_timer("update_actor", timing_raw, color="red"):
                             batch.meta_info["multi_turn"] = self.config.actor_rollout_ref.rollout.multi_turn.enable
                             actor_output = self.actor_rollout_wg.update_actor(batch)
+                        
+                        # === BACKWARD END ===
+                        training_logger.log_gpu_memory(f"[STEP_{self.global_steps}][BACKWARD_END]")
+                        
                         actor_output_metrics = reduce_metrics(actor_output.meta_info["metrics"])
                         metrics.update(actor_output_metrics)
 

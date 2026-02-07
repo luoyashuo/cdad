@@ -1,34 +1,57 @@
 """
-Unified Logging Configuration for CoT Rewriter
+Logging Configuration for CoT Rewriter
 
-Uses loguru for structured logging with file name and line numbers.
+Uses standard Python logging library.
 Compatible with Ray distributed environment.
+
+This module is kept for backward compatibility.
+New code should use training_logger.py instead.
 """
 
-import sys
+import logging
 import os
-from loguru import logger
+import sys
 
-# Remove default handler
-logger.remove()
 
-# Configure loguru with file name and line number
-# Format: timestamp | level | file:line | message
-log_format = (
-    "<green>{time:YYYY-MM-DD HH:mm:ss}</green> | "
-    "<level>{level: <8}</level> | "
-    "<cyan>{file}:{line}</cyan> | "
-    "<level>{message}</level>"
-)
+def get_logger(name: str = "cot_rewriter") -> logging.Logger:
+    """Get or create a logger instance.
+    
+    Args:
+        name: Logger name
+        
+    Returns:
+        Configured logger instance
+    """
+    logger = logging.getLogger(name)
+    
+    # Set level
+    level = os.getenv("VERL_LOGGING_LEVEL", "INFO")
+    logger.setLevel(getattr(logging, level.upper()))
+    
+    # Remove existing handlers to avoid duplicates
+    logger.handlers = []
+    
+    # Add handler if not already added
+    if not logger.handlers:
+        handler = logging.StreamHandler(sys.stderr)
+        handler.setLevel(logger.level)
+        
+        # Format: timestamp | level | name | message
+        formatter = logging.Formatter(
+            "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S"
+        )
+        handler.setFormatter(formatter)
+        logger.addHandler(handler)
+    
+    # Prevent propagation to avoid duplicate logs
+    logger.propagate = False
+    
+    return logger
 
-# Add stderr handler with custom format
-logger.add(
-    sys.stderr,
-    format=log_format,
-    level=os.getenv("VERL_LOGGING_LEVEL", "INFO"),
-    colorize=True,
-    enqueue=True,  # Thread-safe, important for Ray
-)
 
-# Export logger for use in other modules
-__all__ = ["logger"]
+# Default logger for backward compatibility
+logger = get_logger("cot_rewriter")
+
+# Export for use in other modules
+__all__ = ["logger", "get_logger"]

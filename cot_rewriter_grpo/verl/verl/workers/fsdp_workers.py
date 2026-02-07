@@ -166,8 +166,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         if self._is_actor:
             self._is_offload_param = self.config.actor.fsdp_config.get("param_offload", False)
             self._is_offload_optimizer = self.config.actor.fsdp_config.get("optimizer_offload", False)
-            print(f"[FSDPWorker] Actor offload config: param_offload={self._is_offload_param}, optimizer_offload={self._is_offload_optimizer}", flush=True)
-            print(f"[FSDPWorker] fsdp_config: {dict(self.config.actor.fsdp_config)}", flush=True)
+
         elif self._is_ref:
             # TODO: it seems that manual offload is slowly than FSDP offload
             self._is_offload_param = self.config.ref.fsdp_config.get("param_offload", False)
@@ -224,7 +223,11 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
     ):
         from torch import optim
         from torch.distributed.fsdp import CPUOffload, MixedPrecision
-        from transformers import AutoConfig, AutoModelForCausalLM, AutoModelForVision2Seq
+        from transformers import AutoConfig, AutoModelForCausalLM
+        try:
+            from transformers import AutoModelForVision2Seq
+        except ImportError:
+            from transformers import AutoModelForImageTextToText as AutoModelForVision2Seq
 
         from verl.utils.model import get_generation_config, print_model_size, update_model_config
         from verl.utils.torch_dtypes import PrecisionType
@@ -735,23 +738,16 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         }
         prompts.meta_info.update(meta_info)
         timing_generate = {}
-        print(f"[FSDPWorker] generate_sequences: entering rollout_sharding_manager context", flush=True)
         with self.rollout_sharding_manager:
-            print(f"[FSDPWorker] generate_sequences: inside context, before preprocess_data", flush=True)
             log_gpu_memory_usage("After entering rollout sharding manager", logger=logger)
 
             prompts = self.rollout_sharding_manager.preprocess_data(prompts)
-            print(f"[FSDPWorker] generate_sequences: after preprocess_data, before rollout.generate_sequences", flush=True)
             with simple_timer("generate_sequences", timing_generate):
                 output = self.rollout.generate_sequences(prompts=prompts)
-            print(f"[FSDPWorker] generate_sequences: after rollout.generate_sequences", flush=True)
 
             log_gpu_memory_usage("After rollout generation", logger=logger)
 
             output = self.rollout_sharding_manager.postprocess_data(output)
-            print(f"[FSDPWorker] generate_sequences: after postprocess_data", flush=True)
-
-        print(f"[FSDPWorker] generate_sequences: exited rollout_sharding_manager context", flush=True)
         timing_generate.update(self.rollout_sharding_manager.timing)
         # We calculate the average timing across all ranks
         # to make sure meta_info["timing"] is the same
@@ -769,26 +765,6 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         # when is_lora is True, we use the actor without lora applied to calculate the log_prob
         # which is mostly used for ref log_prob calculation
         import subprocess
-
-        # Log GPU memory at the start of compute_log_prob
-        print(f"[FSDPWorker] compute_log_prob: starting...", flush=True)
-        try:
-            result = subprocess.run(
-                ['nvidia-smi', '--query-gpu=index,memory.used,memory.total', '--format=csv,noheader,nounits'],
-                capture_output=True, text=True, timeout=5
-            )
-            lines = result.stdout.strip().split('\n')
-            print(f"[FSDPWorker] compute_log_prob: nvidia-smi at START:", flush=True)
-            for line in lines:
-                parts = line.split(',')
-                if len(parts) >= 3:
-                    gpu_idx = parts[0].strip()
-                    used_mb = int(parts[1].strip())
-                    total_mb = int(parts[2].strip())
-                    used_gb = used_mb / 1024
-                    print(f"[FSDPWorker]   GPU {gpu_idx}: {used_gb:.1f}GB / {total_mb/1024:.1f}GB ({used_mb}MB used)", flush=True)
-        except Exception as e:
-            print(f"[FSDPWorker] compute_log_prob: nvidia-smi error: {e}", flush=True)
 
         assert self._is_actor
         if self._is_offload_param:

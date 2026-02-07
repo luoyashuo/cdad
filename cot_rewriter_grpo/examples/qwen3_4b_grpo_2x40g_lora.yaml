@@ -44,8 +44,8 @@ trainer:
   logger: ["swanlab","console"]
 
   # ========== Rollout Data Logging (for human review) ==========
-  rollout_data_dir: /data-share/yeesuanAI08/lihaitao/luoys/checkpoints/cdad/${trainer.project_name}/${trainer.experiment_name}/rollout_data
-  validation_data_dir: /data-share/yeesuanAI08/lihaitao/luoys/checkpoints/cdad/${trainer.project_name}/${trainer.experiment_name}/validation_data
+  rollout_data_dir: /data-share/yeesuanAI08/lihaitao/luoys/checkpoints/cdad/${trainer.experiment_name}/rollout_data
+  validation_data_dir: /data-share/yeesuanAI08/lihaitao/luoys/checkpoints/cdad/${trainer.experiment_name}/validation_data
 
 data:
   # Use original JSONL directly (field names will be auto-mapped by custom reward function):
@@ -55,8 +55,8 @@ data:
   # n=4 最保险配置
   # Batch sizes for training
   train_batch_size: 1
-  val_batch_size: 2
-  gen_batch_size: 2
+  val_batch_size: 1
+  gen_batch_size: 1
   max_prompt_length: 5500
   max_response_length: 5500  # 从 6700 降低到 5500，减少显存占用
   return_raw_chat: true
@@ -107,6 +107,11 @@ actor_rollout_ref:
     ppo_mini_batch_size: 1  # 必须 <= train_batch_size
     # 降低 micro batch size 避免 OOM
     ppo_micro_batch_size_per_gpu: 1
+    # KL Loss 配置（推荐用于 GRPO，替代 use_kl_in_reward）
+    use_kl_in_reward: false
+    use_kl_loss: false
+    kl_loss_coef: 0.001
+    kl_loss_type: low_var_kl
 
     # FSDP 配置 - 关键：启用 param_offload 在 reward 计算时释放 GPU 显存
     # 这样 Student vLLM 才能在同一个 GPU 上运行
@@ -127,9 +132,8 @@ actor_rollout_ref:
     # 【TP配置】启用 Tensor Parallelism=2，2张卡作为一个资源组
     # 模型权重分片到2张卡，每张卡存一半参数，降低单卡显存压力
     tensor_model_parallel_size: 2
-    # 降低 vLLM 显存占用，为 actor update 预留显存
     # 0.65 确保 KV cache 足够，同时为梯度更新预留空间
-    gpu_memory_utilization: 0.45  # 从 0.65 降低到 0.45，为 backward 预留更多显存
+    gpu_memory_utilization: 0.65  # 从 0.65 降低到 0.45，为 backward 预留更多显存
     dtype: bfloat16
     # CRITICAL: 使用 auto 让 vLLM 直接从磁盘加载基础模型权重
     # 这样 base_sync_done=True，只需同步 LoRA 参数而非整个模型，避免 OOM
@@ -137,11 +141,8 @@ actor_rollout_ref:
     # CRITICAL: 启用 layered_summon，只同步 LoRA 参数而非整个模型
     layered_summon: true
     log_prob_micro_batch_size_per_gpu: 1  # 降低避免 OOM
-    # 【注意】TP=2时，world_size=2，n必须能被TP整除
-    # n=4 表示每张TP组处理4个样本（总共还是4个，因为TP组内共享）
-    # 如果OOM仍发生，需要进一步降低n或启用ZeRO-3
     n: 4
-    temperature: 0.7
+    temperature: 1.0
     top_p: 0.95
     prompt_length: 5500
     response_length: 5500  # 同步降低
@@ -171,11 +172,11 @@ algorithm:
   norm_adv_by_std_in_grpo: true
   gamma: 1.0
   lam: 1.0
-  use_kl_in_reward: false
+  use_kl_in_reward: false  # 关闭 reward KL，改用 actor KL loss
   kl_penalty: kl
   kl_ctrl:
     type: fixed
-    kl_coef: 0.02
+    kl_coef: 0.0  # 设为 0，因为 KL loss 在 actor 中控制
 
 # ============ Critic Configuration (GRPO doesn't need) ============
 critic:
@@ -208,14 +209,14 @@ custom_reward_function:
     student_model_path: /data-share/LLM/Qwen3-1.7B
     # FSF Judge Model (for logic reward)
     fsf_model_path: /data-share/yeesuanAI08/lihaitao/luoys/checkpoints/cdad/fsf_judge/qwen3_8b_fsf_judge/checkpoint-12000
-    device: cuda:0
+    device: cuda:4
     allow_cpu: true
     # Enable offload: Reward Model is loaded to GPU only during computation, then offloaded to CPU
     # This frees up GPU memory for training backward pass
     enable_offload: true
     offload_device: cpu
 
-    lambda_logic: 0.5
+    lambda_logic: 0.3
     use_logic_reward: false
     # Alpha for cognitive reward formula: R_cog = avg(log P) + alpha * min(log P)
     alpha: 0.01
@@ -224,26 +225,16 @@ custom_reward_function:
     # Reward 后端选择: vllm 或 sglang
     reward_backend: vllm
     # vLLM GPU memory utilization for Student Model
-    # 【关键】Student vLLM OOM，进一步降低显存占用
-    # 降低到 0.15，让 Student vLLM 使用更少显存
-    vllm_gpu_memory_utilization: 0.15
+    vllm_gpu_memory_utilization: 0.2
     # 【关键】降低max_model_len减少KV cache，避免logprobs计算OOM
-    student_max_model_len: 7000
-    # Student vLLM micro batch size - 降低此值可避免 prompt_logprobs 计算时 OOM
-    # 每个 micro-batch 处理的 prompt 数量，越小越安全但越慢
-    # 保持micro_batch_size=1，但降低max_model_len更关键
+    student_max_model_len: 10000
     student_micro_batch_size: 1
     # 【关键】限制vLLM并发序列数，降低logprobs计算时的显存峰值
     student_max_num_seqs: 1
     # 【关键】Student vLLM Tensor Parallelism 配置
-    # 设为 2 表示跨 2 张卡分片模型，每张卡显存占用减半（适合 OOM 场景）
-    # 设为 1 表示每张卡独立运行（默认）
     student_tensor_parallel_size: 2
     # ===== Student Model GPU 配置 =====
-    # 使用物理 GPU 编号（不是 CUDA_VISIBLE_DEVICES 映射后的索引）
-    # 必须与启动脚本中的 ALL_GPUS 一致
-    # 例如：ALL_GPUS="0,5" → student_devices: ["cuda:0", "cuda:5"]
-    student_devices: ["cuda:0", "cuda:5"]
+    student_devices: ["cuda:4", "cuda:5"]
     # 计算完成后清理 Student vLLM 以释放 GPU 显存给 Actor vLLM 重载
     cleanup_after_compute: true
     # 截断惩罚：被截断的 response 直接返回此 reward，不调用 Student model
@@ -285,7 +276,7 @@ ray_kwargs:
         RAY_DEDUP_LOGS: "1"
         RAY_DASHBOARD_HOST: ""
         RAY_enable_dashboard: "0"
-        CUDA_VISIBLE_DEVICES: "0,5"
+        CUDA_VISIBLE_DEVICES: "4,5"
         # CRITICAL: Prevent Ray from overriding CUDA_VISIBLE_DEVICES when num_gpus=0
         # This allows TaskRunner to access GPUs for reward computation even without
         # pre-allocated GPU resources (which would cause resource conflicts with training workers)

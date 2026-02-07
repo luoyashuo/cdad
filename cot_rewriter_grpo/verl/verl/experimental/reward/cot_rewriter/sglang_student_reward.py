@@ -65,11 +65,7 @@ class SGLangWorkerActor:
             except Exception as e:
                 return f"nvidia-smi error: {e}"
 
-        print(f"[SGLangWorker-{gpu_id}] ========== GPU MEMORY CHECK ==========", flush=True)
-        mem_before = get_nvidia_smi_memory_for_gpu(gpu_id)
-        print(f"[SGLangWorker-{gpu_id}] BEFORE loading Student SGLang: {mem_before}", flush=True)
-        print(f"[SGLangWorker-{gpu_id}] gpu_memory_utilization={gpu_memory_utilization}, max_model_len={max_model_len}", flush=True)
-        print(f"[SGLangWorker-{gpu_id}] Initializing SGLang Engine on GPU {gpu_id}...", flush=True)
+        # Initialize SGLang Engine
 
         self.gpu_id = gpu_id
         self._get_nvidia_smi = get_nvidia_smi_memory_for_gpu
@@ -88,10 +84,7 @@ class SGLangWorkerActor:
             trust_remote_code=True,
         )
 
-        print(f"[SGLangWorker-{gpu_id}] SGLang Engine initialized successfully", flush=True)
-        print(f"[SGLangWorker-{gpu_id}] nvidia-smi AFTER loading Student SGLang:", flush=True)
-        print(f"[SGLangWorker-{gpu_id}] {get_nvidia_smi_memory_for_gpu(gpu_id)}", flush=True)
-        print(f"[SGLangWorker-{gpu_id}] ========================================", flush=True)
+        pass
 
     def compute_logprobs(
         self,
@@ -117,11 +110,6 @@ class SGLangWorkerActor:
             temperature=0,
         )
 
-        # Log GPU memory before generation
-        print(f"[SGLangWorker-{self.gpu_id}] Processing {len(prompts)} prompts...", flush=True)
-        if hasattr(self, '_get_nvidia_smi'):
-            print(f"[SGLangWorker-{self.gpu_id}] GPU memory BEFORE generate: {self._get_nvidia_smi(self.gpu_id)}", flush=True)
-
         start_time = time.time()
 
         # SGLang generate with logprobs
@@ -131,8 +119,6 @@ class SGLangWorkerActor:
         )
 
         elapsed = time.time() - start_time
-        speed = len(prompts) / elapsed if elapsed > 0 else 0
-        print(f"[SGLangWorker-{self.gpu_id}] Done: {len(prompts)} prompts in {elapsed:.2f}s ({speed:.1f} samples/s)")
 
         # Extract log probs with mean and min
         results = []
@@ -190,8 +176,7 @@ class SGLangWorkerActor:
                             elif isinstance(token_info, (int, float)):
                                 log_probs.append(float(token_info))
 
-        except Exception as e:
-            print(f"[SGLangWorker-{self.gpu_id}] Error extracting logprobs: {e}", flush=True)
+        except Exception:
             return [-100.0]
 
         return log_probs if log_probs else [-100.0]
@@ -201,8 +186,8 @@ class SGLangWorkerActor:
         if hasattr(self, 'engine') and self.engine is not None:
             try:
                 self.engine.shutdown()
-            except Exception as e:
-                print(f"[SGLangWorker-{self.gpu_id}] Error during shutdown: {e}", flush=True)
+            except Exception:
+                pass
 
 
 class SGLangStudentRewardClient:

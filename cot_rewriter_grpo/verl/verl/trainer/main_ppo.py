@@ -61,9 +61,16 @@ def run_ppo(config) -> None:
         # NCCL debug level, VLLM logging level, and allow runtime LoRA updating
         # `num_cpus` specifies the number of CPU cores Ray can use, obtained from the configuration
 
+        # Merge runtime_env from config.ray_kwargs.ray_init if available
+        base_runtime_env = get_ppo_ray_runtime_env()
+        if OmegaConf.select(config, "ray_kwargs.ray_init.runtime_env.env_vars") is not None:
+            config_env_vars = OmegaConf.to_container(config.ray_kwargs.ray_init.runtime_env.env_vars)
+            # Config env_vars take precedence over base runtime_env
+            base_runtime_env["env_vars"].update(config_env_vars)
+        
         # CRITICAL: Ensure dashboard is disabled to avoid OpenTelemetry version conflicts
         ray.init(
-            runtime_env=get_ppo_ray_runtime_env(),
+            runtime_env=base_runtime_env,
             num_cpus=config.ray_init.num_cpus,
             include_dashboard=False,  # Disable dashboard to avoid OpenTelemetry conflicts
         )

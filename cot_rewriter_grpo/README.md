@@ -118,7 +118,10 @@ source .venv/bin/activate
 # 安装 VERL 框架（在父目录的 verl 中）
 cd verl
 uv pip install -e .
-uv pip install vllm==0.8.4
+# uv pip install vllm==0.8.4
+cd vllm-0.8.4
+uv pip install cmake ninja packaging setuptools "setuptools-scm>=8.0" wheel jinja2 
+SETUPTOOLS_SCM_PRETEND_VERSION=0.8.4 uv pip install --editable . --no-build-isolation -v
 uv pip install sglang[all]==0.4.6.post5
 uv pip install transformers==4.55.0
 uv pip install zmq
@@ -128,7 +131,6 @@ uv pip install torch==2.6.0 torchvision torchaudio --index-url https://download.
 uv pip install https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.3/flash_attn-2.7.3+cu12torch2.6cxx11abiFALSE-cp312-cp312-linux_x86_64.whl
 
 uv pip install opentelemetry-api==1.34.1 opentelemetry-sdk==1.34.1 opentelemetry-exporter-otlp==1.34.1
-uv pip install loguru
 uv pip install cachetools==5.3.3 # 修复LRUCache报错
 ```
 

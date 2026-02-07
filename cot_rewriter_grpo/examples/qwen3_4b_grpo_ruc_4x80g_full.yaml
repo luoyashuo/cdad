@@ -54,7 +54,7 @@ data:
   val_files: /home/u20240075/luoyashuo/data/cdad/cot_rewrite_max_fsf_v2/val_64.jsonl
   # 保持 train_batch_size=2, rollout.n=8 -> 每步 16 个 samples
   train_batch_size: 2
-  val_batch_size: 16  # 【修复】增大验证 batch size，减少验证循环次数
+  val_batch_size: 8  # 【修复】增大验证 batch size，减少验证循环次数
   gen_batch_size: 8
   max_prompt_length: 5500
   max_response_length: 6700
@@ -86,6 +86,10 @@ actor_rollout_ref:
     grad_clip: 1.0
     ppo_mini_batch_size: 2
     ppo_micro_batch_size_per_gpu: 1
+    # KL Loss 配置（推荐用于 GRPO，替代 use_kl_in_reward）
+    use_kl_loss: true
+    kl_loss_coef: 0.0001
+    kl_loss_type: low_var_kl
     # FSDP 配置 - 开启 offload 释放显存给 Student vLLM
     fsdp_config:
       dtype: bfloat16
@@ -119,7 +123,7 @@ actor_rollout_ref:
     dtype: bfloat16
     log_prob_micro_batch_size_per_gpu: 1
     n: 8  # 保持 8 不变
-    temperature: 0.7
+    temperature: 1.0
     top_p: 0.95
     prompt_length: 5500
     response_length: 6700
@@ -141,12 +145,14 @@ algorithm:
   norm_adv_by_std_in_grpo: true
   gamma: 1.0
   lam: 1.0
-  use_kl_in_reward: true                                                                                                                                     
-  kl_penalty: kl                                                                                                                                           
-  kl_ctrl:                                                                                                                                                 
-    type: fixed                                                                                                                                            
-    kl_coef: 0.01             
-
+  use_kl_in_reward: false  # 关闭 reward KL，改用 actor KL loss
+  kl_penalty: kl
+  kl_ctrl:
+    type: fixed
+    kl_coef: 0.0  # 设为 0，因为 KL loss 在 actor 中控制             
+  use_kl_loss: true
+  kl_loss_coef: 0.001
+  kl_loss_type: low_var_kl
 # ============ Critic Configuration (GRPO doesn't need) ============
 critic:
   enable: false
@@ -175,25 +181,25 @@ custom_reward_function:
     print_samples: 2
     reward_backend: vllm
     
-    # 【关键优化】降低 Student vLLM 显存占用
+    # 【关键优化】Student vLLM 显存配置 (8000 token 长度)
     # 显存预算计算 (80GB GPU, 开启 Actor offload 后):
     #   - Actor vLLM sleep: ~36GB (gpu_memory_utilization=0.45)
-    #   - FSDP 残留: ~5GB (开启 offload 后大幅降低)
+    #   - FSDP 残留: ~5GB
     #   - 可用显存: ~75GB
-    #   - Student vLLM 需要:
-    #     - Model Weights (1.7B FP16): ~3.5GB
-    #     - KV Cache: 0.25 * 80GB = 20GB
-    #     - logprobs 计算临时显存: ~10-15GB
-    #   - 安全计算: (75 - 3.5 - 15) / 80 ≈ 0.25
-    sglang_gpu_memory_utilization: 0.25  # 从 0.3 降到 0.25
-    vllm_gpu_memory_utilization: 0.25    # 从 0.3 降到 0.25
+    #   - Student vLLM 需要 (max_len=8000):
+    #     - Model Weights (1.7B FP16): ~3.5GB (TP=4时每卡~1GB)
+    #     - KV Cache (seq=8000, batch=2): ~4GB (TP=4时每卡~1GB)
+    #     - logprobs 计算临时显存: ~20-30GB (主要是activation)
+    #   - 安全计算: 需要 0.45-0.5 的显存利用率
+    sglang_gpu_memory_utilization: 0.45  # 提高到 0.45 以支持 8000 长度
+    vllm_gpu_memory_utilization: 0.45    # 提高到 0.45 以支持 8000 长度
     
-    # 【关键优化】限制 Student vLLM 最大序列长度
-    # 避免超长序列 (prompt+response > 8000) 导致 KV Cache 爆炸
+    # Student vLLM 最大序列长度 = 8000 (用户要求)
     student_max_model_len: 8000
-    # 【关键优化】Student vLLM micro batch size
-    # TP=4 时只有 1 个 actor 处理全部数据，可以调大 micro_batch_size 提高吞吐量
-    student_micro_batch_size: 8
+    # 【关键优化】降低 micro_batch_size 避免 OOM
+    # 8000 token 长度下，batch=8 会导致 KV Cache ~15GB+，容易 OOM
+    # 降到 2 可以大幅减少 KV Cache 占用 (~4GB)
+    student_micro_batch_size: 2
     # 【Tensor Parallelism 配置】
     # TP=1: 4 个独立 vLLM actor，每个 1 GPU（吞吐量高）
     # TP=2: 2 个 vLLM actor，每个 2 GPU（显存减半）

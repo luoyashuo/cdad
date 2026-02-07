@@ -19,6 +19,10 @@ from typing import Any, Dict, List, Optional
 import ray
 
 from verl.experimental.reward.cot_rewriter.logging_config import logger
+from vllm import LLM
+from transformers import AutoTokenizer
+import os
+import torch
 
 
 @ray.remote
@@ -58,20 +62,15 @@ class VLLMWorkerActor:
 
         # Ray actor inherits CUDA_VISIBLE_DEVICES from parent process
         parent_cuda_devices = os.environ.get("CUDA_VISIBLE_DEVICES", "")
-        print(f"[{worker_name}] Parent CUDA_VISIBLE_DEVICES={parent_cuda_devices}", flush=True)
 
         # Set CUDA_VISIBLE_DEVICES to all logical GPUs for this actor
         # e.g., logical_gpu_ids=[0, 1] → "0,1" for TP=2
         cuda_devices_str = ",".join(map(str, logical_gpu_ids))
         os.environ["CUDA_VISIBLE_DEVICES"] = cuda_devices_str
-        print(f"[{worker_name}] Set CUDA_VISIBLE_DEVICES={cuda_devices_str} (logical GPUs for physical GPUs {gpu_ids})", flush=True)
 
         # Force vLLM V0 engine to avoid V1 serialization bugs
         os.environ["VLLM_USE_V1"] = "0"
 
-        from vllm import LLM
-        from transformers import AutoTokenizer
-        import torch
 
         # Log GPU memory status BEFORE loading model
         def get_nvidia_smi_memory_for_gpu(gpu_idx):
@@ -98,25 +97,15 @@ class VLLMWorkerActor:
             """Get memory for all GPUs in this actor"""
             return ", ".join(get_nvidia_smi_memory_for_gpu(gpu) for gpu in gpu_ids)
 
-        print(f"[{worker_name}] ========== GPU MEMORY CHECK ==========", flush=True)
-        print(f"[{worker_name}] BEFORE loading Student vLLM: {get_all_gpus_memory()}", flush=True)
-        print(f"[{worker_name}] tensor_parallel_size={tensor_parallel_size}, gpu_memory_utilization={gpu_memory_utilization}", flush=True)
-        print(f"[{worker_name}] max_model_len={max_model_len}, micro_batch_size={micro_batch_size}", flush=True)
-        print(f"[{worker_name}] Initializing vLLM on GPUs {gpu_ids} with TP={tensor_parallel_size}...", flush=True)
+        # GPU memory check (for debugging if needed)
+        pass
 
         self._worker_name = worker_name
         self._get_nvidia_smi = get_nvidia_smi_memory_for_gpu
         self._get_all_gpus_memory = get_all_gpus_memory
 
-        # Log CUDA environment
-        print(f"[{worker_name}] CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES')}", flush=True)
-        print(f"[{worker_name}] PyTorch sees {torch.cuda.device_count()} GPU(s)", flush=True)
-
-        print(f"[{worker_name}] Loading tokenizer from {model_path}...", flush=True)
+        # Load tokenizer and model
         self.tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
-        print(f"[{worker_name}] Tokenizer loaded", flush=True)
-        
-        print(f"[{worker_name}] Initializing vLLM LLM with: TP={tensor_parallel_size}, gpu_mem={gpu_memory_utilization}, max_len={max_model_len}...", flush=True)
         import time
         llm_start = time.time()
         self.llm = LLM(
@@ -132,10 +121,6 @@ class VLLMWorkerActor:
         )
         llm_elapsed = time.time() - llm_start
         self.micro_batch_size = micro_batch_size
-        print(f"[{worker_name}] vLLM LLM initialized successfully in {llm_elapsed:.2f}s", flush=True)
-        print(f"[{worker_name}] nvidia-smi AFTER loading Student vLLM:", flush=True)
-        print(f"[{worker_name}] {get_all_gpus_memory()}", flush=True)
-        print(f"[{worker_name}] ========================================", flush=True)
 
     def compute_logprobs(
         self,
@@ -156,19 +141,11 @@ class VLLMWorkerActor:
         from vllm import SamplingParams
         import time
 
-        worker_name = self._worker_name
-        print(f"[{worker_name}] compute_logprobs START: {len(prompts)} prompts", flush=True)
-        
         sampling_params = SamplingParams(
             max_tokens=1,
             prompt_logprobs=1,
             temperature=0,
         )
-
-        # Log GPU memory before generation
-        print(f"[{worker_name}] Processing {len(prompts)} prompts (micro_batch_size={self.micro_batch_size})...", flush=True)
-        if hasattr(self, '_get_all_gpus_memory'):
-            print(f"[{worker_name}] GPU memory BEFORE generate: {self._get_all_gpus_memory()}", flush=True)
 
         # Micro-batch processing to avoid OOM
         all_outputs = []
@@ -179,8 +156,6 @@ class VLLMWorkerActor:
             batch_prompts = prompts[i:i + micro_batch_size]
             batch_ans_starts = answer_starts[i:i + micro_batch_size]
 
-            print(f"[{worker_name}] Processing micro-batch {i//micro_batch_size + 1}/{(len(prompts)-1)//micro_batch_size + 1} ({len(batch_prompts)} prompts)...", flush=True)
-
             start_time = time.time()
             batch_outputs = self.llm.generate(batch_prompts, sampling_params)
             elapsed = time.time() - start_time
@@ -188,12 +163,7 @@ class VLLMWorkerActor:
 
             all_outputs.extend(batch_outputs)
 
-            # Log memory after each micro-batch
-            if hasattr(self, '_get_all_gpus_memory'):
-                print(f"[{worker_name}] Micro-batch done in {elapsed:.2f}s, GPU: {self._get_all_gpus_memory()}", flush=True)
-
         speed = len(prompts) / total_time if total_time > 0 else 0
-        print(f"[{worker_name}] Done: {len(prompts)} prompts in {total_time:.2f}s ({speed:.1f} samples/s)")
 
         # Extract log probs with mean and min
         results = []
@@ -212,7 +182,6 @@ class VLLMWorkerActor:
                     "token_log_probs": [],
                 })
 
-        print(f"[{worker_name}] compute_logprobs END: returned {len(results)} results", flush=True)
         return results
 
     def _extract_answer_logprobs(self, prompt_logprobs, answer_start_idx: int) -> List[float]:
@@ -291,7 +260,6 @@ class VLLMStudentRewardClient:
             micro_batch_size: Batch size for each micro-batch to avoid OOM
             max_num_seqs: Maximum concurrent sequences in vLLM scheduler
         """
-        import torch
 
         self.model_path = model_path
         self.tensor_parallel_size = tensor_parallel_size
@@ -321,13 +289,6 @@ class VLLMStudentRewardClient:
         self.tokenizer = None
         self._initialized = False
 
-        logger.info(f"[VLLMStudentReward] Configuration:")
-        logger.info(f"[VLLMStudentReward]   - Total GPUs: {self.num_gpus} ({self.gpu_ids})")
-        logger.info(f"[VLLMStudentReward]   - Tensor Parallel Size: {tensor_parallel_size}")
-        logger.info(f"[VLLMStudentReward]   - Number of vLLM actors: {self.num_actors}")
-        logger.info(f"[VLLMStudentReward]   - Micro batch size per actor: {self.micro_batch_size}")
-        logger.info(f"[VLLMStudentReward]   - Max concurrent sequences per vLLM: {self.max_num_seqs}")
-
     def cleanup(self):
         """Cleanup Ray vLLM actors to release GPU memory."""
         import subprocess
@@ -355,64 +316,38 @@ class VLLMStudentRewardClient:
             except:
                 return "nvidia-smi unavailable"
 
-        logger.info(f"[VLLMStudentReward] Cleaning up {len(self.workers)} vLLM Ray actors...")
-        logger.info(f"[VLLMStudentReward] nvidia-smi BEFORE cleanup: {get_nvidia_smi()}")
-
         # Kill all Ray actors to release GPU memory
         for i, worker in enumerate(self.workers):
             try:
                 ray.kill(worker)
-                logger.info(f"[VLLMStudentReward] Killed worker {i}")
             except Exception as e:
                 logger.warning(f"[VLLMStudentReward] Error killing worker {i}: {e}")
 
         self.workers = []
         self._initialized = False
 
-        # Force garbage collection and CUDA cache cleanup
-        import gc
-        import torch
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-
-        # Wait for GPU memory to be released
-        logger.info(f"[VLLMStudentReward] Waiting for GPU memory release...")
-        time.sleep(2)
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-
-        logger.info(f"[VLLMStudentReward] nvidia-smi AFTER cleanup: {get_nvidia_smi()}")
-        logger.info(f"[VLLMStudentReward] Cleanup completed")
+        torch.cuda.empty_cache()
 
     def initialize(self):
         """Lazy initialization of Ray vLLM actors."""
         if self._initialized:
             return
 
-        from transformers import AutoTokenizer
-
-        logger.info(f"[VLLMStudentReward] Initializing {self.num_actors} vLLM Ray actors (TP={self.tensor_parallel_size})...")
-
         # Initialize tokenizer (shared, for prompt building)
         self.tokenizer = AutoTokenizer.from_pretrained(self.model_path, trust_remote_code=True)
 
         # Compute logical GPU IDs from CUDA_VISIBLE_DEVICES
-        import os
+        
         cuda_visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES", "")
         if cuda_visible_devices:
             # Parse physical GPU IDs from CUDA_VISIBLE_DEVICES
             available_gpus = [int(x.strip()) for x in cuda_visible_devices.split(",") if x.strip()]
-            logger.info(f"[VLLMStudentReward] CUDA_VISIBLE_DEVICES={cuda_visible_devices}, available_gpus={available_gpus}")
 
             # Map physical GPU IDs to logical indices
             physical_to_logical = {gpu: idx for idx, gpu in enumerate(available_gpus)}
         else:
             # No CUDA_VISIBLE_DEVICES set, assume physical == logical
             physical_to_logical = {gpu: gpu for gpu in self.gpu_ids}
-            logger.info(f"[VLLMStudentReward] No CUDA_VISIBLE_DEVICES set, using physical GPU IDs directly")
-
         # Group GPUs by tensor_parallel_size
         # e.g., gpu_ids=[0,1,2,3], TP=2 → [[0,1], [2,3]]
         gpu_groups = []
@@ -420,15 +355,10 @@ class VLLMStudentRewardClient:
             group = self.gpu_ids[i : i + self.tensor_parallel_size]
             gpu_groups.append(group)
 
-        logger.info(f"[VLLMStudentReward] GPU groups: {gpu_groups}")
-
         # Create Ray actors, one per GPU group
         for group_idx, gpu_group in enumerate(gpu_groups):
             # Compute logical GPU IDs for this group
             logical_gpu_ids = [physical_to_logical.get(gpu, 0) for gpu in gpu_group]
-
-            logger.info(f"[VLLMStudentReward] Creating actor {group_idx} for physical GPUs {gpu_group} (logical GPUs {logical_gpu_ids})...")
-
             # Note: num_gpus=0 because we set CUDA_VISIBLE_DEVICES inside the actor
             worker = VLLMWorkerActor.options(num_gpus=0, num_cpus=1).remote(
                 model_path=self.model_path,
@@ -443,19 +373,13 @@ class VLLMStudentRewardClient:
             )
             self.workers.append(worker)
 
-        # Wait for all actors to initialize
-        logger.info(f"[VLLMStudentReward] Waiting for {self.num_actors} actors to initialize...")
         init_futures = [w.compute_logprobs.remote(["test"], [0]) for w in self.workers]
-        logger.info(f"[VLLMStudentReward] Submitted {len(init_futures)} init tasks, waiting for results...")
         for i, future in enumerate(init_futures):
-            logger.info(f"[VLLMStudentReward] Waiting for worker {i} init...")
             try:
                 result = ray.get(future, timeout=60)  # 60 second timeout
-                logger.info(f"[VLLMStudentReward] Worker {i} init done")
             except Exception as e:
                 logger.error(f"[VLLMStudentReward] Worker {i} init FAILED: {e}")
                 raise
-        logger.info(f"[VLLMStudentReward] All {self.num_actors} actors initialized successfully (TP={self.tensor_parallel_size})")
 
         self._initialized = True
 
@@ -518,12 +442,10 @@ class VLLMStudentRewardClient:
         self.initialize()
 
         batch_size = len(questions)
-        logger.info(f"[VLLMStudentReward] Computing rewards for {batch_size} samples on {self.num_actors} actors (TP={self.tensor_parallel_size})")
-
         start_time = time.time()
 
         # Phase 1: Build all prompts (CPU)
-        logger.info(f"[VLLMStudentReward] Phase 1: Building prompts...")
+
         rewrite_prompts = []
         rewrite_ans_starts = []
         original_prompts = []
@@ -544,10 +466,8 @@ class VLLMStudentRewardClient:
                 original_indices.append(i)
 
         prep_time = time.time() - start_time
-        logger.info(f"[VLLMStudentReward] Phase 1 done: {prep_time:.2f}s")
 
         # Phase 2: Distribute work to Ray actors
-        logger.info(f"[VLLMStudentReward] Phase 2: Distributing work to {self.num_actors} Ray actors...")
         inference_start = time.time()
 
         # Split rewrite prompts across actors (not GPUs, since TP>1 means multiple GPUs per actor)
@@ -573,14 +493,11 @@ class VLLMStudentRewardClient:
                     original_futures.append((worker_idx, len(prompts_chunk), future))
 
         # Gather rewrite results
-        logger.info(f"[VLLMStudentReward] Waiting for {len(rewrite_futures)} rewrite tasks...")
         rewrite_results = [None] * batch_size
         for worker_idx, chunk_size, future in rewrite_futures:
-            logger.info(f"[VLLMStudentReward] Waiting for rewrite result from worker {worker_idx}...")
             get_start = time.time()
             chunk_results = ray.get(future)
             get_elapsed = time.time() - get_start
-            logger.info(f"[VLLMStudentReward] Got rewrite result from worker {worker_idx} in {get_elapsed:.2f}s")
             # Place results back in original order
             start_idx = sum(len(rewrite_chunks[i]) for i in range(worker_idx))
             for i, result in enumerate(chunk_results):
@@ -589,24 +506,16 @@ class VLLMStudentRewardClient:
         # Gather original results
         original_results_map = {}
         if original_futures:
-            logger.info(f"[VLLMStudentReward] Waiting for {len(original_futures)} original tasks...")
             for worker_idx, chunk_size, future in original_futures:
-                logger.info(f"[VLLMStudentReward] Waiting for original result from worker {worker_idx}...")
                 get_start = time.time()
                 chunk_results = ray.get(future)
                 get_elapsed = time.time() - get_start
-                logger.info(f"[VLLMStudentReward] Got original result from worker {worker_idx} in {get_elapsed:.2f}s")
                 start_idx = sum(len(original_chunks[i]) for i in range(worker_idx))
                 for i, result in enumerate(chunk_results):
                     original_idx = original_indices[start_idx + i]
                     original_results_map[original_idx] = result
 
-        inference_time = time.time() - inference_start
-        total_time = time.time() - start_time
-        logger.info(f"[VLLMStudentReward] Phase 2 done: {inference_time:.2f}s inference, {total_time:.2f}s total")
-
         # Phase 3: Compute rewards
-        logger.info(f"[VLLMStudentReward] Phase 3: Computing rewards with alpha_cog={alpha_cog}...")
         rewards = []
         rewrite_mean_log_probs = []
         original_mean_log_probs = []
@@ -649,8 +558,6 @@ class VLLMStudentRewardClient:
             original_mean_log_probs.append(original_mean)
             all_token_log_probs.append(rewrite_result.get("token_log_probs", []))
             all_token_ids.append([])  # Token IDs not needed for reward
-
-        logger.info(f"[VLLMStudentReward] All {batch_size} rewards computed")
 
         return {
             "rewards": rewards,
