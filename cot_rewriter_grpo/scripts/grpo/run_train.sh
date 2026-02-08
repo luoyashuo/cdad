@@ -120,15 +120,78 @@ if [ -f "${PROJECT_BASE_DIR}/.venv/bin/activate" ]; then
     source "${PROJECT_BASE_DIR}/.venv/bin/activate"
 fi
 
-# 清理残留的 Ray 进程
+# ============================================
+# 清理目标 GPU 上的进程
+# ============================================
+echo ""
+echo "Cleaning up processes on target GPUs [${CUDA_VISIBLE_DEVICES}]..."
+
+# 将 GPU ID 字符串转换为数组
+IFS=',' read -ra GPU_ARRAY <<< "$CUDA_VISIBLE_DEVICES"
+
+# 获取目标 GPU 上的进程并杀死
+for gpu_id in "${GPU_ARRAY[@]}"; do
+    # 使用 nvidia-smi 获取 GPU 上的进程
+    pids=$(nvidia-smi -i "$gpu_id" --query-compute-apps=pid --format=csv,noheader 2>/dev/null | xargs)
+    if [ -n "$pids" ]; then
+        echo "  GPU $gpu_id: Killing processes $pids"
+        for pid in $pids; do
+            # 检查进程是否存在且属于当前用户
+            if ps -p "$pid" -o user= 2>/dev/null | grep -q "^$(whoami)$"; then
+                kill -9 "$pid" 2>/dev/null || true
+                echo "    Killed process $pid"
+            else
+                echo "    Skipped process $pid (not owned by current user or not exists)"
+            fi
+        done
+    else
+        echo "  GPU $gpu_id: No processes found"
+    fi
+done
+
+# 等待进程完全退出
+sleep 3
+
+# ============================================
+# 清理 Ray 进程
+# ============================================
+echo ""
 echo "Cleaning up Ray processes..."
+
+# 清理 Ray 工作进程
 pkill -u "$(whoami)" -f "ray::" 2>/dev/null || true
 pkill -u "$(whoami)" -f "raylet" 2>/dev/null || true
 pkill -u "$(whoami)" -f "gcs_server" 2>/dev/null || true
 pkill -u "$(whoami)" -f "ray._private" 2>/dev/null || true
+pkill -u "$(whoami)" -f "ray::IDLE" 2>/dev/null || true
+pkill -u "$(whoami)" -f "ray::Actor" 2>/dev/null || true
+pkill -u "$(whoami)" -f "python.*ray" 2>/dev/null || true
+
+# 清理 Ray 临时目录
 rm -rf "$RAY_TMPDIR"/session_* 2>/dev/null || true
-sleep 2
+rm -rf "/tmp/ray"/* 2>/dev/null || true
+
+# 等待进程完全退出
+sleep 3
+
 echo "Ray cleanup complete."
+
+# ============================================
+# 最终检查：再次确认目标 GPU 是否空闲
+# ============================================
+echo ""
+echo "Verifying GPU status..."
+for gpu_id in "${GPU_ARRAY[@]}"; do
+    pids=$(nvidia-smi -i "$gpu_id" --query-compute-apps=pid --format=csv,noheader 2>/dev/null | xargs)
+    if [ -n "$pids" ]; then
+        echo "  WARNING: GPU $gpu_id still has processes: $pids"
+    else
+        echo "  GPU $gpu_id: Clean"
+    fi
+done
+
+echo ""
+echo "All cleanup complete. Ready to start training."
 echo ""
 
 # 启动训练

@@ -123,7 +123,7 @@ actor_rollout_ref:
     max_model_len: 11000
     enforce_eager: true  # 使用 eager mode 避免 graph 编译问题
     free_cache_engine: true
-    sleep_level: 2  # vLLM sleep 释放更多显存给 reward
+    sleep_level: 1  # vLLM sleep 释放更多显存给 reward
     agent:
       num_workers: 2
 

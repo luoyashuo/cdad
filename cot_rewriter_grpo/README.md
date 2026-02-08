@@ -103,7 +103,5 @@ uv pip install torch-memory-saver
 2. RUC服务器上VLLM运行必须开：
   - VLLM_USE_V1=0 - 强制使用 vLLM V0 引擎                                                                                                                    
   - VLLM_ATTENTION_BACKEND=FLASH_ATTN - 使用 Flash Attention 后端 
-
-3. VLLM SLEEP失效：
-  - https://github.com/vllm-project/vllm-ascend/issues/977
-  - https://github.com/vllm-project/vllm/issues/15254
+3. 模型rollout乱码：
+  - vllm sleep_level=2会导致推理精度问题，开sleep_level=1即可
