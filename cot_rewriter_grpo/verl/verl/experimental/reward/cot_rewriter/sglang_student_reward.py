@@ -118,31 +118,34 @@ class SGLangWorkerActor:
         self.tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
         import time
         import sglang as sgl
-        
+
         llm_start = time.time()
-        
+
         # 初始化 SGLang Engine
-        # 注意：不启用 enable_memory_saver，因为 Student Model 每次都是新建并很快销毁
-        # 不需要与 Actor/Rollout 共享 GPU 内存
+        # 使用 enable_memory_saver=True 支持显存释放/恢复机制
+        # 这样可以避免每次 cleanup/recreate 导致的端口冲突问题
         self.engine = sgl.Engine(
             model_path=model_path,
             tp_size=tensor_parallel_size,
             mem_fraction_static=mem_fraction_static,
             dtype=dtype,
             trust_remote_code=True,
-            enable_memory_saver=False,  # 禁用内存保护，避免与 Actor/Rollout 的 SGLang 冲突
+            enable_memory_saver=True,  # 启用内存保护，支持 release/resume_memory_occupation
         )
-        
+
         # CRITICAL: Re-create event loop after Engine creation
         # because sglang forces uvloop policy which clears the existing event loop
         # This must be done before any generate() calls
         self._loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self._loop)
         logger.info(f"[SGLangWorkerActor-{gpu_ids}] Event loop re-created after Engine init")
-        
+
         llm_elapsed = time.time() - llm_start
         self.micro_batch_size = micro_batch_size
-        
+
+        # Track memory state for release/resume
+        self._memory_released = False
+
         logger.info(f"[SGLangWorkerActor-{gpu_ids}] Engine created in {llm_elapsed:.2f}s")
 
     def compute_logprobs(
@@ -304,23 +307,44 @@ class SGLangWorkerActor:
         """
         释放 SGLang 占用的 GPU 显存（保留权重）。
         使用 release_memory_occupation() 释放 KV Cache
-        
-        注意：当 enable_memory_saver=False 时，此方法不执行任何操作
+
+        这样可以在 reward 计算完成后释放显存给训练使用，
+        同时保留 SGLang Engine 实例，避免端口冲突。
         """
-        # 当 enable_memory_saver=False 时，不需要释放内存
-        # 这是因为 Student Model 的 SGLang 实例每次都是新建并很快销毁
-        pass
+        try:
+            if hasattr(self.engine, "release_memory_occupation"):
+                self.engine.release_memory_occupation()
+                self._memory_released = True
+                logger.debug(f"[SGLangWorkerActor-{self.gpu_ids}] Released KV Cache memory")
+            else:
+                logger.warning(f"[SGLangWorkerActor-{self.gpu_ids}] Engine does not support release_memory_occupation")
+        except Exception as e:
+            logger.warning(f"[SGLangWorkerActor-{self.gpu_ids}] Failed to release memory: {e}")
 
     def resume_memory(self):
         """
         恢复 SGLang 的 GPU 显存占用（恢复 KV Cache）。
         使用 resume_memory_occupation() 恢复 KV Cache
-        
-        注意：当 enable_memory_saver=False 时，此方法不执行任何操作
+
+        在下次 reward 计算前调用，恢复 SGLang 的完整功能。
+
+        注意：只在已 release 过的情况下才调用 resume，
+        否则 SGLang 会报错 "Cannot resume allocation that is not paused"
         """
-        # 当 enable_memory_saver=False 时，不需要恢复内存
-        # 这是因为 Student Model 的 SGLang 实例每次都是新建并很快销毁
-        pass
+        if not self._memory_released:
+            # 首次调用或未 release 过，不需要 resume
+            logger.debug(f"[SGLangWorkerActor-{self.gpu_ids}] Memory not released, skipping resume")
+            return
+
+        try:
+            if hasattr(self.engine, "resume_memory_occupation"):
+                self.engine.resume_memory_occupation()
+                self._memory_released = False
+                logger.debug(f"[SGLangWorkerActor-{self.gpu_ids}] Resumed KV Cache memory")
+            else:
+                logger.warning(f"[SGLangWorkerActor-{self.gpu_ids}] Engine does not support resume_memory_occupation")
+        except Exception as e:
+            logger.warning(f"[SGLangWorkerActor-{self.gpu_ids}] Failed to resume memory: {e}")
 
     def shutdown(self):
         """Shutdown the SGLang engine and release all resources."""
@@ -408,9 +432,14 @@ class SGLangStudentRewardClient:
         self._initialized = False
 
     def cleanup(self):
-        """Cleanup Ray SGLang actors to release GPU memory."""
+        """
+        释放所有 workers 的 KV Cache，保留权重和 Engine 实例。
+
+        使用 release_memory_occupation() 释放 KV Cache，
+        避免了 shutdown/recreate 导致的端口冲突问题。
+        """
         import subprocess
-        import time
+        import gc
 
         if not self._initialized:
             return
@@ -434,24 +463,19 @@ class SGLangStudentRewardClient:
             except:
                 return "nvidia-smi unavailable"
 
-        # Shutdown all workers gracefully
-        for i, worker in enumerate(self.workers):
-            try:
-                ray.get(worker.shutdown.remote())
-            except Exception as e:
-                logger.warning(f"[SGLangStudentReward] Error shutting down worker {i}: {e}")
+        # 调用每个 worker 的 release_memory() 方法
+        # 这会调用 engine.release_memory_occupation() 释放 KV Cache
+        try:
+            futures = [w.release_memory.remote() for w in self.workers]
+            ray.get(futures, timeout=60)
+            logger.info(f"[SGLangStudentReward] Released KV Cache for all workers")
+        except Exception as e:
+            logger.warning(f"[SGLangStudentReward] Failed to release memory: {e}")
 
-        # Kill all Ray actors to release GPU memory
-        for i, worker in enumerate(self.workers):
-            try:
-                ray.kill(worker)
-            except Exception as e:
-                logger.warning(f"[SGLangStudentReward] Error killing worker {i}: {e}")
-
-        self.workers = []
-        self._initialized = False
-
+        # 清空 CUDA 缓存
         torch.cuda.empty_cache()
+        gc.collect()
+
         logger.info(f"[SGLangStudentReward] Cleanup complete. GPU memory: {get_nvidia_smi()}")
 
     def initialize(self):
@@ -463,7 +487,7 @@ class SGLangStudentRewardClient:
         self.tokenizer = AutoTokenizer.from_pretrained(self.model_path, trust_remote_code=True)
 
         # Compute logical GPU IDs from CUDA_VISIBLE_DEVICES
-        
+
         cuda_visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES", "")
         if cuda_visible_devices:
             # Parse physical GPU IDs from CUDA_VISIBLE_DEVICES
@@ -474,7 +498,7 @@ class SGLangStudentRewardClient:
         else:
             # No CUDA_VISIBLE_DEVICES set, assume physical == logical
             physical_to_logical = {gpu: gpu for gpu in self.gpu_ids}
-        
+
         # Group GPUs by tensor_parallel_size
         # e.g., gpu_ids=[0,1,2,3], TP=2 → [[0,1], [2,3]]
         gpu_groups = []
@@ -505,7 +529,7 @@ class SGLangStudentRewardClient:
         for i, future in enumerate(init_futures):
             try:
                 result = ray.get(future, timeout=120)  # 120 second timeout for SGLang
-                logger.info(f"[SGLangStudentReward] Worker {i} initialized successfully")
+                logger.debug(f"[SGLangStudentReward] Worker {i} initialized successfully")
             except Exception as e:
                 logger.error(f"[SGLangStudentReward] Worker {i} init FAILED: {e}")
                 raise
@@ -570,6 +594,9 @@ class SGLangStudentRewardClient:
         import time
 
         self.initialize()
+
+        # 恢复 KV Cache（如果之前被 release_memory 释放了）
+        self.resume_memory()
 
         batch_size = len(questions)
         start_time = time.time()

@@ -105,3 +105,6 @@ uv pip install torch-memory-saver
   - VLLM_ATTENTION_BACKEND=FLASH_ATTN - 使用 Flash Attention 后端 
 3. 模型rollout乱码：
   - vllm sleep_level=2会导致推理精度问题，开sleep_level=1即可
+4. 训练过程中模型崩溃，出现repeat和乱码：
+  - 有可能是offload的问题，关闭优化器offload可能会解决
+  - 加kl_penalty

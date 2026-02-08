@@ -23,9 +23,12 @@ PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 export PROJECT_BASE_DIR="${PROJECT_ROOT}"
 
 # 默认配置
-DEFAULT_GPUS="0,1"
-DEFAULT_CONFIG="qwen3_4b_grpo_2x80g_vllm_rollout_sglang_reward"
+# DEFAULT_GPUS="0,1"
+# DEFAULT_CONFIG="qwen3_4b_grpo_2x80g_vllm_rollout_sglang_reward"
 
+
+DEFAULT_GPUS="0,1,2,3,4,5,6,7"
+DEFAULT_CONFIG="qwen3_4b_grpo_8x80g_vllm_rollout_sglang_reward"
 # 解析参数
 GPUS="${1:-$DEFAULT_GPUS}"
 CONFIG_NAME="${2:-$DEFAULT_CONFIG}"

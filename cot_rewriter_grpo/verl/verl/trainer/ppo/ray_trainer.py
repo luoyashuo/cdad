@@ -1251,7 +1251,8 @@ class RayPPOTrainer:
                             tokenizer=self.tokenizer,
                             current_idx=current_batch_start,
                             total=total_samples,
-                            pad_token_id=pad_token_id
+                            pad_token_id=pad_token_id,
+                            max_samples=2
                         )
                         
                         # Also log summary stats (vLLM-style)

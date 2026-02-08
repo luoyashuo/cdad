@@ -198,12 +198,16 @@ echo ""
 echo "Starting training..."
 cd "${PROJECT_BASE_DIR}"
 
-python verl/verl/trainer/main_ppo.py \
+# 使用 nohup 后台运行，输出到日志文件
+nohup python verl/verl/trainer/main_ppo.py \
     --config-path="${PROJECT_BASE_DIR}/examples" \
-    --config-name="${CONFIG_NAME}" 2>&1 | tee "${LOG_FILE}"
+    --config-name="${CONFIG_NAME}" > "${LOG_FILE}" 2>&1 &
 
+# 获取进程 PID
+PID=$!
+echo "Training started with PID: $PID"
+echo "PID: $PID" >> "${LOG_FILE}"
 echo ""
-echo "============================================================"
-echo "Training completed!"
-echo "Log saved to: ${LOG_FILE}"
-echo "============================================================"
+echo "To monitor the log: tail -f ${LOG_FILE}"
+echo "To check process: ps -p $PID"
+echo "To kill process: kill $PID"

@@ -552,7 +552,8 @@ class TrainingLogger:
         tokenizer: Optional[Any] = None,
         current_idx: int = 0,
         total: int = 0,
-        pad_token_id: int = 0
+        pad_token_id: int = 0,
+        max_samples: int = 2
     ):
         """Log each response with its length and first N tokens.
         
@@ -564,22 +565,23 @@ class TrainingLogger:
             current_idx: Current batch starting index (for progress)
             total: Total number of samples (for progress)
             pad_token_id: Padding token ID
+            max_samples: Maximum number of samples to print (default: 2)
         """
         if responses is None:
             self.info(f"{prefix} No responses to log")
             return
         
+        batch_size = responses.shape[0]
+        
         # Progress header
         if total > 0:
             progress_pct = 100.0 * current_idx / total if total > 0 else 0
-            self.info(f"{prefix} PROGRESS [{current_idx}/{total}] ({progress_pct:.1f}%) - Logging {responses.shape[0]} responses")
+            self.info(f"{prefix} PROGRESS [{current_idx}/{total}] ({progress_pct:.1f}%) - Logging {min(max_samples, batch_size)}/{batch_size} responses")
         else:
-            self.info(f"{prefix} PROGRESS - Logging {responses.shape[0]} responses")
+            self.info(f"{prefix} PROGRESS - Logging {min(max_samples, batch_size)}/{batch_size} responses")
         
-        batch_size = responses.shape[0]
-        
-        # Log each response
-        for i in range(batch_size):
+        # Log each response (limit to max_samples)
+        for i in range(min(batch_size, max_samples)):
             global_idx = current_idx + i
             response_ids = responses[i]
             
@@ -625,7 +627,8 @@ class TrainingLogger:
         prefix: str = "[REWARD]",
         current_idx: int = 0,
         total: int = 0,
-        max_text_len: int = 100
+        max_text_len: int = 100,
+        max_samples: int = 2
     ):
         """Log each sample's reward information including prompt and reward value.
         
@@ -638,6 +641,7 @@ class TrainingLogger:
             current_idx: Current batch starting index (for progress)
             total: Total number of samples (for progress)
             max_text_len: Max length of text to display
+            max_samples: Maximum number of samples to print (default: 2)
         """
         if not questions:
             self.info(f"{prefix} No reward data to log")
@@ -648,12 +652,12 @@ class TrainingLogger:
         # Progress header
         if total > 0:
             progress_pct = 100.0 * current_idx / total if total > 0 else 0
-            self.info(f"{prefix} PROGRESS [{current_idx}/{total}] ({progress_pct:.1f}%) - Logging {batch_size} rewards")
+            self.info(f"{prefix} PROGRESS [{current_idx}/{total}] ({progress_pct:.1f}%) - Logging {min(max_samples, batch_size)}/{batch_size} rewards")
         else:
-            self.info(f"{prefix} PROGRESS - Logging {batch_size} rewards")
+            self.info(f"{prefix} PROGRESS - Logging {min(max_samples, batch_size)}/{batch_size} rewards")
         
-        # Log each sample
-        for i in range(batch_size):
+        # Log each sample (limit to max_samples)
+        for i in range(min(batch_size, max_samples)):
             global_idx = current_idx + i
             
             question = questions[i] if i < len(questions) else ""

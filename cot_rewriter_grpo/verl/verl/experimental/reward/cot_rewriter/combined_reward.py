@@ -173,7 +173,8 @@ class CombinedRewardComputer:
             prefix="[REWARD_PRE]",
             current_idx=0,
             total=batch_size,
-            max_text_len=100
+            max_text_len=100,
+            max_samples=2
         )
 
         # Compute cognitive reward
@@ -225,7 +226,8 @@ class CombinedRewardComputer:
             prefix="[REWARD_POST]",
             current_idx=0,
             total=batch_size,
-            max_text_len=100
+            max_text_len=100,
+            max_samples=2
         )
 
         return {
