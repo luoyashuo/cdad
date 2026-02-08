@@ -6,8 +6,6 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **CoT Rewriter GRPO** 是基于 VERL 框架的 Chain-of-Thought (CoT) 改写模型训练系统，使用 GRPO (Group Relative Policy Optimization) 算法训练一个能将原始推理过程改写得更清晰、高效的模型。
 
-你目前工作在本地路径，代码通过sftp同步到服务器上运行（服务器才有GPU和运行环境）
-
 ## 环境要求
 
 - **Python**: 3.12 (使用 uv 管理)

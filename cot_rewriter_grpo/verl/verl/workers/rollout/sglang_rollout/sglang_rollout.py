@@ -88,13 +88,25 @@ logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 def _get_or_create_event_loop():
     """Get event loop, create if needed (Python 3.10+ / uvloop compatible)."""
+    # First try to get the running loop (if we're inside an async context)
     try:
         return asyncio.get_running_loop()
     except RuntimeError:
-        # No running loop - create a new one directly
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        return loop
+        pass
+
+    # Then try to get the current event loop (SGLang may have created one)
+    try:
+        loop = asyncio.get_event_loop()
+        # Only use this loop if it's not closed
+        if not loop.is_closed():
+            return loop
+    except RuntimeError:
+        pass
+
+    # Finally, create a new one if none exists
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    return loop
 
 
 # patch to avoid issue https://github.com/sgl-project/sglang/issues/6723
@@ -150,10 +162,8 @@ class AsyncEngine(sglang.srt.entrypoints.engine.Engine):
 
     async def release_memory_occupation(self, tags: Optional[list[str]] = None):
         """Release GPU occupation temporarily."""
-        if tags is None:
-            obj = ReleaseMemoryOccupationReqInput()
-        else:
-            obj = ReleaseMemoryOccupationReqInput(tags=tags)
+        # NOTE: sglang 0.4.6.post5 doesn't support tags parameter
+        obj = ReleaseMemoryOccupationReqInput()
         return await self.tokenizer_manager.release_memory_occupation(obj, None)
 
     async def resume_memory_occupation(self, tags: Optional[list[str]] = None):
@@ -165,10 +175,8 @@ class AsyncEngine(sglang.srt.entrypoints.engine.Engine):
             await self.release_memory_occupation()
             self._need_reload = False
 
-        if tags is None:
-            obj = ResumeMemoryOccupationReqInput()
-        else:
-            obj = ResumeMemoryOccupationReqInput(tags=tags)
+        # NOTE: sglang 0.4.6.post5 doesn't support tags parameter
+        obj = ResumeMemoryOccupationReqInput()
         return await self.tokenizer_manager.resume_memory_occupation(obj, None)
 
     async def update_weights_from_tensor(
@@ -587,7 +595,6 @@ class SGLangRollout(BaseRollout):
             responses:     |<- LLM generation ->|<- tool_calls ->|<- LLM generation ->|<- padding ->|
             response_mask: | 1, 1, 1, ..., 1, 1 | 0, 0, .., 0, 0 | 1, 1, 1, ..., 1, 1 | 0, 0, ..., 0|
         """
-        print(f"[SGLangRollout] generate_sequences START, rank={self._rank}, tp_rank={self._tp_rank}, multi_turn={self.config.multi_turn.enable}", flush=True)
         if self.config.multi_turn.enable:
             return self._req_level_generate_sequences(prompts, **kwargs)
         return self._batch_level_generate_sequences(prompts, **kwargs)
@@ -724,34 +731,25 @@ class SGLangRollout(BaseRollout):
         # Update with any additional kwargs
         request_sampling_params.update(kwargs)
 
-        print(f"[SGLangRollout] _batch_level: rank={self._rank}, tp_rank={self._tp_rank}, batch_size={batch_size}, engine={self._engine is not None}", flush=True)
-        # Use engine is not None to determine if this rank should generate
-        # This handles the case when tensor_model_parallel_size=1 correctly
-        if self._engine is not None:
-            print(f"[SGLangRollout] _batch_level: rank={self._rank} calling async_generate with {len(idx_list)} prompts...", flush=True)
-            loop = _get_or_create_event_loop()
-            try:
-                output = loop.run_until_complete(
-                    self._engine.async_generate(
-                        prompt=None,  # because we have already convert it to prompt token id
-                        sampling_params=request_sampling_params,
-                        return_logprob=True,
-                        input_ids=idx_list,
-                        image_data=image_list,
-                    )
+        # Check both tp_rank and engine availability
+        # When tensor_model_parallel_size=1, each worker has its own TP group with tp_rank=0
+        # But only the first worker (global rank=0) creates the engine
+        if self._tp_rank == 0 and self._engine is not None:
+            loop = asyncio.get_event_loop()
+            output = loop.run_until_complete(
+                self._engine.async_generate(
+                    prompt=None,  # because we have already convert it to prompt token id
+                    sampling_params=request_sampling_params,
+                    return_logprob=True,
+                    input_ids=idx_list,
+                    image_data=image_list,
                 )
-                print(f"[SGLangRollout] _batch_level: rank={self._rank} async_generate DONE, got {len(output) if output else 0} outputs", flush=True)
-            except Exception as e:
-                print(f"[SGLangRollout] _batch_level: rank={self._rank} async_generate ERROR: {e}", flush=True)
-                raise
+            )
         else:
-            print(f"[SGLangRollout] _batch_level: rank={self._rank} skipping async_generate (not tp_rank 0)", flush=True)
             output = None
 
         # Most naive implementation, can extract tensor and send via gloo if too slow
-        print(f"[SGLangRollout] _batch_level: rank={self._rank} before barrier", flush=True)
         dist.barrier()
-        print(f"[SGLangRollout] _batch_level: rank={self._rank} after barrier", flush=True)
         [output] = broadcast_pyobj(
             data=[output],
             rank=self._rank,
@@ -808,8 +806,8 @@ class SGLangRollout(BaseRollout):
             batch["rollout_log_probs"] = rollout_log_probs
 
         # free cache engine
-        if self._engine is not None:
-            loop = _get_or_create_event_loop()
+        if self._engine is not None and self._tp_rank == 0:
+            loop = asyncio.get_event_loop()
             loop.run_until_complete(self._engine.flush_cache())
 
         return DataProto(batch=batch, non_tensor_batch=non_tensor_batch)

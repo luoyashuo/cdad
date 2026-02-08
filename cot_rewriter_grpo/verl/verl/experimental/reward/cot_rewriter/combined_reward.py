@@ -55,11 +55,12 @@ class CombinedRewardComputer:
         gpu_batch_size: int = 8,
         vllm_gpu_memory_utilization: float = 0.3,
         reward_backend: str = "vllm",  # "sglang" or "vllm"
-        sglang_gpu_memory_utilization: float = 0.4,
-        student_max_model_len: int = 8192,  # NEW: max model len for Student vLLM
-        student_micro_batch_size: int = 4,  # NEW: micro batch size for Student vLLM
-        student_max_num_seqs: int = 1,  # NEW: limit concurrent sequences in vLLM
-        student_tensor_parallel_size: int = 1,  # NEW: TP size for Student vLLM (1=disable)
+        sglang_mem_fraction_static: float = 0.85,  # SGLang: mem_fraction_static
+        student_max_model_len: int = 8192,  # max model len for Student Model
+        student_micro_batch_size: int = 4,  # micro batch size for Student Model
+        student_max_num_seqs: int = 1,  # limit concurrent sequences (vLLM only)
+        student_tensor_parallel_size: int = 1,  # TP size for Student Model (1=disable)
+        student_logprob_last_n_tokens: Optional[int] = None,  # SGLang: only compute last N tokens
         **kwargs,  # Ignore deprecated params
     ):
         """
@@ -77,9 +78,12 @@ class CombinedRewardComputer:
             gpu_batch_size: Batch size for GPU forward pass (default: 8).
             vllm_gpu_memory_utilization: GPU memory fraction for vLLM per device (default: 0.3)
             reward_backend: Backend to use - "sglang" or "vllm" (default: "vllm")
-            sglang_gpu_memory_utilization: GPU memory fraction for SGLang per device (default: 0.4)
-            student_max_num_seqs: Maximum concurrent sequences in vLLM (lower saves memory)
-            student_tensor_parallel_size: Tensor parallelism size for Student vLLM (default: 1)
+            sglang_mem_fraction_static: GPU memory fraction for SGLang static allocation (default: 0.85)
+            student_max_model_len: Maximum sequence length for Student Model
+            student_micro_batch_size: Micro batch size for Student Model inference
+            student_max_num_seqs: Maximum concurrent sequences in vLLM (lower saves memory, vLLM only)
+            student_tensor_parallel_size: Tensor parallelism size for Student Model (default: 1)
+            student_logprob_last_n_tokens: SGLang only - only compute last N tokens' logprobs to save memory
         """
         self.lambda_logic = lambda_logic
         self.use_logic_reward = use_logic_reward
@@ -93,8 +97,12 @@ class CombinedRewardComputer:
             from verl.experimental.reward.cot_rewriter.sglang_student_reward import SGLangStudentRewardClient
             self.student_client = SGLangStudentRewardClient(
                 model_path=student_model_path,
-                gpu_memory_utilization=sglang_gpu_memory_utilization,
+                tensor_parallel_size=student_tensor_parallel_size,
+                mem_fraction_static=sglang_mem_fraction_static,
+                max_model_len=student_max_model_len,
                 devices=student_devices,
+                micro_batch_size=student_micro_batch_size,
+                logprob_last_n_tokens=student_logprob_last_n_tokens,
             )
         else:
             from verl.experimental.reward.cot_rewriter.student_reward import VLLMStudentRewardClient
@@ -155,6 +163,18 @@ class CombinedRewardComputer:
             Dictionary with reward info and extra metrics
         """
         batch_size = len(questions)
+        
+        # Log per-sample prompts before reward computation
+        logger.log_per_sample_rewards(
+            questions=questions,
+            original_cots=original_cots,
+            rewrite_cots=rewrite_cots,
+            rewards=[0.0] * batch_size,  # Will be updated after computation
+            prefix="[REWARD_PRE]",
+            current_idx=0,
+            total=batch_size,
+            max_text_len=100
+        )
 
         # Compute cognitive reward
         # R_cog = answer_log_prob(Q, Rewritten_CoT, A) - answer_log_prob(Q, Original_CoT, A)
@@ -195,6 +215,18 @@ class CombinedRewardComputer:
 
         # Combine rewards: R = R_cog + lambda * R_logic
         total_rewards = [c + self.lambda_logic * l for c, l in zip(r_cog, r_logic)]
+        
+        # Log per-sample prompts with computed rewards
+        logger.log_per_sample_rewards(
+            questions=questions,
+            original_cots=original_cots,
+            rewrite_cots=rewrite_cots,
+            rewards=total_rewards,
+            prefix="[REWARD_POST]",
+            current_idx=0,
+            total=batch_size,
+            max_text_len=100
+        )
 
         return {
             "cognitive_rewards": r_cog,
@@ -290,11 +322,12 @@ def compute_cot_rewriter_reward(
     vllm_gpu_memory_utilization: float = 0.3,
     cleanup_after_compute: bool = True,
     reward_backend: str = "vllm",  # "sglang" or "vllm"
-    sglang_gpu_memory_utilization: float = 0.4,
-    student_max_model_len: int = 8192,  # NEW: max model len for Student vLLM
-    student_micro_batch_size: int = 4,  # NEW: micro batch size for Student vLLM
-    student_max_num_seqs: int = 1,  # NEW: limit concurrent sequences in vLLM
-    student_tensor_parallel_size: int = 1,  # NEW: TP size for Student vLLM
+    sglang_mem_fraction_static: float = 0.85,  # SGLang: mem_fraction_static
+    student_max_model_len: int = 8192,  # max model len for Student Model
+    student_micro_batch_size: int = 4,  # micro batch size for Student Model
+    student_max_num_seqs: int = 1,  # limit concurrent sequences in vLLM
+    student_tensor_parallel_size: int = 1,  # TP size for Student Model
+    student_logprob_last_n_tokens: Optional[int] = None,  # SGLang: only compute last N tokens
     **kwargs,
 ) -> Dict[str, Any]:
     """
@@ -321,8 +354,12 @@ def compute_cot_rewriter_reward(
         cleanup_after_compute: Whether to cleanup Student after reward computation
             to release GPU memory for Actor reload. Default is True.
         reward_backend: Backend to use - "sglang" or "vllm" (default: "vllm")
-        sglang_gpu_memory_utilization: GPU memory fraction for SGLang per device
-        student_max_num_seqs: Maximum concurrent sequences in vLLM (lower saves memory)
+        sglang_mem_fraction_static: GPU memory fraction for SGLang static allocation
+        student_max_model_len: Maximum sequence length for Student Model
+        student_micro_batch_size: Micro batch size for Student Model inference
+        student_max_num_seqs: Maximum concurrent sequences in vLLM (vLLM only)
+        student_tensor_parallel_size: Tensor parallelism size for Student Model
+        student_logprob_last_n_tokens: SGLang only - only compute last N tokens' logprobs
 
     Returns:
         Dictionary with:
@@ -362,47 +399,6 @@ def compute_cot_rewriter_reward(
         data.batch["responses"],
         skip_special_tokens=True,
     )
-
-    # Detect truncated responses
-    # A response is considered truncated if:
-    # 1. It reaches max_response_length (response_mask is all 1s)
-    # 2. It doesn't end with EOS token
-    truncated_indices = set()
-    truncation_penalty = kwargs.get("truncation_penalty", -1.0)
-
-    response_ids = data.batch["responses"]  # [batch_size, seq_len]
-    response_mask = data.batch.get("response_mask", None)
-    eos_token_id = tokenizer.eos_token_id
-
-    for i in range(batch_size):
-        is_truncated = False
-
-        # Method 1: Check if response_mask is all 1s (reached max length)
-        if response_mask is not None:
-            mask_sum = response_mask[i].sum().item()
-            max_len = response_mask[i].shape[0]
-            if mask_sum >= max_len * 0.99:  # Allow small tolerance
-                is_truncated = True
-
-        # Method 2: Check if last non-padding token is EOS
-        if not is_truncated:
-            # Find last non-padding token
-            resp_ids = response_ids[i]
-            # Get the actual response length from mask
-            if response_mask is not None:
-                actual_len = int(response_mask[i].sum().item())
-            else:
-                # Find first padding token (usually 0 or pad_token_id)
-                pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0
-                actual_len = (resp_ids != pad_id).sum().item()
-
-            if actual_len > 0:
-                last_token_id = resp_ids[actual_len - 1].item()
-                if last_token_id != eos_token_id:
-                    is_truncated = True
-
-        if is_truncated:
-            truncated_indices.add(i)
 
     # Extract metadata from non_tensor_batch
     questions = []
@@ -458,73 +454,34 @@ def compute_cot_rewriter_reward(
 
     print_samples = kwargs.get("print_samples", 2)
 
-    # Filter out truncated samples for reward computation
-    non_truncated_indices = [i for i in range(batch_size) if i not in truncated_indices]
-
-    if non_truncated_indices:
-        # Get or create reward computer only if there are non-truncated samples
-        reward_computer = get_reward_computer(
-            student_model_path=student_model_path,
-            fsf_model_path=fsf_model_path,
-            device=device,
-            lambda_logic=lambda_logic,
-            use_logic_reward=use_logic_reward,
-            alpha_cog=alpha_cog,
-            student_devices=student_devices,
-            reward_micro_batch_size=reward_micro_batch_size,
-            gpu_batch_size=gpu_batch_size,
-            vllm_gpu_memory_utilization=vllm_gpu_memory_utilization,
-            reward_backend=reward_backend,
-            sglang_gpu_memory_utilization=sglang_gpu_memory_utilization,
-            student_max_model_len=student_max_model_len,
-            student_micro_batch_size=student_micro_batch_size,
-            student_max_num_seqs=student_max_num_seqs,
+    # Compute rewards for ALL samples (no truncation filtering)
+    reward_computer = get_reward_computer(
+        student_model_path=student_model_path,
+        fsf_model_path=fsf_model_path,
+        device=device,
+        lambda_logic=lambda_logic,
+        use_logic_reward=use_logic_reward,
+        alpha_cog=alpha_cog,
+        student_devices=student_devices,
+        reward_micro_batch_size=reward_micro_batch_size,
+        gpu_batch_size=gpu_batch_size,
+        vllm_gpu_memory_utilization=vllm_gpu_memory_utilization,
+        reward_backend=reward_backend,
+        sglang_mem_fraction_static=sglang_mem_fraction_static,
+        student_max_model_len=student_max_model_len,
+        student_micro_batch_size=student_micro_batch_size,
+        student_max_num_seqs=student_max_num_seqs,
         student_tensor_parallel_size=student_tensor_parallel_size,
-        )
+        student_logprob_last_n_tokens=student_logprob_last_n_tokens,
+    )
 
-        # Filter data for non-truncated samples
-        filtered_questions = [questions[i] for i in non_truncated_indices]
-        filtered_original_cots = [original_cots[i] for i in non_truncated_indices]
-        filtered_rewrite_cots = [rewrite_cots[i] for i in non_truncated_indices]
-        filtered_answers = [answers[i] for i in non_truncated_indices]
-
-        # Compute rewards only for non-truncated samples
-        filtered_result = reward_computer.compute_reward(
-            questions=filtered_questions,
-            original_cots=filtered_original_cots,
-            rewrite_cots=filtered_rewrite_cots,
-            answers=filtered_answers,
-        )
-    else:
-        filtered_result = None
-
-    # Build full result arrays with truncation penalties
-    result = {
-        "cognitive_rewards": [truncation_penalty] * batch_size,
-        "rewrite_mean_log_probs": [-100.0] * batch_size,
-        "original_mean_log_probs": [-100.0] * batch_size,
-        "logic_rewards": [0.0] * batch_size,
-        "total_rewards": [truncation_penalty] * batch_size,
-        "token_log_probs": [[]] * batch_size,
-        "token_ids": [[]] * batch_size,
-        "extra_info": {
-            "original_fsfs": [0.0] * batch_size,
-            "rewrite_fsfs": [0.0] * batch_size,
-        },
-    }
-
-    # Fill in results for non-truncated samples
-    if filtered_result is not None:
-        for j, i in enumerate(non_truncated_indices):
-            result["cognitive_rewards"][i] = filtered_result["cognitive_rewards"][j]
-            result["rewrite_mean_log_probs"][i] = filtered_result["rewrite_mean_log_probs"][j]
-            result["original_mean_log_probs"][i] = filtered_result["original_mean_log_probs"][j]
-            result["logic_rewards"][i] = filtered_result["logic_rewards"][j]
-            result["total_rewards"][i] = filtered_result["total_rewards"][j]
-            result["token_log_probs"][i] = filtered_result.get("token_log_probs", [[]])[j] if j < len(filtered_result.get("token_log_probs", [])) else []
-            result["token_ids"][i] = filtered_result.get("token_ids", [[]])[j] if j < len(filtered_result.get("token_ids", [])) else []
-            result["extra_info"]["original_fsfs"][i] = filtered_result["extra_info"]["original_fsfs"][j]
-            result["extra_info"]["rewrite_fsfs"][i] = filtered_result["extra_info"]["rewrite_fsfs"][j]
+    # Compute rewards for all samples
+    result = reward_computer.compute_reward(
+        questions=questions,
+        original_cots=original_cots,
+        rewrite_cots=rewrite_cots,
+        answers=answers,
+    )
 
     # Convert to tensor
     device = data.batch["responses"].device
@@ -564,9 +521,6 @@ def compute_cot_rewriter_reward(
     for i in range(batch_size):
         token_level_rewards[i, seq_lengths[i]] = total_rewards[i]
 
-    # Build truncated mask (per-sample, can be chunked by VERL)
-    truncated_mask = [1.0 if i in truncated_indices else 0.0 for i in range(batch_size)]
-
     reward_result = {
         "reward_tensor": token_level_rewards,
         "reward_extra_info": {
@@ -577,9 +531,6 @@ def compute_cot_rewriter_reward(
             "total_rewards": result["total_rewards"],
             "original_fsfs": result["extra_info"]["original_fsfs"],
             "rewrite_fsfs": result["extra_info"]["rewrite_fsfs"],
-            # Per-sample truncation mask (1.0 = truncated, 0.0 = not truncated)
-            # This can be properly chunked by VERL's data sharding
-            "truncated_mask": truncated_mask,
         },
     }
 

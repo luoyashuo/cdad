@@ -69,42 +69,6 @@ R_logic = 1 if FSF(Rewrite_CoT) < FSF(Original_CoT) else 0
 
 本项目使用 [uv](https://docs.astral.sh/uv/) 作为 Python 包管理工具。uv 是一个极速的 Python 包管理器和解析器，用 Rust 编写。
 
-#### 1. 安装 uv
-
-```bash
-# 使用官方安装脚本
-curl -LsSf https://astral.sh/uv/install.sh | sh
-
-# 或使用 pip
-pip install uv
-```
-
-#### 2. 克隆仓库并设置项目结构
-
-```bash
-# 克隆主项目
-git clone <repository-url> cot_rewriter_grpo
-cd cot_rewriter_grpo
-
-# VERL 框架需要和本项目在同一目录下
-# 克隆 verl 框架（父目录）
-cd ..
-git clone https://github.com/volcengine/verl.git
-
-# 最终目录结构
-cdad/
-├── cot_rewriter_grpo/     # 本项目
-│   ├── src/
-│   ├── examples/
-│   ├── scripts/
-│   └── README.md
-└── verl/                   # VERL 框架
-    └── verl/
-        └── trainer/
-```
-
-#### 3. 创建虚拟环境并安装依赖
-
 ```bash
 cd cot_rewriter_grpo
 
@@ -118,20 +82,18 @@ source .venv/bin/activate
 # 安装 VERL 框架（在父目录的 verl 中）
 cd verl
 uv pip install -e .
-# uv pip install vllm==0.8.4
-cd vllm-0.8.4
-uv pip install cmake ninja packaging setuptools "setuptools-scm>=8.0" wheel jinja2 
-SETUPTOOLS_SCM_PRETEND_VERSION=0.8.4 uv pip install --editable . --no-build-isolation -v
-uv pip install sglang[all]==0.4.6.post5
+uv pip install vllm==0.8.4
+uv pip install "sglang[all]==0.4.6.post5"
 uv pip install transformers==4.55.0
 uv pip install zmq
 uv pip install swanlab
 
 uv pip install torch==2.6.0 torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
-uv pip install https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.3/flash_attn-2.7.3+cu12torch2.6cxx11abiFALSE-cp312-cp312-linux_x86_64.whl
+uv pip install https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.3/flash_attn-2.7.3+cu12torch2.7cxx11abiFALSE-cp312-cp312-linux_x86_64.whl
 
 uv pip install opentelemetry-api==1.34.1 opentelemetry-sdk==1.34.1 opentelemetry-exporter-otlp==1.34.1
 uv pip install cachetools==5.3.3 # 修复LRUCache报错
+uv pip install torch-memory-saver
 ```
 
 

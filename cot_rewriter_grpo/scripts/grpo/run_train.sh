@@ -1,43 +1,49 @@
 #!/bin/bash
-
 # CoT Rewriter GRPO 训练启动脚本
-# 基于配置文件: examples/qwen3_8b_grpo_4gpu.yaml
-#
-# 硬件配置:
-#   - GPU 1-3: Actor Model (Qwen3-8B) + Rollout Engine (训练过程)
-#   - GPU 5:   Reward Models (Student + FSF Judge, 独立资源池)
-#
+# 
 # 使用方法:
-#   bash scripts/grpo/run_train.sh                    # 使用默认配置
-#   bash scripts/grpo/run_train.sh <config_name>      # 指定配置文件
-#   bash scripts/grpo/run_train.sh <config_name> <gpus> # 指定配置和GPU
+#   通过 start_qc.sh 或 start_ruc_4gpu_80g.sh 调用，不要直接运行！
 #
-# 示例:
-#   bash scripts/grpo/run_train.sh qwen3_8b_grpo_4gpu 1,2,3,5
+# 必需的环境变量 (由调用脚本设置):
+#   - MODEL_BASE_DIR: 模型根目录
+#   - DATA_BASE_DIR: 数据根目录  
+#   - CHECKPOINT_BASE_DIR: 检查点根目录
+#   - PROJECT_BASE_DIR: 项目代码根目录
+#
+# 参数:
+#   $1: 配置文件名 (不含 .yaml 后缀，如: qwen3_4b_grpo_2x40g_lora_sglang)
+#   $2: GPU 列表 (如: 4,5)
 
-set -e  # 遇到错误立即退出
+set -e
 
-# 获取脚本所在目录
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
-
-# 默认配置
-DEFAULT_CONFIG="qwen3_4b_grpo_4gpu"
-DEFAULT_GPUS="2,3"
+# 检查必需的环境变量
+if [ -z "$MODEL_BASE_DIR" ] || [ -z "$DATA_BASE_DIR" ] || [ -z "$CHECKPOINT_BASE_DIR" ] || [ -z "$PROJECT_BASE_DIR" ]; then
+    echo "Error: 必需的环境变量未设置"
+    echo "请通过 start_qc.sh 或 start_ruc_4gpu_80g.sh 启动，不要直接运行此脚本"
+    exit 1
+fi
 
 # 解析参数
-CONFIG_NAME="${1:-$DEFAULT_CONFIG}"
-CUDA_VISIBLE_DEVICES="${2:-$DEFAULT_GPUS}"
+CONFIG_NAME="${1}"
+CUDA_VISIBLE_DEVICES="${2}"
+
+if [ -z "$CONFIG_NAME" ] || [ -z "$CUDA_VISIBLE_DEVICES" ]; then
+    echo "Error: 缺少参数"
+    echo "用法: $0 <config_name> <gpus>"
+    echo "例如: $0 qwen3_4b_grpo_2x40g_lora_sglang 4,5"
+    exit 1
+fi
 
 # 配置文件路径
-CONFIG_FILE="examples/${CONFIG_NAME}.yaml"
+CONFIG_FILE="${PROJECT_BASE_DIR}/examples/${CONFIG_NAME}.yaml"
 
-# 日志配置
-LOG_DIR="${PROJECT_ROOT}/logs/grpo"
-LOG_FILE="${LOG_DIR}/train_${CONFIG_NAME}_$(date +%Y%m%d_%H%M%S).log"
-
-# 创建日志目录
+# 日志目录
+LOG_DIR="${PROJECT_BASE_DIR}/logs/grpo"
 mkdir -p "${LOG_DIR}"
+LOG_FILE="${LOG_DIR}/${CONFIG_NAME}.log"
+
+# 清理之前的日志文件
+rm -f "${LOG_FILE}"
 
 echo "============================================================"
 echo "CoT Rewriter GRPO Training"
@@ -45,123 +51,93 @@ echo "============================================================"
 echo "Config: ${CONFIG_FILE}"
 echo "GPUs: ${CUDA_VISIBLE_DEVICES}"
 echo "Log: ${LOG_FILE}"
+echo ""
+echo "Path Configuration:"
+echo "  MODEL_BASE_DIR=${MODEL_BASE_DIR}"
+echo "  DATA_BASE_DIR=${DATA_BASE_DIR}"
+echo "  CHECKPOINT_BASE_DIR=${CHECKPOINT_BASE_DIR}"
+echo "  PROJECT_BASE_DIR=${PROJECT_BASE_DIR}"
 echo "============================================================"
 
 # 检查配置文件是否存在
-if [ ! -f "${PROJECT_ROOT}/${CONFIG_FILE}" ]; then
-    echo "Error: Config file not found: ${PROJECT_ROOT}/${CONFIG_FILE}"
-    echo "Available configs:"
-    ls -1 "${PROJECT_ROOT}/examples/"*.yaml 2>/dev/null || echo "  No yaml files found in examples/"
+if [ ! -f "${CONFIG_FILE}" ]; then
+    echo "Error: Config file not found: ${CONFIG_FILE}"
     exit 1
 fi
 
 # 设置环境变量
 export CUDA_VISIBLE_DEVICES
+export ORIGINAL_CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES}"  # 保存原始 GPU ID
+export PROJECT_BASE_DIR
+export MODEL_BASE_DIR
+export DATA_BASE_DIR
+export CHECKPOINT_BASE_DIR
+
+# Ray 配置
 export RAY_DEDUP_LOGS=1
 export RAY_memory_monitor_refresh_ms=0
-export NCCL_DEBUG=WARN
-export TOKENIZERS_PARALLELISM=false
-# PyTorch CUDA memory config - 使用原生后端并禁用可扩展段
-export PYTORCH_CUDA_ALLOC_CONF=backend:native,expandable_segments:False
-
-# NCCL 配置 - 帮助解决 CUDA driver 兼容性问题
-export NCCL_P2P_DISABLE=1
-export NCCL_IB_DISABLE=1
-export NCCL_SHM_DISABLE=0
-# 注意: 不要设置 PYTORCH_NO_CUDA_MEMORY_CACHING=1
-# 这会禁用 PyTorch CUDA 内存缓存，与 vLLM cumem allocator 一起使用时会导致冲突
-# export PYTORCH_NO_CUDA_MEMORY_CACHING=1
-# 禁用 torch.compile 以避免 CUDA Graph 问题
-export TORCH_COMPILE_DISABLE=1
-# vLLM 配置 - 使用 V1 引擎以获得更好的 sleep mode 支持
-# 注意: 配置文件中 enforce_eager=True 会禁用 CUDA Graph，避免兼容性问题
-# export VLLM_USE_V1=0  # 不再使用 V0 引擎
-# 禁用 vLLM 的 flashinfer 后端（可能有兼容性问题）
-export VLLM_ATTENTION_BACKEND=FLASH_ATTN
-# NOTE: 不要禁用 vLLM 的 cumem allocator (VLLM_DISABLE_CUMEM=1)
-# 因为 enable_sleep_mode 功能依赖 cumem allocator 来管理 GPU 内存
-# 如果禁用，sleep(level=2) 无法释放 GPU 内存
-#
-# 如果遇到 PyTorch CUDA MemPool 冲突 (captures_underway.empty() assertion),
-# 考虑使用 PYTORCH_CUDA_ALLOC_CONF=backend:native 来缓解
-# export VLLM_DISABLE_CUMEM=1  # DO NOT SET - breaks sleep mode
-export VLLM_WORKER_MULTIPROC_METHOD=spawn
-
-# CRITICAL: Disable Ray Dashboard to avoid OpenTelemetry version conflicts
-# This prevents: TypeError: Meter.create_histogram() got an unexpected keyword argument
-export RAY_DASHBOARD_HOST=""
-export RAY_enable_dashboard=0
-# Completely disable dashboard agent to avoid OpenTelemetry metrics initialization
-export RAY_DISABLE_DASHBOARD_AGENT=1
-
-# 强制 Ray 创建新的本地集群，不连接现有集群（避免权限问题）
-export RAY_ADDRESS=local
-
-# CRITICAL: 使用短路径的 Ray 临时目录，避免 Unix socket 路径长度超过 107 字节限制
-# 这样可以防止 "OSError: validate_socket_filename failed: AF_UNIX path length cannot exceed 107 bytes"
-# 同时避免与其他用户的 Ray 集群冲突，防止 "Failed to register worker to Raylet" 错误
 export RAY_TMPDIR="/tmp/ray_${USER:-$(whoami)}"
 mkdir -p "$RAY_TMPDIR"
 
-# 获取虚拟环境的 Python 路径，确保 Ray worker 使用正确的环境
-VENV_PATH="${PROJECT_ROOT}/.venv"
-# verl repo is inside PROJECT_ROOT
-VERL_PATH="${PROJECT_ROOT}/verl"
-if [ -d "$VENV_PATH" ]; then
-    export PYTHONPATH="${VENV_PATH}/lib/python3.12/site-packages:${PROJECT_ROOT}:${PROJECT_ROOT}/src:${VERL_PATH}:${PYTHONPATH}"
-    # 设置 Ray 使用的 Python 解释器
-    export RAY_PYTHON_HOME="${VENV_PATH}/bin/python"
-else
-    export PYTHONPATH="${PROJECT_ROOT}:${PROJECT_ROOT}/src:${VERL_PATH}:${PYTHONPATH}"
-fi
+# NCCL 配置
+export NCCL_DEBUG=WARN
+export NCCL_P2P_DISABLE=1
+export NCCL_IB_DISABLE=1
+export NCCL_SHM_DISABLE=0
+
+# PyTorch 配置
+export TOKENIZERS_PARALLELISM=false
+export PYTORCH_CUDA_ALLOC_CONF=backend:native,expandable_segments:False
+export TORCH_COMPILE_DISABLE=1
+
+# vLLM/SGLang 配置
+export VLLM_ATTENTION_BACKEND=FLASH_ATTN
+export VLLM_WORKER_MULTIPROC_METHOD=spawn
+
+# Ray Dashboard 配置
+export RAY_DASHBOARD_HOST=""
+export RAY_enable_dashboard=0
+export RAY_DISABLE_DASHBOARD_AGENT=1
+export RAY_ADDRESS=local
+
+# Python 路径
+export PYTHONPATH="${PROJECT_BASE_DIR}:${PROJECT_BASE_DIR}/verl:${PROJECT_BASE_DIR}/.venv/lib/python3.12/site-packages:${PYTHONPATH}"
+
+# SwanLab 配置
+export SWANLAB_MODE=cloud
+export SWANLAB_API_KEY=xmtHYzg2Bw5uh1dprg81E
+export SWANLAB_LOG_DIR="${CHECKPOINT_BASE_DIR}/swanlab"
 
 echo ""
 echo "Environment:"
 echo "  CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES}"
-echo "  PROJECT_ROOT=${PROJECT_ROOT}"
+echo "  PYTHONPATH=${PYTHONPATH}"
 echo ""
 
-# 激活虚拟环境 (如果存在)
-if [ -f "${PROJECT_ROOT}/.venv/bin/activate" ]; then
+# 激活虚拟环境
+if [ -f "${PROJECT_BASE_DIR}/.venv/bin/activate" ]; then
     echo "Activating virtual environment..."
-    source "${PROJECT_ROOT}/.venv/bin/activate"
-elif [ -f "${PROJECT_ROOT}/../.venv/bin/activate" ]; then
-    echo "Activating parent directory virtual environment..."
-    source "${PROJECT_ROOT}/../.venv/bin/activate"
+    source "${PROJECT_BASE_DIR}/.venv/bin/activate"
 fi
 
-# 检查必要的 Python 包
-echo "Checking dependencies..."
-python -c "import torch; print(f'  PyTorch: {torch.__version__}')" 2>/dev/null || echo "  Warning: PyTorch not found"
-python -c "import transformers; print(f'  Transformers: {transformers.__version__}')" 2>/dev/null || echo "  Warning: Transformers not found"
-python -c "import ray; print(f'  Ray: {ray.__version__}')" 2>/dev/null || echo "  Warning: Ray not found"
-
-echo ""
-echo "Starting training..."
-echo "  Config: ${CONFIG_FILE}"
-echo "  Output log: ${LOG_FILE}"
-echo ""
-
-# 清理残留的 Ray 进程（只清理当前用户的，避免权限问题）
-echo "Cleaning up current user's Ray processes..."
-# 不使用 ray stop，因为它会尝试停止所有用户的 Ray 进程导致权限错误
-# 只杀死当前用户拥有的 ray 相关进程
+# 清理残留的 Ray 进程
+echo "Cleaning up Ray processes..."
 pkill -u "$(whoami)" -f "ray::" 2>/dev/null || true
 pkill -u "$(whoami)" -f "raylet" 2>/dev/null || true
 pkill -u "$(whoami)" -f "gcs_server" 2>/dev/null || true
 pkill -u "$(whoami)" -f "ray._private" 2>/dev/null || true
-# 清理当前用户的 Ray 临时目录中的旧会话
 rm -rf "$RAY_TMPDIR"/session_* 2>/dev/null || true
 sleep 2
 echo "Ray cleanup complete."
 echo ""
 
-# 进入项目目录
-cd "${PROJECT_ROOT}"
-
 # 启动训练
-# 使用 verl 内置的 main_ppo.py 作为训练入口
-python verl/verl/trainer/main_ppo.py --config-path="${PROJECT_ROOT}/examples" --config-name="${CONFIG_NAME}" 2>&1 | tee "${LOG_FILE}"
+echo "Starting training..."
+cd "${PROJECT_BASE_DIR}"
+
+python verl/verl/trainer/main_ppo.py \
+    --config-path="${PROJECT_BASE_DIR}/examples" \
+    --config-name="${CONFIG_NAME}" 2>&1 | tee "${LOG_FILE}"
 
 echo ""
 echo "============================================================"

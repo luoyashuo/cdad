@@ -5,13 +5,29 @@ from verl.experimental.reward.cot_rewriter.combined_reward import (
     CombinedRewardComputer,
 )
 from verl.experimental.reward.cot_rewriter.reward_manager import CoTRewriterRewardManager
-from verl.experimental.reward.cot_rewriter.student_reward import VLLMStudentRewardClient
-from verl.experimental.reward.cot_rewriter.fsf_reward import HFFSFJudge
+
+# Optional imports - these depend on specific backends (vllm/sglang)
+# and are imported lazily to avoid hard dependencies
+try:
+    from verl.experimental.reward.cot_rewriter.student_reward import VLLMStudentRewardClient
+except ImportError:
+    VLLMStudentRewardClient = None  # vLLM not installed
+
+try:
+    from verl.experimental.reward.cot_rewriter.sglang_student_reward import SGLangStudentRewardClient
+except ImportError:
+    SGLangStudentRewardClient = None  # SGLang not installed
+
+try:
+    from verl.experimental.reward.cot_rewriter.fsf_reward import HFFSFJudge
+except ImportError:
+    HFFSFJudge = None
 
 __all__ = [
     "compute_cot_rewriter_reward",
     "CombinedRewardComputer",
     "CoTRewriterRewardManager",
     "VLLMStudentRewardClient",
+    "SGLangStudentRewardClient",
     "HFFSFJudge",
 ]

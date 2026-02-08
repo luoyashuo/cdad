@@ -10,39 +10,68 @@ The cognitive reward encourages the rewritten CoT to help the
 Student Model predict the correct answer with higher confidence
 compared to the original CoT.
 
-Uses Ray actors for multi-GPU parallelism, with each GPU running
-a separate SGLang Engine instance.
+Uses Ray actors for multi-GPU parallelism. Supports two modes:
+1. TP=1: Each GPU runs a separate SGLang instance (Data Parallelism)
+2. TP>1: Multiple GPUs share one SGLang instance (Tensor Parallelism)
+
+SGLang 特有优化：
+- enable_memory_saver: 启用内存保护，支持 release/resume_memory_occupation
+- logprob_start_len: 只计算最后 N 个 token 的 logprobs，节省显存
 """
 
+import asyncio
 from typing import Any, Dict, List, Optional
 import ray
 
 from verl.experimental.reward.cot_rewriter.logging_config import logger
+from transformers import AutoTokenizer
+import os
+import torch
 
 
 @ray.remote
 class SGLangWorkerActor:
     """
-    Ray actor that runs SGLang Engine on a specific GPU.
-    Each actor is a separate process with its own SGLang Engine instance.
+    Ray actor that runs SGLang on one or more GPUs.
+
+    Supports Tensor Parallelism (TP):
+    - TP=1: Single GPU, model weights fully on one GPU
+    - TP>1: Multiple GPUs, model weights sharded across GPUs
     """
 
     def __init__(
         self,
         model_path: str,
-        gpu_id: int,
-        gpu_memory_utilization: float = 0.4,
-        dtype: str = "float16",
+        gpu_ids: List[int],           # Physical GPU IDs (e.g., [0, 1] for TP=2)
+        logical_gpu_ids: List[int],   # Logical GPU IDs within CUDA_VISIBLE_DEVICES
+        tensor_parallel_size: int = 1,  # TP size (must equal len(gpu_ids))
+        mem_fraction_static: float = 0.85,
+        dtype: str = "bfloat16",
         max_model_len: int = 8192,
+        micro_batch_size: int = 4,
+        logprob_last_n_tokens: Optional[int] = None,  # 只计算最后 N 个 token 的 logprobs
     ):
         import os
         import subprocess
-        os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
 
-        from sglang import Engine
-        from sglang.srt.server_args import ServerArgs
-        from transformers import AutoTokenizer
-        import torch
+        # Validate TP configuration
+        assert len(gpu_ids) == tensor_parallel_size, \
+            f"gpu_ids length {len(gpu_ids)} must equal tensor_parallel_size {tensor_parallel_size}"
+        assert len(logical_gpu_ids) == tensor_parallel_size, \
+            f"logical_gpu_ids length {len(logical_gpu_ids)} must equal tensor_parallel_size {tensor_parallel_size}"
+
+        self.gpu_ids = gpu_ids
+        self.tensor_parallel_size = tensor_parallel_size
+        self.logprob_last_n_tokens = logprob_last_n_tokens
+        worker_name = f"SGLangWorker-{gpu_ids}"
+
+        # Ray actor inherits CUDA_VISIBLE_DEVICES from parent process
+        parent_cuda_devices = os.environ.get("CUDA_VISIBLE_DEVICES", "")
+
+        # Set CUDA_VISIBLE_DEVICES to all logical GPUs for this actor
+        # e.g., logical_gpu_ids=[0, 1] → "0,1" for TP=2
+        cuda_devices_str = ",".join(map(str, logical_gpu_ids))
+        os.environ["CUDA_VISIBLE_DEVICES"] = cuda_devices_str
 
         # Log GPU memory status BEFORE loading model
         def get_nvidia_smi_memory_for_gpu(gpu_idx):
@@ -65,26 +94,49 @@ class SGLangWorkerActor:
             except Exception as e:
                 return f"nvidia-smi error: {e}"
 
-        # Initialize SGLang Engine
+        def get_all_gpus_memory():
+            """Get memory for all GPUs in this actor"""
+            return ", ".join(get_nvidia_smi_memory_for_gpu(gpu) for gpu in gpu_ids)
 
-        self.gpu_id = gpu_id
-        self._get_nvidia_smi = get_nvidia_smi_memory_for_gpu
-
-        # Load tokenizer
-        self.tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
-
-        # Initialize SGLang Engine
-        # Note: SGLang uses mem_fraction_static instead of gpu_memory_utilization
-        self.engine = Engine(
-            model_path=model_path,
-            tp_size=1,
-            mem_fraction_static=gpu_memory_utilization,
-            dtype=dtype,
-            context_length=max_model_len,
-            trust_remote_code=True,
-        )
-
+        # GPU memory check (for debugging if needed)
         pass
+
+        self._worker_name = worker_name
+        self._get_nvidia_smi = get_nvidia_smi_memory_for_gpu
+        self._get_all_gpus_memory = get_all_gpus_memory
+
+        # Create event loop for SGLang (required when running in Ray actor)
+        # Reference: verl-0.5.0/verl/workers/reward_manager/prime.py
+        try:
+            self._loop = asyncio.get_running_loop()
+        except RuntimeError:
+            self._loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(self._loop)
+            logger.info(f"[SGLangWorkerActor-{gpu_ids}] Created new event loop")
+
+        # Load tokenizer and model
+        self.tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+        import time
+        import sglang as sgl
+        
+        llm_start = time.time()
+        
+        # 初始化 SGLang Engine
+        # 注意：不启用 enable_memory_saver，因为 Student Model 每次都是新建并很快销毁
+        # 不需要与 Actor/Rollout 共享 GPU 内存
+        self.engine = sgl.Engine(
+            model_path=model_path,
+            tp_size=tensor_parallel_size,
+            mem_fraction_static=mem_fraction_static,
+            dtype=dtype,
+            trust_remote_code=True,
+            enable_memory_saver=False,  # 禁用内存保护，避免与 Actor/Rollout 的 SGLang 冲突
+        )
+        
+        llm_elapsed = time.time() - llm_start
+        self.micro_batch_size = micro_batch_size
+        
+        logger.info(f"[SGLangWorkerActor-{gpu_ids}] Engine created in {llm_elapsed:.2f}s")
 
     def compute_logprobs(
         self,
@@ -94,36 +146,78 @@ class SGLangWorkerActor:
         """
         Compute log probs for a batch of prompts.
 
+        Uses micro-batching to avoid OOM with long sequences.
+        
+        SGLang 特有优化：
+        - 使用 logprob_start_len 参数只计算 answer 部分的 logprobs
+        - 这样可以大幅减少返回的数据量，节省显存
+
         Returns:
             List of dicts, each containing:
                 - mean_log_prob: float
                 - min_log_prob: float
                 - token_log_probs: List[float]
         """
-        from sglang.srt.sampling.sampling_params import SamplingParams
         import time
 
-        sampling_params = SamplingParams(
-            max_new_tokens=1,
-            return_logprob=True,
-            top_logprobs_num=1,
-            temperature=0,
-        )
+        # Ensure event loop exists (required when running in Ray actor)
+        self._ensure_event_loop()
 
-        start_time = time.time()
+        # Micro-batch processing to avoid OOM
+        all_outputs = []
+        total_time = 0
+        micro_batch_size = self.micro_batch_size
 
-        # SGLang generate with logprobs
-        outputs = self.engine.generate(
-            prompts,
-            sampling_params,
-        )
+        for i in range(0, len(prompts), micro_batch_size):
+            batch_prompts = prompts[i:i + micro_batch_size]
+            batch_ans_starts = answer_starts[i:i + micro_batch_size]
 
-        elapsed = time.time() - start_time
+            start_time = time.time()
+            
+            # SGLang 生成参数
+            # 注意：我们使用 max_tokens=1 因为只需要 logprobs，不需要生成新内容
+            # 但实际上 SGLang 需要至少生成 1 个 token 来获取 prompt_logprobs
+            batch_outputs = []
+            for prompt, ans_start in zip(batch_prompts, batch_ans_starts):
+                # 计算 logprob_start_len
+                # 如果设置了 logprob_last_n_tokens，只计算最后 N 个 token
+                # 否则计算从 answer_start 开始的所有 token
+                if self.logprob_last_n_tokens is not None and self.logprob_last_n_tokens > 0:
+                    # 先 tokenize 整个 prompt 来计算长度
+                    prompt_tokens = self.tokenizer.encode(prompt, add_special_tokens=False)
+                    prompt_len = len(prompt_tokens)
+                    # 只计算最后 N 个 token
+                    logprob_start_len = max(0, prompt_len - self.logprob_last_n_tokens)
+                else:
+                    # 计算从 answer_start 开始的所有 token
+                    logprob_start_len = ans_start
+                
+                # 调用 SGLang engine
+                # 注意：SGLang 的 generate 返回的是一个列表，每个元素是一个 dict
+                outputs = self.engine.generate(
+                    prompt=prompt,
+                    sampling_params={
+                        "max_new_tokens": 1,  # 只需要 1 个 token 来触发 prompt_logprobs
+                        "temperature": 0,
+                    },
+                    return_logprob=True,
+                    logprob_start_len=logprob_start_len,
+                    top_logprobs_num=1,
+                )
+                batch_outputs.append(outputs)
+            
+            elapsed = time.time() - start_time
+            total_time += elapsed
+
+            all_outputs.extend(batch_outputs)
+
+        speed = len(prompts) / total_time if total_time > 0 else 0
+        logger.debug(f"[SGLangWorkerActor] Logprob computation speed: {speed:.2f} samples/s")
 
         # Extract log probs with mean and min
         results = []
-        for output, ans_start in zip(outputs, answer_starts):
-            logprobs = self._extract_answer_logprobs(output, ans_start)
+        for outputs, ans_start in zip(all_outputs, answer_starts):
+            logprobs = self._extract_answer_logprobs(outputs, ans_start)
             if logprobs:
                 results.append({
                     "mean_log_prob": sum(logprobs) / len(logprobs),
@@ -139,96 +233,166 @@ class SGLangWorkerActor:
 
         return results
 
-    def _extract_answer_logprobs(self, output, answer_start_idx: int) -> List[float]:
+    def _extract_answer_logprobs(self, outputs, answer_start_idx: int) -> List[float]:
         """Extract log probabilities for the answer portion from SGLang output."""
-        log_probs = []
-
         try:
-            # SGLang output format: output has meta_info with input_token_logprobs
-            meta_info = output.get("meta_info", {})
+            # SGLang 输出格式：
+            # outputs 是一个列表，每个元素是一个 dict，包含:
+            # - meta_info: 包含 prompt_logprobs, output_logprobs 等
 
-            # Try input_token_logprobs (prompt logprobs)
-            input_token_logprobs = meta_info.get("input_token_logprobs", [])
-            if input_token_logprobs:
-                for i in range(answer_start_idx, len(input_token_logprobs)):
-                    token_info = input_token_logprobs[i]
-                    if token_info is not None:
-                        # SGLang format: (logprob, token_id, token_text) or similar
-                        if isinstance(token_info, (list, tuple)) and len(token_info) > 0:
-                            log_probs.append(float(token_info[0]))
-                        elif isinstance(token_info, dict) and "logprob" in token_info:
-                            log_probs.append(float(token_info["logprob"]))
-                        elif isinstance(token_info, (int, float)):
-                            log_probs.append(float(token_info))
+            if not outputs or len(outputs) == 0:
+                logger.info(f"[SGLangWorkerActor] Empty outputs, answer_start_idx={answer_start_idx}")
+                return []
 
-            # Fallback: try prompt_logprobs if available
-            if not log_probs:
+            output = outputs[0]  # 取第一个（也是唯一一个）输出
+
+            # Debug: 打印 output 的结构
+            logger.info(f"[SGLangWorkerActor] output type: {type(output)}, dict keys: {output.keys() if isinstance(output, dict) else 'N/A'}")
+            if isinstance(output, dict):
+                meta_info = output.get("meta_info", {})
+                logger.info(f"[SGLangWorkerActor] meta_info type: {type(meta_info)}, keys: {list(meta_info.keys()) if isinstance(meta_info, dict) else 'N/A'}")
+                # 获取 prompt_logprobs
+                # SGLang 的 prompt_logprobs 格式可能与 vLLM 不同
+                # 需要根据实际输出来解析
                 prompt_logprobs = meta_info.get("prompt_logprobs", [])
-                if prompt_logprobs:
-                    for i in range(answer_start_idx, len(prompt_logprobs)):
-                        token_info = prompt_logprobs[i]
-                        if token_info is not None:
-                            if isinstance(token_info, (list, tuple)) and len(token_info) > 0:
-                                log_probs.append(float(token_info[0]))
-                            elif isinstance(token_info, dict):
-                                lp = token_info.get("logprob", token_info.get("top_logprobs", [{}])[0].get("logprob", -100))
-                                log_probs.append(float(lp))
-                            elif isinstance(token_info, (int, float)):
-                                log_probs.append(float(token_info))
+                logger.info(f"[SGLangWorkerActor] prompt_logprobs type: {type(prompt_logprobs)}, len: {len(prompt_logprobs) if hasattr(prompt_logprobs, '__len__') else 'N/A'}")
+                if prompt_logprobs and len(prompt_logprobs) > 0:
+                    logger.info(f"[SGLangWorkerActor] first prompt_logprob type: {type(prompt_logprobs[0])}, value: {prompt_logprobs[0]}")
 
-        except Exception:
+                # 尝试其他可能的字段名
+                if not prompt_logprobs:
+                    prompt_logprobs = meta_info.get("input_logprobs", [])
+                    logger.info(f"[SGLangWorkerActor] trying input_logprobs, len: {len(prompt_logprobs) if hasattr(prompt_logprobs, '__len__') else 'N/A'}")
+                if not prompt_logprobs:
+                    prompt_logprobs = meta_info.get("logprobs", [])
+                    logger.info(f"[SGLangWorkerActor] trying logprobs, len: {len(prompt_logprobs) if hasattr(prompt_logprobs, '__len__') else 'N/A'}")
+            else:
+                logger.info(f"[SGLangWorkerActor] output is not a dict: {type(output)}")
+                prompt_logprobs = []
+
+            if not prompt_logprobs:
+                logger.info(f"[SGLangWorkerActor] No prompt_logprobs found. meta_info keys: {list(meta_info.keys()) if isinstance(meta_info, dict) else 'N/A'}")
+                return []
+
+            log_probs = []
+            for token_logprob in prompt_logprobs:
+                if token_logprob is not None:
+                    # SGLang 的 logprob 格式可能是:
+                    # - 直接是 float 值
+                    # - 或者是 dict，需要提取 logprob 字段
+                    if isinstance(token_logprob, (int, float)):
+                        log_probs.append(float(token_logprob))
+                    elif isinstance(token_logprob, dict):
+                        # 尝试提取 logprob 值
+                        lp = token_logprob.get("logprob", token_logprob.get("log_prob", None))
+                        if lp is not None:
+                            log_probs.append(float(lp))
+                    elif hasattr(token_logprob, "logprob"):
+                        log_probs.append(float(token_logprob.logprob))
+
+            logger.info(f"[SGLangWorkerActor] Extracted {len(log_probs)} log_probs, mean={sum(log_probs)/len(log_probs) if log_probs else 'N/A'}")
+            return log_probs if log_probs else [-100.0]
+
+        except Exception as e:
+            logger.warning(f"[SGLangWorkerActor] Failed to extract logprobs: {e}")
             return [-100.0]
 
-        return log_probs if log_probs else [-100.0]
+    def _ensure_event_loop(self):
+        """Ensure an event loop exists for the current thread."""
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            # No event loop in current thread, create one
+            if not hasattr(self, '_loop') or self._loop.is_closed():
+                self._loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(self._loop)
+
+    def release_memory(self):
+        """
+        释放 SGLang 占用的 GPU 显存（保留权重）。
+        使用 release_memory_occupation() 释放 KV Cache
+        
+        注意：当 enable_memory_saver=False 时，此方法不执行任何操作
+        """
+        # 当 enable_memory_saver=False 时，不需要释放内存
+        # 这是因为 Student Model 的 SGLang 实例每次都是新建并很快销毁
+        pass
+
+    def resume_memory(self):
+        """
+        恢复 SGLang 的 GPU 显存占用（恢复 KV Cache）。
+        使用 resume_memory_occupation() 恢复 KV Cache
+        
+        注意：当 enable_memory_saver=False 时，此方法不执行任何操作
+        """
+        # 当 enable_memory_saver=False 时，不需要恢复内存
+        # 这是因为 Student Model 的 SGLang 实例每次都是新建并很快销毁
+        pass
 
     def shutdown(self):
-        """Shutdown the SGLang engine to release GPU memory."""
-        if hasattr(self, 'engine') and self.engine is not None:
-            try:
+        """Shutdown the SGLang engine and release all resources."""
+        try:
+            if hasattr(self.engine, "shutdown"):
                 self.engine.shutdown()
-            except Exception:
-                pass
+            del self.engine
+            import gc
+            gc.collect()
+            torch.cuda.empty_cache()
+            logger.info(f"[SGLangWorkerActor-{self.gpu_ids}] Engine shutdown complete")
+        except Exception as e:
+            logger.warning(f"[SGLangWorkerActor-{self.gpu_ids}] Error during shutdown: {e}")
 
 
 class SGLangStudentRewardClient:
     """
     Multi-GPU SGLang-based Student Reward Client using Ray actors.
 
-    Each GPU runs a separate SGLang Engine in its own Ray actor process.
-    This avoids conflicts with the main Ray cluster and allows true parallelism.
+    Supports two modes:
+    1. TP=1 (Data Parallelism): Each GPU runs a separate SGLang instance
+       - num_actors = num_gpus
+       - Each actor processes a portion of the batch independently
 
-    Benefits:
-    1. Each GPU has its own SGLang Engine (no TP coordination overhead)
-    2. True data parallelism across GPUs
-    3. SGLang's efficient batching within each GPU
+    2. TP>1 (Tensor Parallelism): Multiple GPUs share one SGLang instance
+       - num_actors = num_gpus / tensor_parallel_size
+       - Model weights are sharded across GPUs, reducing per-GPU memory
+       - Good for large models that don't fit on single GPU
     """
 
     def __init__(
         self,
         model_path: str,
-        tensor_parallel_size: int = 1,  # Ignored, always 1 per actor
-        gpu_memory_utilization: float = 0.4,
-        dtype: str = "float16",
+        tensor_parallel_size: int = 1,  # TP size per SGLang instance
+        mem_fraction_static: float = 0.85,
+        dtype: str = "bfloat16",
         max_model_len: int = 8192,
         devices: Optional[List[str]] = None,
+        micro_batch_size: int = 4,
+        logprob_last_n_tokens: Optional[int] = None,  # 只计算最后 N 个 token 的 logprobs
     ):
         """
         Initialize Multi-GPU SGLang Student Reward Client with Ray actors.
 
         Args:
             model_path: Path to the student model
-            tensor_parallel_size: Ignored (each actor uses TP=1)
-            gpu_memory_utilization: Fraction of GPU memory to use per actor
+            tensor_parallel_size: Tensor parallelism size per SGLang instance.
+                - TP=1: Each GPU runs independent SGLang (Data Parallelism)
+                - TP=2: Every 2 GPUs share one SGLang (model sharded)
+                - TP=4: Every 4 GPUs share one SGLang
+            mem_fraction_static: Fraction of GPU memory for SGLang static allocation
             dtype: Data type for the model
             max_model_len: Maximum sequence length
             devices: List of CUDA devices (e.g., ["cuda:0", "cuda:1", "cuda:2", "cuda:3"])
+            micro_batch_size: Batch size for each micro-batch to avoid OOM
+            logprob_last_n_tokens: 只计算 answer 部分最后 N 个 token 的 logprobs，节省显存
         """
-        import torch
 
         self.model_path = model_path
-        self.gpu_memory_utilization = gpu_memory_utilization
+        self.tensor_parallel_size = tensor_parallel_size
+        self.mem_fraction_static = mem_fraction_static
         self.dtype = dtype
         self.max_model_len = max_model_len
+        self.micro_batch_size = micro_batch_size
+        self.logprob_last_n_tokens = logprob_last_n_tokens
 
         # Auto-detect devices if not specified
         if devices is None:
@@ -238,11 +402,17 @@ class SGLangStudentRewardClient:
         self.num_gpus = len(devices)
         self.gpu_ids = [int(d.split(":")[-1]) for d in devices]
 
+        # Calculate number of actors based on TP size
+        # num_actors = num_gpus / tensor_parallel_size
+        assert self.num_gpus >= tensor_parallel_size, \
+            f"num_gpus ({self.num_gpus}) must be >= tensor_parallel_size ({tensor_parallel_size})"
+        assert self.num_gpus % tensor_parallel_size == 0, \
+            f"num_gpus ({self.num_gpus}) must be divisible by tensor_parallel_size ({tensor_parallel_size})"
+        self.num_actors = self.num_gpus // tensor_parallel_size
+
         self.workers: List[ray.actor.ActorHandle] = []
         self.tokenizer = None
         self._initialized = False
-
-        logger.info(f"[SGLangStudentReward] Will use {self.num_gpus} Ray actors on GPUs: {self.gpu_ids}")
 
     def cleanup(self):
         """Cleanup Ray SGLang actors to release GPU memory."""
@@ -271,73 +441,84 @@ class SGLangStudentRewardClient:
             except:
                 return "nvidia-smi unavailable"
 
-        logger.info(f"[SGLangStudentReward] Cleaning up {len(self.workers)} SGLang Ray actors...")
-        logger.info(f"[SGLangStudentReward] nvidia-smi BEFORE cleanup: {get_nvidia_smi()}")
-
-        # Shutdown and kill all Ray actors to release GPU memory
+        # Shutdown all workers gracefully
         for i, worker in enumerate(self.workers):
             try:
-                # Try to gracefully shutdown the engine first
                 ray.get(worker.shutdown.remote())
             except Exception as e:
                 logger.warning(f"[SGLangStudentReward] Error shutting down worker {i}: {e}")
+
+        # Kill all Ray actors to release GPU memory
+        for i, worker in enumerate(self.workers):
             try:
                 ray.kill(worker)
-                logger.info(f"[SGLangStudentReward] Killed worker {i}")
             except Exception as e:
                 logger.warning(f"[SGLangStudentReward] Error killing worker {i}: {e}")
 
         self.workers = []
         self._initialized = False
 
-        # Force garbage collection and CUDA cache cleanup
-        import gc
-        import torch
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-
-        # Wait for GPU memory to be released
-        logger.info(f"[SGLangStudentReward] Waiting for GPU memory release...")
-        time.sleep(2)
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-
-        logger.info(f"[SGLangStudentReward] nvidia-smi AFTER cleanup: {get_nvidia_smi()}")
-        logger.info(f"[SGLangStudentReward] Cleanup completed")
+        torch.cuda.empty_cache()
+        logger.info(f"[SGLangStudentReward] Cleanup complete. GPU memory: {get_nvidia_smi()}")
 
     def initialize(self):
         """Lazy initialization of Ray SGLang actors."""
         if self._initialized:
             return
 
-        from transformers import AutoTokenizer
-
-        logger.info(f"[SGLangStudentReward] Initializing {self.num_gpus} SGLang Ray actors...")
-
         # Initialize tokenizer (shared, for prompt building)
         self.tokenizer = AutoTokenizer.from_pretrained(self.model_path, trust_remote_code=True)
 
-        # Create Ray actors, one per GPU
-        for gpu_id in self.gpu_ids:
-            logger.info(f"[SGLangStudentReward] Creating actor for GPU {gpu_id}...")
+        # Compute logical GPU IDs from CUDA_VISIBLE_DEVICES
+        
+        cuda_visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES", "")
+        if cuda_visible_devices:
+            # Parse physical GPU IDs from CUDA_VISIBLE_DEVICES
+            available_gpus = [int(x.strip()) for x in cuda_visible_devices.split(",") if x.strip()]
+
+            # Map physical GPU IDs to logical indices
+            physical_to_logical = {gpu: idx for idx, gpu in enumerate(available_gpus)}
+        else:
+            # No CUDA_VISIBLE_DEVICES set, assume physical == logical
+            physical_to_logical = {gpu: gpu for gpu in self.gpu_ids}
+        
+        # Group GPUs by tensor_parallel_size
+        # e.g., gpu_ids=[0,1,2,3], TP=2 → [[0,1], [2,3]]
+        gpu_groups = []
+        for i in range(0, self.num_gpus, self.tensor_parallel_size):
+            group = self.gpu_ids[i : i + self.tensor_parallel_size]
+            gpu_groups.append(group)
+
+        # Create Ray actors, one per GPU group
+        for group_idx, gpu_group in enumerate(gpu_groups):
+            # Compute logical GPU IDs for this group
+            logical_gpu_ids = [physical_to_logical.get(gpu, 0) for gpu in gpu_group]
             # Note: num_gpus=0 because we set CUDA_VISIBLE_DEVICES inside the actor
             worker = SGLangWorkerActor.options(num_gpus=0, num_cpus=1).remote(
                 model_path=self.model_path,
-                gpu_id=gpu_id,
-                gpu_memory_utilization=self.gpu_memory_utilization,
+                gpu_ids=gpu_group,
+                logical_gpu_ids=logical_gpu_ids,
+                tensor_parallel_size=self.tensor_parallel_size,
+                mem_fraction_static=self.mem_fraction_static,
                 dtype=self.dtype,
                 max_model_len=self.max_model_len,
+                micro_batch_size=self.micro_batch_size,
+                logprob_last_n_tokens=self.logprob_last_n_tokens,
             )
             self.workers.append(worker)
 
-        # Wait for all actors to initialize
-        logger.info(f"[SGLangStudentReward] Waiting for actors to initialize...")
-        ray.get([w.compute_logprobs.remote(["test"], [0]) for w in self.workers])
-        logger.info(f"[SGLangStudentReward] All {self.num_gpus} actors initialized successfully")
+        # Initialize workers with a test call
+        init_futures = [w.compute_logprobs.remote(["test"], [0]) for w in self.workers]
+        for i, future in enumerate(init_futures):
+            try:
+                result = ray.get(future, timeout=120)  # 120 second timeout for SGLang
+                logger.info(f"[SGLangStudentReward] Worker {i} initialized successfully")
+            except Exception as e:
+                logger.error(f"[SGLangStudentReward] Worker {i} init FAILED: {e}")
+                raise
 
         self._initialized = True
+        logger.info(f"[SGLangStudentReward] All {len(self.workers)} workers initialized")
 
     def _build_prompt(self, question: str, cot: str, answer: str) -> tuple[str, int]:
         """
@@ -380,7 +561,7 @@ class SGLangStudentRewardClient:
         """
         Compute cognitive rewards for a batch using multi-GPU SGLang Ray actors.
 
-        Each Ray actor runs SGLang Engine on a separate GPU. We split the batch across
+        Each Ray actor runs SGLang on a separate GPU. We split the batch across
         all actors for true data parallelism.
 
         Args:
@@ -398,12 +579,10 @@ class SGLangStudentRewardClient:
         self.initialize()
 
         batch_size = len(questions)
-        logger.info(f"[SGLangStudentReward] Computing rewards for {batch_size} samples on {self.num_gpus} GPUs")
-
         start_time = time.time()
 
         # Phase 1: Build all prompts (CPU)
-        logger.info(f"[SGLangStudentReward] Phase 1: Building prompts...")
+
         rewrite_prompts = []
         rewrite_ans_starts = []
         original_prompts = []
@@ -424,15 +603,13 @@ class SGLangStudentRewardClient:
                 original_indices.append(i)
 
         prep_time = time.time() - start_time
-        logger.info(f"[SGLangStudentReward] Phase 1 done: {prep_time:.2f}s")
 
         # Phase 2: Distribute work to Ray actors
-        logger.info(f"[SGLangStudentReward] Phase 2: Distributing work to {self.num_gpus} Ray actors...")
         inference_start = time.time()
 
-        # Split rewrite prompts across workers
-        rewrite_chunks = self._split_into_chunks(rewrite_prompts, self.num_gpus)
-        rewrite_ans_start_chunks = self._split_into_chunks(rewrite_ans_starts, self.num_gpus)
+        # Split rewrite prompts across actors (not GPUs, since TP>1 means multiple GPUs per actor)
+        rewrite_chunks = self._split_into_chunks(rewrite_prompts, self.num_actors)
+        rewrite_ans_start_chunks = self._split_into_chunks(rewrite_ans_starts, self.num_actors)
 
         # Submit rewrite tasks to all workers in parallel
         rewrite_futures = []
@@ -441,11 +618,11 @@ class SGLangStudentRewardClient:
                 future = self.workers[worker_idx].compute_logprobs.remote(prompts_chunk, ans_starts_chunk)
                 rewrite_futures.append((worker_idx, len(prompts_chunk), future))
 
-        # Split original prompts across workers (if any)
+        # Split original prompts across actors (if any)
         original_futures = []
         if original_prompts:
-            original_chunks = self._split_into_chunks(original_prompts, self.num_gpus)
-            original_ans_start_chunks = self._split_into_chunks(original_ans_starts, self.num_gpus)
+            original_chunks = self._split_into_chunks(original_prompts, self.num_actors)
+            original_ans_start_chunks = self._split_into_chunks(original_ans_starts, self.num_actors)
 
             for worker_idx, (prompts_chunk, ans_starts_chunk) in enumerate(zip(original_chunks, original_ans_start_chunks)):
                 if prompts_chunk:
@@ -453,10 +630,11 @@ class SGLangStudentRewardClient:
                     original_futures.append((worker_idx, len(prompts_chunk), future))
 
         # Gather rewrite results
-        logger.info(f"[SGLangStudentReward] Waiting for {len(rewrite_futures)} rewrite tasks...")
         rewrite_results = [None] * batch_size
         for worker_idx, chunk_size, future in rewrite_futures:
+            get_start = time.time()
             chunk_results = ray.get(future)
+            get_elapsed = time.time() - get_start
             # Place results back in original order
             start_idx = sum(len(rewrite_chunks[i]) for i in range(worker_idx))
             for i, result in enumerate(chunk_results):
@@ -465,20 +643,16 @@ class SGLangStudentRewardClient:
         # Gather original results
         original_results_map = {}
         if original_futures:
-            logger.info(f"[SGLangStudentReward] Waiting for {len(original_futures)} original tasks...")
             for worker_idx, chunk_size, future in original_futures:
+                get_start = time.time()
                 chunk_results = ray.get(future)
+                get_elapsed = time.time() - get_start
                 start_idx = sum(len(original_chunks[i]) for i in range(worker_idx))
                 for i, result in enumerate(chunk_results):
                     original_idx = original_indices[start_idx + i]
                     original_results_map[original_idx] = result
 
-        inference_time = time.time() - inference_start
-        total_time = time.time() - start_time
-        logger.info(f"[SGLangStudentReward] Phase 2 done: {inference_time:.2f}s inference, {total_time:.2f}s total")
-
         # Phase 3: Compute rewards
-        logger.info(f"[SGLangStudentReward] Phase 3: Computing rewards with alpha_cog={alpha_cog}...")
         rewards = []
         rewrite_mean_log_probs = []
         original_mean_log_probs = []
@@ -511,18 +685,11 @@ class SGLangStudentRewardClient:
             # 如果 rewrite 后答案的 log prob 更低，说明 rewrite 质量更差，reward 为负
             reward = rewrite_answer_log_prob - original_answer_log_prob
 
-            # ===== 旧的实现（仅使用 rewrite log prob，不减去 original）=====
-            # R_cog = rewrite_log_prob (不减去 original_log_prob)
-            # 直接使用 rewrite 的 answer log prob 作为 reward
-            # reward = rewrite_answer_log_prob
-
             rewards.append(reward)
             rewrite_mean_log_probs.append(rewrite_mean)
             original_mean_log_probs.append(original_mean)
             all_token_log_probs.append(rewrite_result.get("token_log_probs", []))
             all_token_ids.append([])  # Token IDs not needed for reward
-
-        logger.info(f"[SGLangStudentReward] All {batch_size} rewards computed")
 
         return {
             "rewards": rewards,
@@ -534,6 +701,36 @@ class SGLangStudentRewardClient:
             "token_log_probs": all_token_log_probs,
             "token_ids": all_token_ids,
         }
+
+    def release_memory(self):
+        """
+        释放所有 worker 的 KV Cache，保留权重。
+        用于在 reward 计算前释放显存给其他模型使用。
+        """
+        if not self._initialized:
+            return
+        
+        try:
+            futures = [w.release_memory.remote() for w in self.workers]
+            ray.get(futures, timeout=60)
+            logger.info("[SGLangStudentReward] Released memory for all workers")
+        except Exception as e:
+            logger.warning(f"[SGLangStudentReward] Failed to release memory: {e}")
+
+    def resume_memory(self):
+        """
+        恢复所有 worker 的 KV Cache。
+        用于在 reward 计算后恢复 SGLang 的完整功能。
+        """
+        if not self._initialized:
+            return
+        
+        try:
+            futures = [w.resume_memory.remote() for w in self.workers]
+            ray.get(futures, timeout=60)
+            logger.info("[SGLangStudentReward] Resumed memory for all workers")
+        except Exception as e:
+            logger.warning(f"[SGLangStudentReward] Failed to resume memory: {e}")
 
     def _split_into_chunks(self, items: List, num_chunks: int) -> List[List]:
         """Split items into roughly equal chunks."""

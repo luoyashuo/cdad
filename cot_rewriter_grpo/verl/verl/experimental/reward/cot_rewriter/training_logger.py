@@ -92,49 +92,71 @@ class TrainingLogger:
         self._log(logging.DEBUG, msg, *args, **kwargs)
     
     def log_gpu_memory(self, prefix: str = ""):
-        """Log GPU memory usage for all available GPUs.
-        
-        Args:
-            prefix: Prefix string for the log message (e.g., "[ROLLOUT_START]")
+        """Log GPU memory usage and utilization for all available GPUs using nvidia-smi.
+
+        Uses ORIGINAL_CUDA_VISIBLE_DEVICES to get physical GPU indices.
         """
-        # Try using PyTorch CUDA API first (more accurate)
-        if torch.cuda.is_available():
-            try:
-                gpu_info = []
-                for i in range(torch.cuda.device_count()):
-                    props = torch.cuda.get_device_properties(i)
-                    allocated = torch.cuda.memory_allocated(i) / 1024**3  # GB
-                    reserved = torch.cuda.memory_reserved(i) / 1024**3  # GB
-                    total = props.total_memory / 1024**3  # GB
-                    gpu_info.append(
-                        f"GPU{i}:{allocated:.1f}G/{total:.1f}G(allocated) "
-                        f"reserved:{reserved:.1f}G"
-                    )
-                self.info(f"{prefix} GPU_MEMORY {' | '.join(gpu_info)}")
-                return
-            except Exception as e:
-                self.warning(f"{prefix} Failed to get GPU memory via PyTorch: {e}, falling back to nvidia-smi")
-        
-        # Fallback: use nvidia-smi command (works even when torch.cuda.is_available() is False)
+        import subprocess
+        import os
+
         try:
+            # Try to get original CUDA_VISIBLE_DEVICES (set by launch script)
+            cuda_visible = os.environ.get("ORIGINAL_CUDA_VISIBLE_DEVICES", "")
+            if not cuda_visible:
+                # Fallback to regular CUDA_VISIBLE_DEVICES
+                cuda_visible = os.environ.get("CUDA_VISIBLE_DEVICES", "")
+
+            # Parse CUDA_VISIBLE_DEVICES to get physical GPU IDs
+            if cuda_visible:
+                # Handle formats like "0,1" or "0,1,2,3"
+                physical_gpu_ids = [int(x.strip()) for x in cuda_visible.split(',') if x.strip().isdigit()]
+            else:
+                # If not set, query all GPUs
+                result = subprocess.run(
+                    ['nvidia-smi', '--query-gpu=count', '--format=csv,noheader,nounits'],
+                    capture_output=True, text=True, timeout=5
+                )
+                gpu_count = int(result.stdout.strip())
+                physical_gpu_ids = list(range(gpu_count))
+
+            # Query nvidia-smi for all physical GPUs
             result = subprocess.run(
-                ['nvidia-smi', '--query-gpu=index,memory.used,memory.total', '--format=csv,noheader,nounits'],
+                ['nvidia-smi', '--query-gpu=index,memory.used,memory.total,utilization.gpu',
+                 '--format=csv,noheader,nounits'],
                 capture_output=True, text=True, timeout=5
             )
             lines = result.stdout.strip().split('\n')
-            gpu_info = []
+
+            # Build a dict of physical GPU info
+            gpu_info_dict = {}
             for line in lines:
                 parts = line.split(',')
-                if len(parts) >= 3:
-                    gpu_idx = parts[0].strip()
+                if len(parts) >= 4:
+                    phys_idx = int(parts[0].strip())
                     used_mb = int(parts[1].strip())
                     total_mb = int(parts[2].strip())
-                    used_gb = used_mb / 1024
-                    total_gb = total_mb / 1024
-                    gpu_info.append(f"GPU{gpu_idx}:{used_gb:.1f}G/{total_gb:.1f}G")
-            
+                    util_gpu = int(parts[3].strip())
+                    gpu_info_dict[phys_idx] = {
+                        'used_mb': used_mb,
+                        'total_mb': total_mb,
+                        'util': util_gpu
+                    }
+
+            # Format output for visible GPUs
+            gpu_info = []
+            for i, phys_id in enumerate(physical_gpu_ids):
+                if phys_id in gpu_info_dict:
+                    info = gpu_info_dict[phys_id]
+                    used_gb = info['used_mb'] / 1024
+                    total_gb = info['total_mb'] / 1024
+                    free_gb = total_gb - used_gb
+                    gpu_info.append(
+                        f"GPU{i}(phys{phys_id}):{used_gb:.1f}G/{total_gb:.1f}G ({info['util']}%) "
+                        f"free:{free_gb:.1f}G"
+                    )
+
             if gpu_info:
-                self.info(f"{prefix} GPU_MEMORY {' | '.join(gpu_info)} (via nvidia-smi)")
+                self.info(f"{prefix} GPU_MEMORY {' | '.join(gpu_info)}")
             else:
                 self.info(f"{prefix} GPU not available")
         except Exception as e:
@@ -175,15 +197,44 @@ class TrainingLogger:
         # Randomly sample and print prompts
         if sample_count > 0 and tokenizer is not None:
             sample_indices = random.sample(
-                range(len(prompts)), 
+                range(len(prompts)),
                 min(sample_count, len(prompts))
             )
             for idx in sample_indices:
                 prompt_tokens = prompts[idx]
-                # Take first max_tokens_to_print tokens
-                tokens_to_decode = prompt_tokens[:max_tokens_to_print]
-                prompt_text = tokenizer.decode(tokens_to_decode, skip_special_tokens=True)
-                self.info(f"{prefix} SAMPLE_PROMPT[{idx}]: {prompt_text[:200]}...")
+
+                # Get pad_token_id for skipping left padding
+                pad_token_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0
+
+                # Ensure tensor is on CPU for processing
+                if hasattr(prompt_tokens, 'device') and prompt_tokens.device.type != 'cpu':
+                    prompt_tokens = prompt_tokens.cpu()
+
+                # Convert to list for easier manipulation
+                token_list = prompt_tokens.tolist()
+
+                # Find first non-pad token (for left-padded sequences)
+                first_non_pad = 0
+                for tok_idx, tok in enumerate(token_list):
+                    if tok != pad_token_id:
+                        first_non_pad = tok_idx
+                        break
+
+                # Take actual content tokens (skip left padding)
+                tokens_to_decode = token_list[first_non_pad:first_non_pad + max_tokens_to_print]
+
+                # Try to decode
+                try:
+                    display_text = tokenizer.decode(tokens_to_decode, skip_special_tokens=False)
+                    # If still empty, show token count info
+                    if not display_text.strip():
+                        display_text = f"<empty decode, {len(tokens_to_decode)} tokens: {tokens_to_decode[:10]}...>"
+                except Exception as e:
+                    display_text = f"<decode error: {e}, tokens: {tokens_to_decode[:10]}>"
+
+                # Truncate long prompts for display
+                display_text = display_text[:300] if len(display_text) > 300 else display_text
+                self.info(f"{prefix} SAMPLE_PROMPT[{idx}]: {display_text}")
     
     def log_response_samples(
         self,
@@ -253,6 +304,112 @@ class TrainingLogger:
         except Exception as e:
             self.debug(f"{prefix} Failed to compute data stats: {e}")
     
+    def log_tensor_stats(
+        self,
+        tensor: torch.Tensor,
+        name: str,
+        prefix: str = "[ROLLOUT]"
+    ):
+        """Log tensor statistics (min, max, mean, std).
+        
+        Args:
+            tensor: Input tensor
+            name: Name of the tensor for logging
+            prefix: Prefix for log messages
+        """
+        try:
+            if tensor is None:
+                self.debug(f"{prefix} {name} is None")
+                return
+            
+            # Handle different tensor dimensions
+            if tensor.numel() == 0:
+                self.info(f"{prefix} {name} stats: empty tensor")
+                return
+            
+            # Convert to float for stats calculation
+            tensor_float = tensor.float()
+            
+            min_val = tensor_float.min().item()
+            max_val = tensor_float.max().item()
+            mean_val = tensor_float.mean().item()
+            std_val = tensor_float.std().item()
+            
+            self.info(
+                f"{prefix} {name}_STATS min={min_val:.4f} max={max_val:.4f} "
+                f"mean={mean_val:.4f} std={std_val:.4f} shape={list(tensor.shape)}"
+            )
+        except Exception as e:
+            self.debug(f"{prefix} Failed to compute {name} stats: {e}")
+    
+    def log_sequence_lengths(
+        self,
+        sequences: torch.Tensor,
+        pad_token_id: int = 0,
+        name: str = "sequences",
+        prefix: str = "[ROLLOUT]"
+    ):
+        """Log sequence length statistics (vLLM-style).
+        
+        Args:
+            sequences: Token sequences [batch_size, seq_len]
+            pad_token_id: Padding token ID
+            name: Name for logging
+            prefix: Prefix for log messages
+        """
+        try:
+            if sequences is None:
+                return
+            
+            batch_size = sequences.size(0)
+            # Count non-padding tokens per sequence
+            lengths = []
+            for i in range(batch_size):
+                seq = sequences[i]
+                # Find first pad token from the end
+                non_pad_mask = (seq != pad_token_id)
+                length = non_pad_mask.sum().item()
+                lengths.append(length)
+            
+            max_len = max(lengths)
+            min_len = min(lengths)
+            mean_len = sum(lengths) / len(lengths)
+            
+            self.info(
+                f"{prefix} {name}_LENGTHS max={max_len} min={min_len} "
+                f"mean={mean_len:.1f} count={len(lengths)}"
+            )
+        except Exception as e:
+            self.debug(f"{prefix} Failed to compute {name} lengths: {e}")
+    
+    def log_rewards(
+        self,
+        rewards: torch.Tensor,
+        prefix: str = "[REWARD]"
+    ):
+        """Log reward statistics (vLLM-style).
+        
+        Args:
+            rewards: Reward tensor
+            prefix: Prefix for log messages
+        """
+        try:
+            if rewards is None:
+                return
+            
+            rewards_float = rewards.float()
+            min_reward = rewards_float.min().item()
+            max_reward = rewards_float.max().item()
+            mean_reward = rewards_float.mean().item()
+            std_reward = rewards_float.std().item()
+            
+            self.info(
+                f"{prefix} REWARD_STATS min={min_reward:.4f} max={max_reward:.4f} "
+                f"mean={mean_reward:.4f} std={std_reward:.4f} count={rewards.numel()}"
+            )
+        except Exception as e:
+            self.debug(f"{prefix} Failed to compute reward stats: {e}")
+    
     def log_response_preview(
         self,
         responses: torch.Tensor,
@@ -306,14 +463,213 @@ class TrainingLogger:
                 # Try to decode
                 try:
                     text = tokenizer.decode(content_ids, skip_special_tokens=True)
-                    # Remove newlines for compact display
-                    text_compact = text.replace('\n', '↵').replace('\r', '')[:60]
-                    self.info(f"  [{i}] pos={first_non_pad_pos}-{last_non_pad_pos} len={actual_len} ids={content_ids}")
+                    text_compact = text[:60]
                     self.info(f"  [{i}] text: {text_compact}...")
                 except Exception as decode_err:
                     self.info(f"  [{i}] ids={content_ids} (decode error: {decode_err})")
         except Exception as e:
             self.debug(f"{prefix} Failed to log response preview: {e}")
+    
+    def log_per_sample_prompts(
+        self,
+        prompts: List[torch.Tensor],
+        prefix: str = "[ROLLOUT]",
+        max_tokens_to_print: int = 200,
+        tokenizer: Optional[Any] = None,
+        current_idx: int = 0,
+        total: int = 0
+    ):
+        """Log each prompt with its length and first N tokens.
+        
+        Args:
+            prompts: List of prompt token tensors
+            prefix: Prefix for log messages
+            max_tokens_to_print: Max number of tokens to decode and print
+            tokenizer: Tokenizer to decode prompts
+            current_idx: Current batch starting index (for progress)
+            total: Total number of samples (for progress)
+        """
+        if not prompts:
+            self.info(f"{prefix} No prompts to log")
+            return
+        
+        # Progress header
+        if total > 0:
+            progress_pct = 100.0 * current_idx / total if total > 0 else 0
+            self.info(f"{prefix} PROGRESS [{current_idx}/{total}] ({progress_pct:.1f}%) - Logging {len(prompts)} prompts")
+        else:
+            self.info(f"{prefix} PROGRESS - Logging {len(prompts)} prompts")
+        
+        # Log each prompt
+        for i, prompt_tokens in enumerate(prompts):
+            global_idx = current_idx + i
+
+            # Get prompt length
+            prompt_len = prompt_tokens.shape[0] if len(prompt_tokens.shape) > 0 else len(prompt_tokens)
+
+            # Decode first max_tokens_to_print tokens
+            if tokenizer is not None:
+                # Get pad_token_id for skipping left padding
+                pad_token_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0
+
+                # Skip left padding: find first non-pad token
+                tokens_for_decode = prompt_tokens
+                if hasattr(tokens_for_decode, 'device') and tokens_for_decode.device.type != 'cpu':
+                    tokens_for_decode = tokens_for_decode.cpu()
+
+                # Convert to list for easier manipulation
+                token_list = tokens_for_decode.tolist()
+
+                # Find first non-pad token (for left-padded sequences)
+                first_non_pad = 0
+                for idx, tok in enumerate(token_list):
+                    if tok != pad_token_id:
+                        first_non_pad = idx
+                        break
+
+                # Start from first non-pad token, take up to max_tokens_to_print
+                actual_content_tokens = token_list[first_non_pad:first_non_pad + max_tokens_to_print]
+
+                try:
+                    prompt_text = tokenizer.decode(actual_content_tokens, skip_special_tokens=False)
+                    # Truncate long text
+                    if len(prompt_text) > 300:
+                        prompt_text = prompt_text[:300] + "..."
+                    self.info(f"{prefix} PROMPT[{global_idx}] len={prompt_len}: {prompt_text}")
+                except Exception as e:
+                    # Fallback to token IDs
+                    token_ids = actual_content_tokens[:20]
+                    self.info(f"{prefix} PROMPT[{global_idx}] len={prompt_len} tokens={token_ids}... (decode error: {e})")
+            else:
+                # No tokenizer, just log length
+                self.info(f"{prefix} PROMPT[{global_idx}] len={prompt_len}")
+    
+    def log_per_sample_responses(
+        self,
+        responses: torch.Tensor,
+        prefix: str = "[ROLLOUT]",
+        max_tokens_to_print: int = 200,
+        tokenizer: Optional[Any] = None,
+        current_idx: int = 0,
+        total: int = 0,
+        pad_token_id: int = 0
+    ):
+        """Log each response with its length and first N tokens.
+        
+        Args:
+            responses: Response token tensor [batch_size, seq_len]
+            prefix: Prefix for log messages
+            max_tokens_to_print: Max number of tokens to decode and print
+            tokenizer: Tokenizer to decode responses
+            current_idx: Current batch starting index (for progress)
+            total: Total number of samples (for progress)
+            pad_token_id: Padding token ID
+        """
+        if responses is None:
+            self.info(f"{prefix} No responses to log")
+            return
+        
+        # Progress header
+        if total > 0:
+            progress_pct = 100.0 * current_idx / total if total > 0 else 0
+            self.info(f"{prefix} PROGRESS [{current_idx}/{total}] ({progress_pct:.1f}%) - Logging {responses.shape[0]} responses")
+        else:
+            self.info(f"{prefix} PROGRESS - Logging {responses.shape[0]} responses")
+        
+        batch_size = responses.shape[0]
+        
+        # Log each response
+        for i in range(batch_size):
+            global_idx = current_idx + i
+            response_ids = responses[i]
+            
+            # Calculate actual length (excluding padding)
+            if hasattr(response_ids, 'tolist'):
+                ids_list = response_ids.tolist()
+            else:
+                ids_list = list(response_ids)
+            
+            # Find actual length (first non-pad from start)
+            actual_len = len(ids_list)
+            for j, token_id in enumerate(ids_list):
+                if token_id == pad_token_id:
+                    actual_len = j
+                    break
+            
+            # Decode first max_tokens_to_print tokens
+            if tokenizer is not None:
+                tokens_to_decode = response_ids[:max_tokens_to_print]
+                if hasattr(tokens_to_decode, 'device') and tokens_to_decode.device.type != 'cpu':
+                    tokens_to_decode = tokens_to_decode.cpu()
+                
+                try:
+                    response_text = tokenizer.decode(tokens_to_decode, skip_special_tokens=True)
+                    # Truncate long text
+                    if len(response_text) > 300:
+                        response_text = response_text[:300] + "..."
+                    self.info(f"{prefix} RESPONSE[{global_idx}] len={actual_len}: {response_text}")
+                except Exception as e:
+                    # Fallback to token IDs
+                    token_ids = tokens_to_decode.tolist()[:20]
+                    self.info(f"{prefix} RESPONSE[{global_idx}] len={actual_len} tokens={token_ids}... (decode error: {e})")
+            else:
+                # No tokenizer, just log length
+                self.info(f"{prefix} RESPONSE[{global_idx}] len={actual_len}")
+    
+    def log_per_sample_rewards(
+        self,
+        questions: List[str],
+        original_cots: List[str],
+        rewrite_cots: List[str],
+        rewards: List[float],
+        prefix: str = "[REWARD]",
+        current_idx: int = 0,
+        total: int = 0,
+        max_text_len: int = 100
+    ):
+        """Log each sample's reward information including prompt and reward value.
+        
+        Args:
+            questions: List of questions (prompts)
+            original_cots: List of original CoTs
+            rewrite_cots: List of rewritten CoTs
+            rewards: List of reward values
+            prefix: Prefix for log messages
+            current_idx: Current batch starting index (for progress)
+            total: Total number of samples (for progress)
+            max_text_len: Max length of text to display
+        """
+        if not questions:
+            self.info(f"{prefix} No reward data to log")
+            return
+        
+        batch_size = len(questions)
+        
+        # Progress header
+        if total > 0:
+            progress_pct = 100.0 * current_idx / total if total > 0 else 0
+            self.info(f"{prefix} PROGRESS [{current_idx}/{total}] ({progress_pct:.1f}%) - Logging {batch_size} rewards")
+        else:
+            self.info(f"{prefix} PROGRESS - Logging {batch_size} rewards")
+        
+        # Log each sample
+        for i in range(batch_size):
+            global_idx = current_idx + i
+            
+            question = questions[i] if i < len(questions) else ""
+            original_cot = original_cots[i] if i < len(original_cots) else ""
+            rewrite_cot = rewrite_cots[i] if i < len(rewrite_cots) else ""
+            reward = rewards[i] if i < len(rewards) else 0.0
+            
+            # Truncate texts for display
+            question_display = question[:max_text_len] if question else "<empty>"
+            original_display = original_cot[:max_text_len] if original_cot else "<empty>"
+            rewrite_display = rewrite_cot[:max_text_len] if rewrite_cot else "<empty>"
+            
+            self.info(f"{prefix} SAMPLE[{global_idx}] reward={reward:.4f}")
+            self.info(f"{prefix}   QUESTION: {question_display}{'...' if len(question) > max_text_len else ''}")
+            self.info(f"{prefix}   ORIGINAL_CoT: {original_display}{'...' if len(original_cot) > max_text_len else ''}")
+            self.info(f"{prefix}   REWRITE_CoT: {rewrite_display}{'...' if len(rewrite_cot) > max_text_len else ''}")
 
 
 # Convenience function for quick logging

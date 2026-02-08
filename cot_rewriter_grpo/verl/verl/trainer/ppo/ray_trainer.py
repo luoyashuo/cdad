@@ -1210,6 +1210,21 @@ class RayPPOTrainer:
                     with marked_timer("gen", timing_raw, color="red"):
                         # === ROLLOUT START ===
                         training_logger.log_gpu_memory(f"[STEP_{self.global_steps}][ROLLOUT_START]")
+                        
+                        # Log per-sample prompts with progress
+                        batch_size = len(prompts_for_logging)
+                        total_samples = len(self.train_dataloader) * self.config.actor_rollout_ref.rollout.n
+                        current_batch_start = (self.global_steps - 1) * self.config.data.train_batch_size * self.config.actor_rollout_ref.rollout.n
+                        training_logger.log_per_sample_prompts(
+                            prompts=prompts_for_logging,
+                            prefix=f"[STEP_{self.global_steps}][ROLLOUT]",
+                            max_tokens_to_print=200,
+                            tokenizer=self.tokenizer,
+                            current_idx=current_batch_start,
+                            total=total_samples
+                        )
+                        
+                        # Also log summary stats
                         training_logger.log_prompt_stats(
                             prompts=prompts_for_logging,
                             prefix=f"[STEP_{self.global_steps}][ROLLOUT]",
@@ -1225,8 +1240,34 @@ class RayPPOTrainer:
                         
                         # === ROLLOUT END ===
                         training_logger.log_gpu_memory(f"[STEP_{self.global_steps}][ROLLOUT_END]")
+                        
+                        # Log per-sample responses with progress
+                        responses = gen_batch_output.batch["responses"]
+                        pad_token_id = self.tokenizer.pad_token_id if self.tokenizer.pad_token_id is not None else 0
+                        training_logger.log_per_sample_responses(
+                            responses=responses,
+                            prefix=f"[STEP_{self.global_steps}][ROLLOUT]",
+                            max_tokens_to_print=200,
+                            tokenizer=self.tokenizer,
+                            current_idx=current_batch_start,
+                            total=total_samples,
+                            pad_token_id=pad_token_id
+                        )
+                        
+                        # Also log summary stats (vLLM-style)
+                        training_logger.log_sequence_lengths(
+                            sequences=responses,
+                            pad_token_id=pad_token_id,
+                            name="RESPONSE",
+                            prefix=f"[STEP_{self.global_steps}][ROLLOUT]"
+                        )
+                        training_logger.log_tensor_stats(
+                            tensor=responses.float(),
+                            name="RESPONSE_TOKEN_IDS",
+                            prefix=f"[STEP_{self.global_steps}][ROLLOUT]"
+                        )
                         training_logger.log_response_samples(
-                            responses=[gen_batch_output.batch["responses"][i] for i in range(len(gen_batch_output.batch["responses"]))],
+                            responses=[responses[i] for i in range(len(responses))],
                             prefix=f"[STEP_{self.global_steps}][ROLLOUT]",
                             sample_count=2,
                             max_tokens_to_print=200,
@@ -1301,6 +1342,20 @@ class RayPPOTrainer:
                         
                         # === REWARD END ===
                         training_logger.log_gpu_memory(f"[STEP_{self.global_steps}][REWARD_END]")
+                        
+                        # Log reward statistics (vLLM-style)
+                        if reward_tensor is not None:
+                            training_logger.log_rewards(
+                                rewards=reward_tensor,
+                                prefix=f"[STEP_{self.global_steps}][REWARD]"
+                            )
+                            # Log per-sample reward stats
+                            training_logger.log_tensor_stats(
+                                tensor=reward_tensor.sum(dim=-1),
+                                name="SAMPLE_REWARD",
+                                prefix=f"[STEP_{self.global_steps}][REWARD]"
+                            )
+                        
                         training_logger.log_data_stats(
                             batch,
                             prefix=f"[STEP_{self.global_steps}][REWARD_POST]",

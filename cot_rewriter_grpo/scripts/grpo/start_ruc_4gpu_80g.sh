@@ -1,80 +1,76 @@
 #!/bin/bash
-# GRPO 训练启动脚本 (4 x 80G GPU 版本)
-# Model: Qwen3-4B
-#
-# GPU 分配：全部 4 张 80G GPU 用于 GRPO 训练
-# Reward Mode: Offload (临时加载到 GPU，计算完释放)
+# RUC 环境 GRPO 训练启动脚本 (4x 80GB GPU)
 #
 # 使用方法:
-#   bash scripts/grpo/start_4gpu_80g.sh              # 默认使用 GPU 0,1,2,3
-#   bash scripts/grpo/start_4gpu_80g.sh 4,5,6,7      # 指定 GPU
+#   bash scripts/grpo/start_ruc_4gpu_80g.sh              # 默认使用 GPU 0,1,2,3
+#   bash scripts/grpo/start_ruc_4gpu_80g.sh 4,5,6,7      # 指定 GPU
 
 set -e
 
-# ============== 配置区域 ==============
-# 默认 GPU 配置 (可通过命令行参数覆盖)
-ALL_GPUS="${1:-0,1,2,3}"
-NUM_GPUS=4
-CONFIG_NAME="qwen3_4b_grpo_ruc_4x80g_full"
-# ======================================
-
-export DISABLE_VERSION_CHECK=1
-
-# CRITICAL: 使用短路径的 Ray 临时目录，避免 Unix socket 路径长度超过 107 字节限制
-export RAY_TMPDIR="/tmp/ray_${USER:-$(whoami)}"
-mkdir -p "$RAY_TMPDIR"
-
-# SwanLab 配置
-export SWANLAB_MODE=cloud
-export SWANLAB_LOG_DIR=/fs/fast/u20240075/luoyashuo/checkpoints/cdad/swanlab
+# ========================================
+# RUC 环境路径配置 - 根据实际情况修改
+# ========================================
+export MODEL_BASE_DIR="/fs/fast/u20240075/models"
+export DATA_BASE_DIR="/fs/fast/u20240075/data"
+export CHECKPOINT_BASE_DIR="/fs/fast/u20240075/checkpoints"
+# ========================================
 
 # 获取脚本目录
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
-# 创建日志目录
-mkdir -p "${PROJECT_ROOT}/logs/grpo"
+export PROJECT_BASE_DIR="${PROJECT_ROOT}"
+
+# 默认配置
+DEFAULT_GPUS="0,1,2,3"
+CONFIG_NAME="qwen3_4b_grpo_ruc_4x80g_full_sglang"
+
+# 解析参数
+GPUS="${1:-$DEFAULT_GPUS}"
 
 echo "============================================================"
-echo "GRPO 训练启动 (4 x 80G GPU)"
+echo "CoT Rewriter GRPO Training (RUC 4x80G 环境)"
 echo "============================================================"
-echo "Model: Qwen3-4B (Full Parameter)"
 echo "Config: ${CONFIG_NAME}"
-echo "Training GPUs: ${ALL_GPUS} (${NUM_GPUS} GPUs)"
-echo "Reward Mode: Offload (临时加载到 GPU，计算完释放)"
+echo "GPUs: ${GPUS}"
+echo ""
+echo "Path Configuration:"
+echo "  MODEL_BASE_DIR=${MODEL_BASE_DIR}"
+echo "  DATA_BASE_DIR=${DATA_BASE_DIR}"
+echo "  CHECKPOINT_BASE_DIR=${CHECKPOINT_BASE_DIR}"
+echo "  PROJECT_BASE_DIR=${PROJECT_BASE_DIR}"
 echo "============================================================"
-
-# 清理残留的 Ray 进程
 echo ""
-echo "[准备] 清理当前用户的 Ray 进程..."
-pkill -u "$(whoami)" -f "ray::" 2>/dev/null || true
-pkill -u "$(whoami)" -f "raylet" 2>/dev/null || true
-pkill -u "$(whoami)" -f "gcs_server" 2>/dev/null || true
-pkill -u "$(whoami)" -f "ray._private" 2>/dev/null || true
-rm -rf "$RAY_TMPDIR"/session_* 2>/dev/null || true
-sleep 2
 
-# 启动 GRPO 训练
-echo ""
-echo "[启动] GRPO 训练 (GPUs ${ALL_GPUS})..."
+# 检查路径是否存在
+if [ ! -d "$MODEL_BASE_DIR" ]; then
+    echo "Warning: MODEL_BASE_DIR 不存在: $MODEL_BASE_DIR"
+    echo "请确认模型路径是否正确"
+fi
+
+if [ ! -d "$DATA_BASE_DIR" ]; then
+    echo "Warning: DATA_BASE_DIR 不存在: $DATA_BASE_DIR"
+    echo "请确认数据路径是否正确"
+fi
+
+# 创建检查点目录
+mkdir -p "$CHECKPOINT_BASE_DIR"
+
+# 后台启动训练并记录 PID
 LOG_FILE="${PROJECT_ROOT}/logs/grpo/${CONFIG_NAME}.log"
+mkdir -p "$(dirname "$LOG_FILE")"
 
-nohup bash scripts/grpo/run_train.sh ${CONFIG_NAME} ${ALL_GPUS} \
-    > "${LOG_FILE}" 2>&1 &
-GRPO_PID=$!
-echo "GRPO Training PID: ${GRPO_PID}"
+nohup bash "${SCRIPT_DIR}/run_train.sh" "${CONFIG_NAME}" "${GPUS}" > "${LOG_FILE}" 2>&1 &
+TRAIN_PID=$!
 
-echo ""
 echo "============================================================"
-echo "启动完成！"
-echo "  GRPO Training: GPUs ${ALL_GPUS}, PID ${GRPO_PID}"
+echo "训练已后台启动"
+echo "  Config: ${CONFIG_NAME}"
+echo "  GPUs: ${GPUS}"
+echo "  PID: ${TRAIN_PID}"
 echo ""
-echo "日志文件:"
-echo "  ${LOG_FILE}"
+echo "日志文件: ${LOG_FILE}"
 echo ""
-echo "实时查看日志:"
-echo "  tail -f ${LOG_FILE}"
-echo ""
-echo "停止训练:"
-echo "  kill ${GRPO_PID}"
+echo "查看日志: tail -f ${LOG_FILE}"
+echo "停止训练: kill ${TRAIN_PID}"
 echo "============================================================"

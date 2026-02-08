@@ -115,15 +115,19 @@ class FSDPSGLangShardingManager(BaseShardingManager):
     @GPUMemoryLogger(role="FSDPSGLangShardingManager enter", logger=logger)
     def __enter__(self):
         import torch.distributed as dist_module
+        import sys
         rank = dist_module.get_rank() if dist_module.is_initialized() else 0
-        print(f"[FSDPSGLangShardingManager] __enter__ START rank={rank}", flush=True)
+        sys.stderr.write(f"[FSDPSGLangShardingManager] __enter__ START rank={rank}\n")
+        sys.stderr.flush()
         self.timing = {}
         with simple_timer("reshard", self.timing):
             print(f"[FSDPSGLangShardingManager] __enter__ getting event loop rank={rank}", flush=True)
             loop = self._get_or_create_event_loop()
-            print(f"[FSDPSGLangShardingManager] __enter__ got loop, calling wake_up rank={rank}", flush=True)
+            sys.stderr.write(f"[FSDPSGLangShardingManager] __enter__ got loop, calling wake_up rank={rank}\n")
+            sys.stderr.flush()
             loop.run_until_complete(self.wake_up())
-            print(f"[FSDPSGLangShardingManager] __enter__ wake_up DONE rank={rank}", flush=True)
+            sys.stderr.write(f"[FSDPSGLangShardingManager] __enter__ wake_up DONE rank={rank}\n")
+            sys.stderr.flush()
         print(f"[FSDPSGLangShardingManager] __enter__ RETURNING rank={rank}", flush=True)
         return self
 
@@ -137,7 +141,7 @@ class FSDPSGLangShardingManager(BaseShardingManager):
         rank = dist_module.get_rank() if dist_module.is_initialized() else 0
         tp_rank = self.device_mesh["infer_tp"].get_local_rank()
         tp_size = self.device_mesh["infer_tp"].mesh.size()[0]
-        print(f"[SGLang update_weights] rank={rank} tp_rank={tp_rank} tp_size={tp_size} START", flush=True)
+#         print(f"[SGLang update_weights] rank={rank} tp_rank={tp_rank} tp_size={tp_size} START", flush=True)
 
         # Most naive implementation, can optimize a lot if it is bottleneck from sglang Engine weight update
         named_tensors = [(k, v) for k, v in params.items()]
@@ -146,7 +150,7 @@ class FSDPSGLangShardingManager(BaseShardingManager):
         update_weights_bucket_bytes = int(self.rollout_config.update_weights_bucket_megabytes) << 20
         batch_idx = 0
         for batch in get_named_tensor_buckets(named_tensors, update_weights_bucket_bytes):
-            print(f"[SGLang update_weights] rank={rank} batch={batch_idx} serialize START, batch_size={len(batch)}", flush=True)
+#             print(f"[SGLang update_weights] rank={rank} batch={batch_idx} serialize START, batch_size={len(batch)}", flush=True)
             # On each rank, serialize a batch of (name, tensor) tuples.
             # named_tensors_batch will be a list like:
             # [(name0, serialized_tensor0_tp0), (name1, serialized_tensor1_tp0), ...]
@@ -154,7 +158,7 @@ class FSDPSGLangShardingManager(BaseShardingManager):
                 (name, MultiprocessingSerializer.serialize(_preprocess_tensor_for_update_weights(tensor)))
                 for name, tensor in batch
             ]
-            print(f"[SGLang update_weights] rank={rank} batch={batch_idx} serialize DONE", flush=True)
+#             print(f"[SGLang update_weights] rank={rank} batch={batch_idx} serialize DONE", flush=True)
 
             # Check if this rank has the engine (handles tensor_model_parallel_size=1 case)
             has_engine = self.inference_engine is not None
@@ -163,12 +167,12 @@ class FSDPSGLangShardingManager(BaseShardingManager):
                 # When tensor_model_parallel_size=1, each rank is in its own TP group.
                 # No need to gather, just process locally on the rank with engine.
                 if has_engine:
-                    print(f"[SGLang update_weights] rank={rank} tp_size=1 batch={batch_idx} processing locally", flush=True)
+#                     print(f"[SGLang update_weights] rank={rank} tp_size=1 batch={batch_idx} processing locally", flush=True)
                     # Wrap in a list to match the expected format
                     gathered_serialized_batches = [named_tensors_batch]
                     
                     # Use zip(*) to "transpose" the data structure.
-                    print(f"[SGLang update_weights] rank={rank} batch={batch_idx} update_weights_from_tensor START", flush=True)
+#                     print(f"[SGLang update_weights] rank={rank} batch={batch_idx} update_weights_from_tensor START", flush=True)
                     logical_tensors = zip(*gathered_serialized_batches, strict=True)
 
                     await self.inference_engine.update_weights_from_tensor(
@@ -187,9 +191,9 @@ class FSDPSGLangShardingManager(BaseShardingManager):
                         load_format=load_format,
                         flush_cache=False,
                     )
-                    print(f"[SGLang update_weights] rank={rank} batch={batch_idx} update_weights_from_tensor DONE", flush=True)
+#                     print(f"[SGLang update_weights] rank={rank} batch={batch_idx} update_weights_from_tensor DONE", flush=True)
                 else:
-                    print(f"[SGLang update_weights] rank={rank} tp_size=1 batch={batch_idx} skipping (no engine)", flush=True)
+                    pass  # print(f"[SGLang update_weights] rank={rank} tp_size=1 batch={batch_idx} skipping (no engine)", flush=True)
             else:
                 # When tensor_model_parallel_size > 1, gather data from all TP ranks to rank 0.
                 if tp_rank == 0:
@@ -199,18 +203,18 @@ class FSDPSGLangShardingManager(BaseShardingManager):
                     gathered_serialized_batches = None
 
                 # Gather the named_tensors_batch from all ranks to rank 0 in the TP group.
-                print(f"[SGLang update_weights] rank={rank} tp_rank={tp_rank} tp_size={tp_size} batch={batch_idx} gather_object START", flush=True)
+#                 print(f"[SGLang update_weights] rank={rank} tp_rank={tp_rank} tp_size={tp_size} batch={batch_idx} gather_object START", flush=True)
                 dist.gather_object(
                     obj=named_tensors_batch,
                     object_gather_list=gathered_serialized_batches,
                     dst=0,
                     group=self.device_mesh["infer_tp"].get_group(),
                 )
-                print(f"[SGLang update_weights] rank={rank} batch={batch_idx} gather_object DONE", flush=True)
+#                 print(f"[SGLang update_weights] rank={rank} batch={batch_idx} gather_object DONE", flush=True)
 
                 if has_engine:
                     # Use zip(*) to "transpose" the data structure.
-                    print(f"[SGLang update_weights] rank={rank} batch={batch_idx} update_weights_from_tensor START", flush=True)
+#                     print(f"[SGLang update_weights] rank={rank} batch={batch_idx} update_weights_from_tensor START", flush=True)
                     logical_tensors = zip(*gathered_serialized_batches, strict=True)
 
                     await self.inference_engine.update_weights_from_tensor(
@@ -229,29 +233,35 @@ class FSDPSGLangShardingManager(BaseShardingManager):
                         load_format=load_format,
                         flush_cache=False,
                     )
-                    print(f"[SGLang update_weights] rank={rank} batch={batch_idx} update_weights_from_tensor DONE", flush=True)
+#                     print(f"[SGLang update_weights] rank={rank} batch={batch_idx} update_weights_from_tensor DONE", flush=True)
             batch_idx += 1
 
         if self.inference_engine is not None:
-            print(f"[SGLang update_weights] rank={rank} flush_cache START", flush=True)
+#             print(f"[SGLang update_weights] rank={rank} flush_cache START", flush=True)
             await self.inference_engine.flush_cache()
-            print(f"[SGLang update_weights] rank={rank} flush_cache DONE", flush=True)
-        print(f"[SGLang update_weights] rank={rank} DONE", flush=True)
+#             print(f"[SGLang update_weights] rank={rank} flush_cache DONE", flush=True)
+#         print(f"[SGLang update_weights] rank={rank} DONE", flush=True)
 
     async def release_memory(self):
-        if self.inference_engine is not None and self.rollout_config.free_cache_engine:
+        # NOTE: Only TP rank 0 should call release_memory_occupation
+        tp_rank = self.device_mesh["infer_tp"].get_local_rank()
+        if tp_rank == 0 and self.inference_engine is not None and self.rollout_config.free_cache_engine:
             await self.inference_engine.release_memory_occupation()
 
     @GPUMemoryLogger(role="FSDPSGLangShardingManager enter", logger=logger)
     async def wake_up(self):
         import torch.distributed as dist
         rank = dist.get_rank() if dist.is_initialized() else 0
-        print(f"[SGLang wake_up] rank={rank} START", flush=True)
+#         print(f"[SGLang wake_up] rank={rank} START", flush=True)
 
         get_torch_device().empty_cache()
-        print(f"[SGLang wake_up] rank={rank} after empty_cache", flush=True)
+#         print(f"[SGLang wake_up] rank={rank} after empty_cache", flush=True)
 
-        if self.inference_engine is not None and self.rollout_config.free_cache_engine:
+        # NOTE: Only TP rank 0 should call resume_memory_occupation
+        # This matches the original verl 0.5.0 behavior
+        tp_rank = self.device_mesh["infer_tp"].get_local_rank()
+        print(f"[SGLang wake_up] rank={rank} tp_rank={tp_rank} engine={self.inference_engine is not None} free_cache={self.rollout_config.free_cache_engine} multi_stage={self.multi_stage_wake_up}", flush=True)
+        if tp_rank == 0 and self.inference_engine is not None and self.rollout_config.free_cache_engine:
             print(f"[SGLang wake_up] rank={rank} resume_memory_occupation START", flush=True)
             if self.multi_stage_wake_up:
                 await self.inference_engine.resume_memory_occupation(tags=["weights"])
@@ -261,12 +271,12 @@ class FSDPSGLangShardingManager(BaseShardingManager):
                 log_gpu_memory_usage("Before resume SGLang weights + kv_cache in sharding manager", logger=logger)
             print(f"[SGLang wake_up] rank={rank} resume_memory_occupation DONE", flush=True)
 
-        print(f"[SGLang wake_up] rank={rank} before state_dict", flush=True)
+#         print(f"[SGLang wake_up] rank={rank} before state_dict", flush=True)
         log_gpu_memory_usage("Before state_dict() in sharding manager memory", logger=logger)
         if self.offload_param:
             load_fsdp_model_to_gpu(self.module)
         params = self.module.state_dict()
-        print(f"[SGLang wake_up] rank={rank} after state_dict, num_params={len(params)}", flush=True)
+#         print(f"[SGLang wake_up] rank={rank} after state_dict, num_params={len(params)}", flush=True)
         log_gpu_memory_usage("After state_dict() in sharding manager memory", logger=logger)
         device = get_device_id()  # used when fsdp2 set cpu_offload_policy
         params = {
@@ -275,11 +285,11 @@ class FSDPSGLangShardingManager(BaseShardingManager):
 
         # convert weight keys to match the model config
         params = convert_weight_keys(params, getattr(self.module, "_fsdp_wrapped_module", self.module))
-        print(f"[SGLang wake_up] rank={rank} before update_weights", flush=True)
+#         print(f"[SGLang wake_up] rank={rank} before update_weights", flush=True)
 
         # Copy, not share memory
         await self.update_weights(params)
-        print(f"[SGLang wake_up] rank={rank} after update_weights", flush=True)
+#         print(f"[SGLang wake_up] rank={rank} after update_weights", flush=True)
         log_gpu_memory_usage("After sync model weights in sharding manager", logger=logger)
 
         del params
@@ -288,10 +298,12 @@ class FSDPSGLangShardingManager(BaseShardingManager):
         get_torch_device().empty_cache()
         log_gpu_memory_usage("After del state_dict and empty_cache in sharding manager", logger=logger)
 
+        # NOTE: Only TP rank 0 should call resume_memory_occupation
         if (
             self.multi_stage_wake_up
             and self.rollout_config.free_cache_engine
             and self.inference_engine is not None
+            and tp_rank == 0
         ):
             await self.inference_engine.resume_memory_occupation(tags=["kv_cache"])
             log_gpu_memory_usage("After resume SGLang kv_cache in sharding manager", logger=logger)
