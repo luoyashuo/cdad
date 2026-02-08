@@ -78,7 +78,7 @@ actor_rollout_ref:
     lora_rank: 0
 
   actor:
-    strategy: fsdp2
+    strategy: fsdp
     ppo_epochs: 1
     clip_ratio: 0.2
     entropy_coeff: 0.01
@@ -91,12 +91,13 @@ actor_rollout_ref:
     kl_loss_type: low_var_kl
 
     fsdp_config:
-      # FSDP2 配置（与 FSDP1 不同）
-      offload_policy: false  # FSDP2: 替代 param_offload + optimizer_offload
-      reshard_after_forward: true  # FSDP2 特有：前向传播后重新分片减少内存
-      fsdp_size: -1  # -1 表示自动
-      model_dtype: bf16  # 设置模型为 BF16，避免 Flash Attention FP32 警告
-
+      dtype: bfloat16
+      param_offload: false
+      optimizer_offload: true  # 优化器状态 offload 可以安全启用
+      mixed_precision:
+        param_dtype: bf16
+        reduce_dtype: fp32
+        buffer_dtype: bf16
     optim:
       lr: 1e-5
       weight_decay: 0.01

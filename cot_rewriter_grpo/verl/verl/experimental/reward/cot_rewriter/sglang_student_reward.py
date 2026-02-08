@@ -133,6 +133,13 @@ class SGLangWorkerActor:
             enable_memory_saver=False,  # 禁用内存保护，避免与 Actor/Rollout 的 SGLang 冲突
         )
         
+        # CRITICAL: Re-create event loop after Engine creation
+        # because sglang forces uvloop policy which clears the existing event loop
+        # This must be done before any generate() calls
+        self._loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self._loop)
+        logger.info(f"[SGLangWorkerActor-{gpu_ids}] Event loop re-created after Engine init")
+        
         llm_elapsed = time.time() - llm_start
         self.micro_batch_size = micro_batch_size
         
@@ -179,21 +186,13 @@ class SGLangWorkerActor:
             # 但实际上 SGLang 需要至少生成 1 个 token 来获取 prompt_logprobs
             batch_outputs = []
             for prompt, ans_start in zip(batch_prompts, batch_ans_starts):
-                # 计算 logprob_start_len
-                # 如果设置了 logprob_last_n_tokens，只计算最后 N 个 token
-                # 否则计算从 answer_start 开始的所有 token
-                if self.logprob_last_n_tokens is not None and self.logprob_last_n_tokens > 0:
-                    # 先 tokenize 整个 prompt 来计算长度
-                    prompt_tokens = self.tokenizer.encode(prompt, add_special_tokens=False)
-                    prompt_len = len(prompt_tokens)
-                    # 只计算最后 N 个 token
-                    logprob_start_len = max(0, prompt_len - self.logprob_last_n_tokens)
-                else:
-                    # 计算从 answer_start 开始的所有 token
-                    logprob_start_len = ans_start
+                # IMPORTANT: Set logprob_start_len=ans_start to ONLY get answer portion logprobs
+                # SGLang's input_token_logprobs only includes tokens from logprob_start_len onwards
+                # We only need answer tokens, not question and CoT tokens
+                logprob_start_len = ans_start
                 
                 # 调用 SGLang engine
-                # 注意：SGLang 的 generate 返回的是一个列表，每个元素是一个 dict
+                # 注意：SGLang 的 generate 返回的是一个 dict (single prompt) 或 list
                 outputs = self.engine.generate(
                     prompt=prompt,
                     sampling_params={
@@ -234,67 +233,61 @@ class SGLangWorkerActor:
         return results
 
     def _extract_answer_logprobs(self, outputs, answer_start_idx: int) -> List[float]:
-        """Extract log probabilities for the answer portion from SGLang output."""
+        """Extract log probabilities for the answer portion from SGLang output.
+        
+        SGLang output format:
+        - outputs is a dict (or list containing a dict)
+        - meta_info contains 'input_token_logprobs' which is a list of tuples:
+          [(logprob, token_id, token_text), ...]
+        - First token's logprob may be None
+        """
         try:
-            # SGLang 输出格式：
-            # outputs 是一个列表，每个元素是一个 dict，包含:
-            # - meta_info: 包含 prompt_logprobs, output_logprobs 等
-
-            if not outputs or len(outputs) == 0:
-                logger.info(f"[SGLangWorkerActor] Empty outputs, answer_start_idx={answer_start_idx}")
-                return []
-
-            output = outputs[0]  # 取第一个（也是唯一一个）输出
-
-            # Debug: 打印 output 的结构
-            logger.info(f"[SGLangWorkerActor] output type: {type(output)}, dict keys: {output.keys() if isinstance(output, dict) else 'N/A'}")
-            if isinstance(output, dict):
-                meta_info = output.get("meta_info", {})
-                logger.info(f"[SGLangWorkerActor] meta_info type: {type(meta_info)}, keys: {list(meta_info.keys()) if isinstance(meta_info, dict) else 'N/A'}")
-                # 获取 prompt_logprobs
-                # SGLang 的 prompt_logprobs 格式可能与 vLLM 不同
-                # 需要根据实际输出来解析
-                prompt_logprobs = meta_info.get("prompt_logprobs", [])
-                logger.info(f"[SGLangWorkerActor] prompt_logprobs type: {type(prompt_logprobs)}, len: {len(prompt_logprobs) if hasattr(prompt_logprobs, '__len__') else 'N/A'}")
-                if prompt_logprobs and len(prompt_logprobs) > 0:
-                    logger.info(f"[SGLangWorkerActor] first prompt_logprob type: {type(prompt_logprobs[0])}, value: {prompt_logprobs[0]}")
-
-                # 尝试其他可能的字段名
-                if not prompt_logprobs:
-                    prompt_logprobs = meta_info.get("input_logprobs", [])
-                    logger.info(f"[SGLangWorkerActor] trying input_logprobs, len: {len(prompt_logprobs) if hasattr(prompt_logprobs, '__len__') else 'N/A'}")
-                if not prompt_logprobs:
-                    prompt_logprobs = meta_info.get("logprobs", [])
-                    logger.info(f"[SGLangWorkerActor] trying logprobs, len: {len(prompt_logprobs) if hasattr(prompt_logprobs, '__len__') else 'N/A'}")
+            # Handle both dict and list outputs
+            if isinstance(outputs, dict):
+                output = outputs
+            elif isinstance(outputs, list) and len(outputs) > 0:
+                output = outputs[0]
             else:
-                logger.info(f"[SGLangWorkerActor] output is not a dict: {type(output)}")
-                prompt_logprobs = []
-
-            if not prompt_logprobs:
-                logger.info(f"[SGLangWorkerActor] No prompt_logprobs found. meta_info keys: {list(meta_info.keys()) if isinstance(meta_info, dict) else 'N/A'}")
+                logger.info(f"[SGLangWorkerActor] Empty or invalid outputs: {type(outputs)}")
                 return []
 
-            log_probs = []
-            for token_logprob in prompt_logprobs:
-                if token_logprob is not None:
-                    # SGLang 的 logprob 格式可能是:
-                    # - 直接是 float 值
-                    # - 或者是 dict，需要提取 logprob 字段
-                    if isinstance(token_logprob, (int, float)):
-                        log_probs.append(float(token_logprob))
-                    elif isinstance(token_logprob, dict):
-                        # 尝试提取 logprob 值
-                        lp = token_logprob.get("logprob", token_logprob.get("log_prob", None))
-                        if lp is not None:
-                            log_probs.append(float(lp))
-                    elif hasattr(token_logprob, "logprob"):
-                        log_probs.append(float(token_logprob.logprob))
+            if not isinstance(output, dict):
+                logger.info(f"[SGLangWorkerActor] output is not a dict: {type(output)}")
+                return []
 
-            logger.info(f"[SGLangWorkerActor] Extracted {len(log_probs)} log_probs, mean={sum(log_probs)/len(log_probs) if log_probs else 'N/A'}")
-            return log_probs if log_probs else [-100.0]
+            meta_info = output.get("meta_info", {})
+            
+            # Get input_token_logprobs (this is the correct field name in SGLang)
+            input_token_logprobs = meta_info.get("input_token_logprobs", [])
+            
+            if not input_token_logprobs:
+                logger.info(f"[SGLangWorkerActor] No input_token_logprobs found. meta_info keys: {list(meta_info.keys())}")
+                return []
+
+            # Extract logprobs from tuples (logprob, token_id, token_text)
+            # Note: Since we set logprob_start_len=ans_start in generate(),
+            # input_token_logprobs already contains ONLY answer portion logprobs
+            log_probs = []
+            for token_tuple in input_token_logprobs:
+                if isinstance(token_tuple, tuple) and len(token_tuple) >= 2:
+                    logprob = token_tuple[0]
+                    if logprob is not None:
+                        log_probs.append(float(logprob))
+                elif isinstance(token_tuple, (int, float)):
+                    # Direct value (shouldn't happen with SGLang, but handle anyway)
+                    log_probs.append(float(token_tuple))
+
+            if log_probs:
+                logger.info(f"[SGLangWorkerActor] Extracted {len(log_probs)} log_probs, mean={sum(log_probs)/len(log_probs):.4f}")
+                return log_probs
+            else:
+                logger.info(f"[SGLangWorkerActor] No valid logprobs extracted")
+                return [-100.0]
 
         except Exception as e:
             logger.warning(f"[SGLangWorkerActor] Failed to extract logprobs: {e}")
+            import traceback
+            logger.warning(f"[SGLangWorkerActor] Traceback: {traceback.format_exc()}")
             return [-100.0]
 
     def _ensure_event_loop(self):

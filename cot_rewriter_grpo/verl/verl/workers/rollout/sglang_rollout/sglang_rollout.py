@@ -757,6 +757,35 @@ class SGLangRollout(BaseRollout):
             src=self._device_mesh_cpu["tp"].mesh[0].item(),
             force_cpu_device=False,
         )
+        
+        # Handle case where output is None (e.g., generation failed or empty prompts)
+        if output is None:
+            logger.warning("[SGLangRollout] Output from async_generate is None. Creating empty response.")
+            # Create empty output structure - responses will be padded later
+            batch_size = idx.shape[0]
+            empty_response = torch.full((batch_size, 1), self.pad_token_id, dtype=torch.long, device=idx.device)
+            seq = torch.cat([idx, empty_response], dim=-1)
+            response_length = 1
+            
+            response_position_ids = position_ids[..., -1:] + 1
+            position_ids = torch.cat([position_ids, response_position_ids], dim=-1)
+            response_attention_mask = get_response_mask(
+                response_id=empty_response, eos_token=eos_token_id, dtype=attention_mask.dtype
+            )
+            attention_mask = torch.cat((attention_mask, response_attention_mask), dim=-1)
+            
+            batch = TensorDict(
+                {
+                    "prompts": idx,
+                    "responses": empty_response,
+                    "input_ids": seq,
+                    "attention_mask": attention_mask,
+                    "position_ids": position_ids,
+                },
+                batch_size=batch_size,
+            )
+            return DataProto(batch=batch, meta_info=gen_batch.meta_info)
+        
         out = _post_process_outputs(self.processing_class, output)
 
         response = out[0].to(idx.device)

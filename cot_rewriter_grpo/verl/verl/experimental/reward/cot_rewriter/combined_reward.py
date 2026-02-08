@@ -315,6 +315,7 @@ def compute_cot_rewriter_reward(
     lambda_logic: float = 0.5,
     use_logic_reward: bool = True,
     alpha_cog: float = 0.01,
+    alpha: Optional[float] = None,  # Alias for alpha_cog (from config)
     field_mapping: Optional[Dict[str, str]] = None,
     student_devices: Optional[List[str]] = None,
     reward_micro_batch_size: Optional[int] = None,
@@ -330,6 +331,9 @@ def compute_cot_rewriter_reward(
     student_logprob_last_n_tokens: Optional[int] = None,  # SGLang: only compute last N tokens
     **kwargs,
 ) -> Dict[str, Any]:
+    # Use alpha if provided (from config), otherwise use alpha_cog
+    if alpha is not None:
+        alpha_cog = alpha
     """
     VERL-compatible reward function interface.
 
