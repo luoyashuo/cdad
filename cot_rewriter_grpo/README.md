@@ -108,3 +108,4 @@ uv pip install torch-memory-saver
 4. 训练过程中模型崩溃，出现repeat和乱码：
   - 有可能是offload的问题，关闭优化器offload可能会解决
   - 加kl_penalty
+5. tp不能开太大，因为返回logits的时候rank 0 有额外开销汇总logits，所以tp开太大可能会导致OOM

@@ -51,7 +51,7 @@ data:
   val_batch_size: 4    # [SCALED] 1 -> 4
   gen_batch_size: 4    # [SCALED] 1 -> 4
   max_prompt_length: 5500
-  max_response_length: 5500
+  max_response_length: 8000
   return_raw_chat: true
   dataloader_num_workers: 8  # [SCALED] 2 -> 8 (匹配 GPU 数量)
   reward_fn_key: reward_model
@@ -100,7 +100,7 @@ actor_rollout_ref:
         reduce_dtype: fp32
         buffer_dtype: bf16
     optim:
-      lr: 1e-5
+      lr: 2e-5
       weight_decay: 0.01
       lr_scheduler_type: cosine
       lr_warmup_steps_ratio: 0.03
@@ -119,9 +119,9 @@ actor_rollout_ref:
     temperature: 1.0
     top_p: 0.95
     prompt_length: 5500
-    response_length: 5500
-    max_num_batched_tokens: 44000  # batch_size(4) * (5500+5500) = 44000，TP=4 可适当提高吞吐
-    max_model_len: 11000
+    response_length: 8000
+    max_num_batched_tokens: 54000  # batch_size(4) * (5500+5500) = 44000，TP=4 可适当提高吞吐
+    max_model_len: 13500
     enforce_eager: true
     free_cache_engine: true
     sleep_level: 1
@@ -165,7 +165,7 @@ custom_reward_function:
     # ========== Student Model 配置（认知奖励必需）==========
     student_model_path: ${oc.env:MODEL_BASE_DIR}/Qwen/Qwen3-1.7B
     # student_devices: 不设置时自动使用所有可见 GPU (CUDA_VISIBLE_DEVICES)
-    student_tensor_parallel_size: 1
+    student_tensor_parallel_size: 2
     student_max_model_len: 12000
     student_micro_batch_size: 4  # [SCALED] 1 -> 4 (匹配 batch size)
 

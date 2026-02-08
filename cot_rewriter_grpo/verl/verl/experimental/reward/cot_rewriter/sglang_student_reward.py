@@ -114,23 +114,51 @@ class SGLangWorkerActor:
             asyncio.set_event_loop(self._loop)
             logger.info(f"[SGLangWorkerActor-{gpu_ids}] Created new event loop")
 
-        # Load tokenizer and model
+        # Save initialization parameters for lazy engine creation
+        self._model_path = model_path
+        self._tensor_parallel_size = tensor_parallel_size
+        self._mem_fraction_static = mem_fraction_static
+        self._dtype = dtype
+        self._micro_batch_size = micro_batch_size
+
+        # Load tokenizer
         self.tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+
+        # Engine will be created lazily in _init_engine() to avoid port conflicts
+        self.engine = None
+        self._engine_initialized = False
+
+        # Track memory state for release/resume
+        self._memory_released = False
+
+        logger.info(f"[SGLangWorkerActor-{gpu_ids}] Actor created, engine will be initialized on first use")
+
+    def _init_engine(self):
+        """
+        Initialize SGLang Engine on demand.
+
+        This is called separately from __init__ to avoid port conflicts when
+        multiple workers are created simultaneously. The engine should be
+        initialized serially (one worker at a time) to prevent race conditions.
+        """
+        if self._engine_initialized:
+            return
+
         import time
         import sglang as sgl
 
         llm_start = time.time()
 
-        # 初始化 SGLang Engine
-        # 使用 enable_memory_saver=True 支持显存释放/恢复机制
-        # 这样可以避免每次 cleanup/recreate 导致的端口冲突问题
+        # Initialize SGLang Engine
+        # Using enable_memory_saver=True to support memory release/resume mechanism
+        # This avoids port conflicts from cleanup/recreate cycles
         self.engine = sgl.Engine(
-            model_path=model_path,
-            tp_size=tensor_parallel_size,
-            mem_fraction_static=mem_fraction_static,
-            dtype=dtype,
+            model_path=self._model_path,
+            tp_size=self._tensor_parallel_size,
+            mem_fraction_static=self._mem_fraction_static,
+            dtype=self._dtype,
             trust_remote_code=True,
-            enable_memory_saver=True,  # 启用内存保护，支持 release/resume_memory_occupation
+            enable_memory_saver=True,
         )
 
         # CRITICAL: Re-create event loop after Engine creation
@@ -138,15 +166,13 @@ class SGLangWorkerActor:
         # This must be done before any generate() calls
         self._loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self._loop)
-        logger.info(f"[SGLangWorkerActor-{gpu_ids}] Event loop re-created after Engine init")
+        logger.info(f"[SGLangWorkerActor-{self.gpu_ids}] Event loop re-created after Engine init")
 
         llm_elapsed = time.time() - llm_start
-        self.micro_batch_size = micro_batch_size
+        self.micro_batch_size = self._micro_batch_size
+        self._engine_initialized = True
 
-        # Track memory state for release/resume
-        self._memory_released = False
-
-        logger.info(f"[SGLangWorkerActor-{gpu_ids}] Engine created in {llm_elapsed:.2f}s")
+        logger.info(f"[SGLangWorkerActor-{self.gpu_ids}] Engine created in {llm_elapsed:.2f}s")
 
     def compute_logprobs(
         self,
@@ -169,6 +195,9 @@ class SGLangWorkerActor:
                 - token_log_probs: List[float]
         """
         import time
+
+        # Initialize engine on first use (lazy initialization to avoid port conflicts)
+        self._init_engine()
 
         # Ensure event loop exists (required when running in Ray actor)
         self._ensure_event_loop()
@@ -524,12 +553,17 @@ class SGLangStudentRewardClient:
             )
             self.workers.append(worker)
 
-        # Initialize workers with a test call
-        init_futures = [w.compute_logprobs.remote(["test"], [0]) for w in self.workers]
-        for i, future in enumerate(init_futures):
+        # IMPORTANT: Initialize workers SERIALLY (one at a time) to avoid port conflicts
+        # SGLang uses random port allocation (server_args.port + random[100, 1000])
+        # When multiple workers initialize simultaneously, they may pick the same port
+        # causing EADDRINUSE errors. By initializing sequentially, each worker gets a
+        # unique port or retries until available.
+        logger.info(f"[SGLangStudentReward] Initializing {len(self.workers)} workers serially to avoid port conflicts...")
+        for i, worker in enumerate(self.workers):
             try:
-                result = ray.get(future, timeout=120)  # 120 second timeout for SGLang
-                logger.debug(f"[SGLangStudentReward] Worker {i} initialized successfully")
+                logger.info(f"[SGLangStudentReward] Initializing worker {i}/{len(self.workers)} on GPUs {gpu_groups[i]}...")
+                result = ray.get(worker.compute_logprobs.remote(["test"], [0]), timeout=180)  # 3 min timeout
+                logger.info(f"[SGLangStudentReward] Worker {i}/{len(self.workers)} initialized successfully")
             except Exception as e:
                 logger.error(f"[SGLangStudentReward] Worker {i} init FAILED: {e}")
                 raise
