@@ -169,7 +169,9 @@ class RolloutWorker(ActorRolloutRefWorker):
             "bos_token_id": self.tokenizer.bos_token_id,
             "eos_token_id": self.tokenizer.eos_token_id,
             "pad_token_id": self.tokenizer.pad_token_id,
+            "vocab_size": self.tokenizer.vocab_size
         }
+        logger.info(f"新代码 override_config_kwargs={override_config_kwargs}")
         override_config_kwargs.update(override_model_config)
         update_model_config(actor_model_config, override_config_kwargs=override_config_kwargs)
         if self.rank == 0:
