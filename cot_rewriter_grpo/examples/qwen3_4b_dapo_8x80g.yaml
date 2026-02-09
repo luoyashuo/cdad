@@ -25,7 +25,7 @@ defaults:
 # ============ Experiment Configuration ============
 trainer:
   project_name: cot_rewriter_dapo
-  experiment_name: qwen3_4b_8gpu_80g_dapo_vllm_rollout_sglang_reward
+  experiment_name: qwen3_4b_dapo_8x80g
   total_epochs: 1
   total_training_steps: 500
   save_freq: 50
@@ -45,8 +45,8 @@ trainer:
 
 data:
   # 数据路径（使用 DATA_BASE_DIR 环境变量）
-  train_files: ${oc.env:DATA_BASE_DIR}/cot_rewrite_max_fsf_v2/train.jsonl
-  val_files: ${oc.env:DATA_BASE_DIR}/cot_rewrite_max_fsf_v2/val_64.jsonl
+  train_files: ${oc.env:DATA_BASE_DIR}/cot_rewrite_max_fsf_v3/train.jsonl
+  val_files: ${oc.env:DATA_BASE_DIR}/cot_rewrite_max_fsf_v3/val.jsonl
   train_batch_size: 2
   val_batch_size: 2
   gen_batch_size: 2    # DAPO: 可能因过滤需要多轮生成

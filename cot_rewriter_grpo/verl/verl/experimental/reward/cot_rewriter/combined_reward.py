@@ -19,7 +19,8 @@ Supports two backends:
 - vllm: Uses vLLM for Student and HuggingFace for FSF Judge
 """
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
+import re
 
 import torch
 
@@ -29,6 +30,34 @@ from verl.experimental.reward.cot_rewriter.training_logger import get_logger
 
 # Training logger for reward computation
 logger = get_logger("reward")
+
+
+def extract_rewrite_reasoning(text: str) -> Tuple[str, bool]:
+    """
+    Extract content from <rewrite_reasoning> tags.
+
+    Args:
+        text: The raw response text from the model
+
+    Returns:
+        Tuple of (extracted_content, success_flag)
+        - extracted_content: The content inside the tags, or original text if tags not found
+        - success_flag: True if tags were found and extracted, False otherwise
+    """
+    if not text:
+        return "", False
+
+    # Try to extract content between <rewrite_reasoning> and </rewrite_reasoning>
+    # Use DOTALL to match across newlines
+    pattern = r'<rewrite_reasoning>\s*(.*?)\s*</rewrite_reasoning>'
+    match = re.search(pattern, text, re.DOTALL)
+
+    if match:
+        content = match.group(1).strip()
+        return content, True
+
+    # Tags not found, return original text with failure flag
+    return text.strip(), False
 
 
 class CombinedRewardComputer:
@@ -462,6 +491,15 @@ def compute_cot_rewriter_reward(
 
     print_samples = kwargs.get("print_samples", 2)
 
+    # Extract <rewrite_reasoning> content from rewrite_cots for reward computation
+    # This ensures we only compute reward on the actual rewritten reasoning content
+    extracted_rewrite_cots = []
+    for i, rewrite_cot in enumerate(rewrite_cots):
+        extracted_cot, has_valid_format = extract_rewrite_reasoning(rewrite_cot)
+        extracted_rewrite_cots.append(extracted_cot)
+        if not has_valid_format:
+            logger.info(f"[REWARD] Sample {i}: No valid <rewrite_reasoning> tags found, using original text for reward computation")
+
     # Compute rewards for ALL samples (no truncation filtering)
     reward_computer = get_reward_computer(
         student_model_path=student_model_path,
@@ -487,7 +525,7 @@ def compute_cot_rewriter_reward(
     result = reward_computer.compute_reward(
         questions=questions,
         original_cots=original_cots,
-        rewrite_cots=rewrite_cots,
+        rewrite_cots=extracted_rewrite_cots,  # Use extracted content for reward computation
         answers=answers,
     )
 
@@ -501,10 +539,8 @@ def compute_cot_rewriter_reward(
 
     # Apply penalties
     # 1. Truncation penalty: if rollout result was truncated (finish_reason == "length")
-    # 2. Format penalty: if response (lowercased) contains "# question" or "# rewrit"
+    # 2. Format penalty: if response does not contain valid <rewrite_reasoning> tags
     finish_reasons = data.non_tensor_batch.get("finish_reasons", [])
-    # Penalties are configured as positive values, applied as negative to rewards
-    format_check_strings = ["# question", "# rewrit"]  # 检查这两个字符串（lower 后）
 
     penalties = [0.0] * batch_size
     truncation_penalties = [0.0] * batch_size  # Track truncation penalties separately for logging
@@ -519,18 +555,16 @@ def compute_cot_rewriter_reward(
             truncated_flags[i] = 1  # Mark as truncated for DAPO filter_groups
             logger.info(f"[PENALTY] Sample {i}: Truncated (finish_reason=length), penalty=-{truncation_penalty}")
 
-        # Format penalty: check if full response (lowercased) contains forbidden strings
+        # Format penalty: check if response contains valid <rewrite_reasoning> tags
         if rewrite_cots and i < len(rewrite_cots):
-            response_lower = rewrite_cots[i].lower()
-            for check_string in format_check_strings:
-                if check_string in response_lower:
-                    penalties[i] -= format_penalty
-                    format_penalties[i] = -format_penalty
-                    logger.info(
-                        f"[PENALTY] Sample {i}: Format violation ('{check_string}' found in response), "
-                        f"response_preview='{rewrite_cots[i][:100]}...', penalty=-{format_penalty}"
-                    )
-                    break  # 只惩罚一次
+            _, has_valid_format = extract_rewrite_reasoning(rewrite_cots[i])
+            if not has_valid_format:
+                penalties[i] -= format_penalty
+                format_penalties[i] = -format_penalty
+                logger.info(
+                    f"[PENALTY] Sample {i}: Format violation (no valid <rewrite_reasoning> tags found), "
+                    f"response_preview='{rewrite_cots[i][:100]}...', penalty=-{format_penalty}"
+                )
 
     # Apply penalties to total_rewards
     total_rewards = total_rewards + torch.tensor(penalties, device=device, dtype=torch.bfloat16)
