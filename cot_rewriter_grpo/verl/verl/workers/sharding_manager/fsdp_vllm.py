@@ -391,6 +391,48 @@ class FSDPVLLMShardingManager(BaseShardingManager):
 
                 updated_params = {replace_lora_wrapper(k): v for k, v in updated_params.items()}
 
+        # Check if vocab size needs to be adjusted (e.g., when additional_special_tokens are added)
+        # Get the target vocab_size from the FSDP model's embedding layer
+        target_vocab_size = None
+        for name, param in updated_params.items():
+            if "embed_tokens.weight" in name or "lm_head.weight" in name:
+                target_vocab_size = param.shape[-1]
+                break
+
+        if target_vocab_size is not None:
+            # Resize vLLM model's embedding layers to match FSDP model's vocab_size
+            if hasattr(model, 'model') and hasattr(model.model, 'embed_tokens'):
+                embed_tokens = model.model.embed_tokens
+                current_vocab_size = embed_tokens.num_embeddings
+                if current_vocab_size != target_vocab_size:
+                    logger.info(
+                        f"Resizing vLLM embed_tokens from {current_vocab_size} to {target_vocab_size}"
+                    )
+                    # Resize the embedding layer
+                    embed_tokens.num_embeddings = target_vocab_size
+                    if hasattr(embed_tokens, 'org_vocab_size'):
+                        embed_tokens.org_vocab_size = target_vocab_size
+                    # Resize the weight tensor
+                    if embed_tokens.weight.shape[0] != target_vocab_size:
+                        from torch.nn import functional as F
+                        old_weight = embed_tokens.weight
+                        new_weight = F.pad(old_weight, (0, 0, 0, target_vocab_size - old_weight.shape[0]))
+                        embed_tokens.weight.data = new_weight
+
+            # Also resize lm_head if it's a separate layer
+            if hasattr(model, 'lm_head') and model.lm_head is not None:
+                lm_head = model.lm_head
+                if hasattr(lm_head, 'weight') and lm_head.weight.shape[0] != target_vocab_size:
+                    logger.info(f"Resizing vLLM lm_head to {target_vocab_size}")
+                    from torch.nn import functional as F
+                    old_weight = lm_head.weight
+                    new_weight = F.pad(old_weight, (0, 0, 0, target_vocab_size - old_weight.shape[0]))
+                    lm_head.weight.data = new_weight
+                    if hasattr(lm_head, 'num_embeddings'):
+                        lm_head.num_embeddings = target_vocab_size
+                    if hasattr(lm_head, 'org_vocab_size'):
+                        lm_head.org_vocab_size = target_vocab_size
+
         patch_vllm_moe_model_weight_loader(model)
         device = get_device_id()  # used when fsdp2 set cpu_offload_policy
         loaded_params = model.load_weights(

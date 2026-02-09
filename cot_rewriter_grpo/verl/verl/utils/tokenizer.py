@@ -71,6 +71,10 @@ def hf_tokenizer(
 
     # Add additional special tokens if provided
     if additional_special_tokens:
+        # Convert OmegaConf ListConfig to native Python list if needed
+        from omegaconf import ListConfig
+        if isinstance(additional_special_tokens, ListConfig):
+            additional_special_tokens = list(additional_special_tokens)
         # Get current special tokens
         special_tokens_dict = {"additional_special_tokens": additional_special_tokens}
         num_added = tokenizer.add_special_tokens(special_tokens_dict)

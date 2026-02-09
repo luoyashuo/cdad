@@ -6,12 +6,12 @@ answer_start_idx = len(tokenize(question + cot + dummy_answer)) - 1
 """
 
 import sys
-sys.path.insert(0, '/root/luoys/projects/cdad/cot_rewriter_grpo/verl')
+sys.path.insert(0, '/data/luoys/projects/cdad/cot_rewriter_grpo/verl')
 
 from transformers import AutoTokenizer
 
 tokenizer = AutoTokenizer.from_pretrained(
-    '/root/luoys/modelscope_cache/models/Qwen/Qwen3-1.7B',
+    '/data/luoys/modelscope_cache/models/Qwen/Qwen3-1.7B',
     trust_remote_code=True
 )
 

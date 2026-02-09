@@ -41,11 +41,7 @@ trainer:
   logger: ["swanlab","console"]
 
   # ========== Special Tokens ==========
-  # CoT Rewriter: Register <rewrite_reasoning> tags as special tokens
-  # This ensures the tokenizer used by the trainer has these tokens registered
-  additional_special_tokens:
-    - "<rewrite_reasoning>"
-    - "</rewrite_reasoning>"
+  # 使用原始模型，不添加特殊 token（在数据层面处理）
 
   rollout_data_dir: ${oc.env:CHECKPOINT_BASE_DIR}/${trainer.experiment_name}/rollout_data
   validation_data_dir: ${oc.env:CHECKPOINT_BASE_DIR}/${trainer.experiment_name}/validation_data
@@ -77,17 +73,12 @@ actor_rollout_ref:
 
   model:
     # Actor Model 路径（使用 MODEL_BASE_DIR 环境变量）
+    # 使用原始 Qwen3-4B 模型（不含 dummy token，避免模型"变傻"）
     path: ${oc.env:MODEL_BASE_DIR}/Qwen/Qwen3-4B
     trust_remote_code: true
     enable_gradient_checkpointing: true
     use_remove_padding: false
     lora_rank: 0  # 全参数训练
-    # ========== Special Tokens ==========
-    # CoT Rewriter: Register <rewrite_reasoning> tags as special tokens
-    # This ensures the model learns to output these tags during training
-    additional_special_tokens:
-      - "<rewrite_reasoning>"
-      - "</rewrite_reasoning>"
 
   actor:
     strategy: fsdp2
@@ -162,6 +153,7 @@ algorithm:
     kl_coef: 0.0
 
   # ========== DAPO: 动态采样过滤 ==========
+  # 禁用：之前所有样本被截断导致无法训练，先不使用过滤
   filter_groups:
     _target_: verl.trainer.config.FilterGroupsConfig
     enable: true
