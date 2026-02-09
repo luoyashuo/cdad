@@ -33,7 +33,13 @@ def set_pad_token_id(tokenizer):
         warnings.warn(f"tokenizer.pad_token is None. Now set to {tokenizer.eos_token}", stacklevel=1)
 
 
-def hf_tokenizer(name_or_path, correct_pad_token=True, correct_gemma2=True, **kwargs):
+def hf_tokenizer(
+    name_or_path,
+    correct_pad_token=True,
+    correct_gemma2=True,
+    additional_special_tokens=None,
+    **kwargs
+):
     """Create a huggingface pretrained tokenizer which correctness handles eos and pad tokens.
 
     Args:
@@ -41,6 +47,8 @@ def hf_tokenizer(name_or_path, correct_pad_token=True, correct_gemma2=True, **kw
         name (str): The name of the tokenizer.
         correct_pad_token (bool): Whether to correct the pad token id.
         correct_gemma2 (bool): Whether to correct the gemma2 tokenizer.
+        additional_special_tokens (list[str], optional): Additional special tokens to add to the tokenizer.
+            These tokens will be added as special tokens and the tokenizer's vocabulary will be resized.
 
     Returns:
 
@@ -60,6 +68,20 @@ def hf_tokenizer(name_or_path, correct_pad_token=True, correct_gemma2=True, **kw
     tokenizer = AutoTokenizer.from_pretrained(name_or_path, **kwargs)
     if correct_pad_token:
         set_pad_token_id(tokenizer)
+
+    # Add additional special tokens if provided
+    if additional_special_tokens:
+        # Get current special tokens
+        special_tokens_dict = {"additional_special_tokens": additional_special_tokens}
+        num_added = tokenizer.add_special_tokens(special_tokens_dict)
+        if num_added > 0:
+            warnings.warn(
+                f"Added {num_added} additional special tokens: {additional_special_tokens}. "
+                f"Tokenizer vocab size increased from {len(tokenizer) - num_added} to {len(tokenizer)}. "
+                f"Make sure to resize the model embeddings accordingly: model.resize_token_embeddings(tokenizer.vocab_size)",
+                stacklevel=1
+            )
+
     return tokenizer
 
 

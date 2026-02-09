@@ -146,7 +146,13 @@ class TaskRunner:
         from verl.utils import hf_processor, hf_tokenizer
 
         trust_remote_code = config.data.get("trust_remote_code", False)
-        tokenizer = hf_tokenizer(local_path, trust_remote_code=trust_remote_code)
+        # Support additional special tokens configuration (e.g., <rewrite_reasoning> tags)
+        additional_special_tokens = config.trainer.get("additional_special_tokens", None)
+        tokenizer = hf_tokenizer(
+            local_path,
+            trust_remote_code=trust_remote_code,
+            additional_special_tokens=additional_special_tokens
+        )
         # Used for multimodal LLM, could be None
         processor = hf_processor(local_path, trust_remote_code=trust_remote_code, use_fast=True)
 

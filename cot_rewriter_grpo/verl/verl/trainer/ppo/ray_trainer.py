@@ -1881,6 +1881,28 @@ class RayDAPOTrainer(RayPPOTrainer):
                             actor_output_metrics = reduce_metrics(actor_output.meta_info["metrics"])
                             metrics.update(actor_output_metrics)
 
+                    # === DUMP ROLLOUT GENERATIONS ===
+                    rollout_data_dir = self.config.trainer.get("rollout_data_dir", None)
+                    if rollout_data_dir:
+                        with marked_timer("dump_rollout_generations", timing_raw, color="green"):
+                            inputs = self.tokenizer.batch_decode(batch.batch["prompts"], skip_special_tokens=True)
+                            outputs = self.tokenizer.batch_decode(batch.batch["responses"], skip_special_tokens=True)
+                            scores = batch.batch["token_level_scores"].sum(-1).cpu().tolist()
+                            reward_extra_infos_dict = {}
+                            if "request_id" in batch.non_tensor_batch:
+                                reward_extra_infos_dict["request_id"] = batch.non_tensor_batch["request_id"].tolist()
+                            if "original_cot" in batch.non_tensor_batch:
+                                reward_extra_infos_dict["original_cot"] = batch.non_tensor_batch["original_cot"].tolist()
+                            if "ground_truth" in batch.non_tensor_batch:
+                                reward_extra_infos_dict["ground_truth"] = batch.non_tensor_batch["ground_truth"].tolist()
+                            self._dump_generations(
+                                inputs=inputs,
+                                outputs=outputs,
+                                scores=scores,
+                                reward_extra_infos_dict=reward_extra_infos_dict,
+                                dump_path=rollout_data_dir,
+                            )
+
                     # === VALIDATION ===
                     if (
                         self.val_reward_fn is not None

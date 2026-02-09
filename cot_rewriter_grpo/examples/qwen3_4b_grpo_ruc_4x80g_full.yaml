@@ -41,17 +41,17 @@ trainer:
   device: cuda
   log_freq: 10
   max_actor_ckpt_to_keep: 3
-  default_local_dir: /fs/fast/u20240075/luoyashuo/checkpoints/cdad/${trainer.project_name}/${trainer.experiment_name}
+  default_local_dir: /root/luoys/checkpoints/cdad/${trainer.project_name}/${trainer.experiment_name}
   n_gpus_per_node: 4
   nnodes: 1
   logger: ["swanlab","console"]
 
-  rollout_data_dir: /fs/fast/u20240075/luoyashuo/checkpoints/cdad/${trainer.experiment_name}/rollout_data
-  validation_data_dir: /fs/fast/u20240075/luoyashuo/checkpoints/cdad/${trainer.experiment_name}/validation_data
+  rollout_data_dir: /root/luoys/checkpoints/cdad/${trainer.experiment_name}/rollout_data
+  validation_data_dir: /root/luoys/checkpoints/cdad/${trainer.experiment_name}/validation_data
 
 data:
-  train_files: /home/u20240075/luoyashuo/data/cdad/cot_rewrite_max_fsf_v2/train.jsonl
-  val_files: /home/u20240075/luoyashuo/data/cdad/cot_rewrite_max_fsf_v2/val_64.jsonl
+  train_files: /root/luoys/data/cdad/cot_rewrite_max_fsf_v2/train.jsonl
+  val_files: /root/luoys/data/cdad/cot_rewrite_max_fsf_v2/val_64.jsonl
   # 保持 train_batch_size=2, rollout.n=8 -> 每步 16 个 samples
   train_batch_size: 2
   val_batch_size: 8  # 【修复】增大验证 batch size，减少验证循环次数
@@ -66,7 +66,7 @@ data:
     enable_thinking: false
 
   custom_cls:
-    path: /home/u20240075/luoyashuo/projects/cdad/cot_rewriter_grpo/verl/verl/utils/dataset/rl_dataset_jsonl.py
+    path: /root/luoys/projects/cdad/cot_rewriter_grpo/verl/verl/utils/dataset/rl_dataset_jsonl.py
     name: RLHFDatasetJSONL
 
 # ============ Actor/Rollout/Ref Configuration ============
@@ -74,7 +74,7 @@ actor_rollout_ref:
   hybrid_engine: true
 
   model:
-    path: /fs/fast/u20240075/hf_home/models/Qwen/Qwen3-4B
+    path: /root/luoys/modelscope_cache/models/Qwen/Qwen3-4B
     trust_remote_code: true
     enable_gradient_checkpointing: true
     use_remove_padding: false
@@ -166,11 +166,11 @@ reward_model:
 
 # ============ Custom Reward Function Configuration ============
 custom_reward_function:
-  path: /home/u20240075/luoyashuo/projects/cdad/cot_rewriter_grpo/verl/verl/experimental/reward/cot_rewriter/combined_reward.py
+  path: /root/luoys/projects/cdad/cot_rewriter_grpo/verl/verl/experimental/reward/cot_rewriter/combined_reward.py
   name: compute_cot_rewriter_reward
   reward_kwargs:
-    student_model_path: /fs/fast/u20240075/hf_home/models/Qwen/Qwen3-1.7B
-    fsf_model_path: /fs/fast/u20240075/luoyashuo/checkpoints/cdad/fsf_judge/qwen3_8b_fsf_judge/checkpoint-12000
+    student_model_path: /data/model/Qwen3-1.7B
+    fsf_model_path: /data/model/qwen3_8b_fsf_judge/checkpoint-12000
     device: cuda:1
     allow_cpu: true
     enable_offload: false
@@ -220,7 +220,7 @@ reward_manager:
   source: importlib
   name: CoTRewriterRewardManager
   module:
-    path: /home/u20240075/luoyashuo/projects/cdad/cot_rewriter_grpo/verl/verl/experimental/reward/cot_rewriter/reward_manager.py
+    path: /root/luoys/projects/cdad/cot_rewriter_grpo/verl/verl/experimental/reward/cot_rewriter/reward_manager.py
 
 # ============ Ray Configuration ============
 ray_init:

@@ -25,7 +25,7 @@ defaults:
 # ============ Experiment Configuration ============
 trainer:
   project_name: cot_rewriter_dapo
-  experiment_name: qwen3_4b_8gpu_80g_dapo_vllm_rollout_sglang_reward
+  experiment_name: qwen3_4b_dapo_8x80g
   total_epochs: 1
   total_training_steps: 500
   save_freq: 50
@@ -40,13 +40,20 @@ trainer:
   nnodes: 1
   logger: ["swanlab","console"]
 
+  # ========== Special Tokens ==========
+  # CoT Rewriter: Register <rewrite_reasoning> tags as special tokens
+  # This ensures the tokenizer used by the trainer has these tokens registered
+  additional_special_tokens:
+    - "<rewrite_reasoning>"
+    - "</rewrite_reasoning>"
+
   rollout_data_dir: ${oc.env:CHECKPOINT_BASE_DIR}/${trainer.experiment_name}/rollout_data
   validation_data_dir: ${oc.env:CHECKPOINT_BASE_DIR}/${trainer.experiment_name}/validation_data
 
 data:
   # 数据路径（使用 DATA_BASE_DIR 环境变量）
-  train_files: ${oc.env:DATA_BASE_DIR}/cot_rewrite_max_fsf_v2/train.jsonl
-  val_files: ${oc.env:DATA_BASE_DIR}/cot_rewrite_max_fsf_v2/val_64.jsonl
+  train_files: ${oc.env:DATA_BASE_DIR}/cot_rewrite_max_fsf_v3/train.jsonl
+  val_files: ${oc.env:DATA_BASE_DIR}/cot_rewrite_max_fsf_v3/val.jsonl
   train_batch_size: 2
   val_batch_size: 2
   gen_batch_size: 2    # DAPO: 可能因过滤需要多轮生成
@@ -75,6 +82,12 @@ actor_rollout_ref:
     enable_gradient_checkpointing: true
     use_remove_padding: false
     lora_rank: 0  # 全参数训练
+    # ========== Special Tokens ==========
+    # CoT Rewriter: Register <rewrite_reasoning> tags as special tokens
+    # This ensures the model learns to output these tags during training
+    additional_special_tokens:
+      - "<rewrite_reasoning>"
+      - "</rewrite_reasoning>"
 
   actor:
     strategy: fsdp2
