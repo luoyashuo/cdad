@@ -11,7 +11,7 @@ source /root/luoys/projects/cdad/cot_rewriter_grpo/.venv/bin/activate
 5. 参考原版verl逻辑：/root/luoys/projects/verl-0.5.0
 # LOG
 ```
-/root/luoys/projects/cdad/cot_rewriter_grpo/logs/grpo/qwen3_4b_grpo_8x80g_vllm_rollout_sglang_reward.log
+/root/luoys/projects/cdad/cot_rewriter_grpo/logs/grpo/qwen3_4b_dapo_8x80g_vllm_rollout_sglang_reward.log
 ```
 # 问题
 

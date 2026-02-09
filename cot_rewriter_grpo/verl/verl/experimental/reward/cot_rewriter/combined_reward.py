@@ -509,12 +509,14 @@ def compute_cot_rewriter_reward(
     penalties = [0.0] * batch_size
     truncation_penalties = [0.0] * batch_size  # Track truncation penalties separately for logging
     format_penalties = [0.0] * batch_size  # Track format penalties separately for logging
+    truncated_flags = [0] * batch_size  # Track truncated flags for DAPO filter_groups
 
     for i in range(batch_size):
         # Truncation penalty (configured as positive, applied as negative)
         if i < len(finish_reasons) and finish_reasons[i] == "length":
             penalties[i] -= truncation_penalty
             truncation_penalties[i] = -truncation_penalty
+            truncated_flags[i] = 1  # Mark as truncated for DAPO filter_groups
             logger.info(f"[PENALTY] Sample {i}: Truncated (finish_reason=length), penalty=-{truncation_penalty}")
 
         # Format penalty: check if full response (lowercased) contains forbidden strings
@@ -576,6 +578,8 @@ def compute_cot_rewriter_reward(
             # Penalties for SwanLab logging
             "truncation_penalties": truncation_penalties,
             "format_penalties": format_penalties,
+            # DAPO filter_groups support: "truncated" flag (1 if truncated, 0 otherwise)
+            "truncated": truncated_flags,
         },
     }
 

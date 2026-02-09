@@ -162,16 +162,19 @@ critic:
 # ============ Reward Model Configuration ============
 reward_model:
   enable: false
-  reward_manager: dapo  # DAPO reward manager
+  reward_manager: cot_rewriter  # CoT Rewriter reward manager (compatible with compute_cot_rewriter_reward)
   offload_rollout_for_reward: true
   task_runner_num_gpus: 0
 
-  # ========== DAPO: Overlong Reward Shaping ==========
-  overlong_buffer:
-    enable: true
-    len: 4000           # 缓冲区长度（超过 max_response_length - 2048 开始惩罚）
-    penalty_factor: 0.2 # 最大惩罚值
-    log: false          # 是否记录 overlong reward 日志
+  # ========== Reward kwargs (passed to reward manager) ==========
+  reward_kwargs:
+    # ========== DAPO: Overlong Reward Shaping ==========
+    overlong_buffer_cfg:
+      enable: true         # Disabled: using truncation_penalty in compute_cot_rewriter_reward instead
+      len: 3000            # Buffer length (penalty starts after max_response_length - buffer_len)
+      penalty_factor: 0.5  # Maximum penalty value
+      log: false           # Whether to log overlong reward
+    max_resp_len: 10000    # Required when overlong_buffer_cfg.enable=true
 
 # ============ Custom Reward Function Configuration ============
 # 注意：当前配置只使用认知奖励 (Cognitive Reward)，不使用逻辑奖励 (Logic Reward)
@@ -195,7 +198,7 @@ custom_reward_function:
 
     # ========== 其他配置 ==========
     print_samples: 2
-    truncation_penalty: 0.5   # 截断惩罚（finish_reason == "length" 时应用，配置为正数）
+    truncation_penalty: 0.0   # 截断惩罚（finish_reason == "length" 时应用，配置为正数）
     format_penalty: 0.5        # 格式惩罚（响应包含 "# question" 或 "# rewrit" 时应用，配置为正数）
     field_mapping:
       prompt_key: problem
@@ -239,4 +242,7 @@ ray_kwargs:
         # 强制使用 vLLM V0 引擎（RUC 服务器兼容性）
         VLLM_USE_V1: "0"
         VLLM_ATTENTION_BACKEND: "FLASH_ATTN"
+        # SwanLab 云端同步配置
+        SWANLAB_MODE: "cloud"
+        SWANLAB_API_KEY: "xmtHYzg2Bw5uh1dprg81E"
   timeline_json_file: null

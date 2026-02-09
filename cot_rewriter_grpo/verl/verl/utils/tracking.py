@@ -17,6 +17,7 @@ A unified tracking interface that supports logging data to different backend
 
 import dataclasses
 import os
+import sys
 from enum import Enum
 from functools import partial
 from pathlib import Path
@@ -59,8 +60,6 @@ class Tracking:
             self.logger["wandb"] = wandb
 
         if "mlflow" in default_backend:
-            import os
-
             import mlflow
 
             MLFLOW_TRACKING_URI = os.environ.get("MLFLOW_TRACKING_URI", "sqlite:////tmp/mlruns.db")
@@ -74,8 +73,6 @@ class Tracking:
             self.logger["mlflow"] = _MlflowLoggingAdapter()
 
         if "swanlab" in default_backend:
-            import os
-
             import swanlab
 
             SWANLAB_API_KEY = os.environ.get("SWANLAB_API_KEY", None)
@@ -86,7 +83,7 @@ class Tracking:
 
             if config is None:
                 config = {}  # make sure config is not None, otherwise **config will raise error
-            swanlab.init(
+            run = swanlab.init(
                 project=project_name,
                 experiment_name=experiment_name,
                 config={"FRAMEWORK": "verl", **config},
@@ -95,9 +92,18 @@ class Tracking:
             )
             self.logger["swanlab"] = swanlab
 
-        if "vemlp_wandb" in default_backend:
-            import os
+            # Print SwanLab connection info to ensure it's visible in logs
+            print(f"swanlab: Run initialized successfully!")
+            print(f"swanlab: Mode: {run.mode}")
+            print(f"swanlab: Project: {project_name}")
+            print(f"swanlab: Experiment: {experiment_name}")
+            print(f"swanlab: Run ID: {run.id}")
+            if run.mode == "cloud":
+                print(f"swanlab: 🏠 View project at https://swanlab.cn/@{os.environ.get('SWANLAB_USER', 'user')}/{project_name}")
+                print(f"swanlab: 🚀 View run at https://swanlab.cn/@{os.environ.get('SWANLAB_USER', 'user')}/{project_name}/runs/{run.id}")
+            sys.stdout.flush()
 
+        if "vemlp_wandb" in default_backend:
             import volcengine_ml_platform
             from volcengine_ml_platform import wandb as vemlp_wandb
 

@@ -7,7 +7,7 @@ which expects (data, tokenizer, ...) arguments instead of the standard
 """
 
 from collections import defaultdict
-from typing import Any
+from typing import Any, Optional
 
 import torch
 
@@ -34,6 +34,8 @@ class CoTRewriterRewardManager:
         num_examine: int,
         compute_score=None,
         reward_fn_key: str = "reward_model",
+        max_resp_len: Optional[int] = None,
+        overlong_buffer_cfg: Optional[Any] = None,
         **kwargs,
     ):
         """Initialize CoT Rewriter Reward Manager.
@@ -43,12 +45,27 @@ class CoTRewriterRewardManager:
             num_examine: Number of samples to examine for debugging
             compute_score: The compute_cot_rewriter_reward function (wrapped with kwargs)
             reward_fn_key: Key for reward function in data
+            max_resp_len: Maximum response length (required for overlong_buffer)
+            overlong_buffer_cfg: Config for overlong response penalty
             **kwargs: Additional keyword arguments
         """
         self.tokenizer = tokenizer
         self.num_examine = num_examine
         self.compute_score = compute_score
         self.reward_fn_key = reward_fn_key
+        self.overlong_buffer_cfg = overlong_buffer_cfg
+        self.max_resp_len = max_resp_len
+
+        if self.overlong_buffer_cfg is not None:
+            if self.max_resp_len is None:
+                raise ValueError(
+                    f"max_resp_len must be provided when overlong_buffer_cfg is set, but got None"
+                )
+            if self.max_resp_len < self.overlong_buffer_cfg.len:
+                raise ValueError(
+                    f"max_resp_len ({self.max_resp_len}) must be >= overlong_buffer_cfg.len "
+                    f"({self.overlong_buffer_cfg.len})"
+                )
 
     def __call__(
         self, data: DataProto, return_dict: bool = False
@@ -98,6 +115,12 @@ class CoTRewriterRewardManager:
             # - reward_extra_info: dict with additional metrics
             reward_tensor = result.get("reward_tensor")
             reward_extra_info = result.get("reward_extra_info", {})
+
+            # Apply overlong_buffer penalty if configured
+            if self.overlong_buffer_cfg is not None and self.overlong_buffer_cfg.enable:
+                reward_tensor = self._apply_overlong_penalty(
+                    data, reward_tensor, reward_extra_info
+                )
 
             if reward_tensor is None:
                 # Fallback: create zero tensor
@@ -172,3 +195,70 @@ class CoTRewriterRewardManager:
                 logger.info(f"[Sample {i}] total_reward={total_rewards[i]}")
             if i < len(cognitive_rewards):
                 logger.info(f"[Sample {i}] cognitive_reward={cognitive_rewards[i]}")
+
+    def _apply_overlong_penalty(
+        self,
+        data: DataProto,
+        reward_tensor: torch.Tensor,
+        reward_extra_info: dict,
+    ) -> torch.Tensor:
+        """Apply overlong response penalty based on overlong_buffer_cfg.
+
+        This applies a gradual penalty for responses that exceed expected_len = max_resp_len - buffer_len.
+        The penalty increases linearly as the response length exceeds the threshold.
+
+        Args:
+            data: DataProto object containing the batch data
+            reward_tensor: Current reward tensor [batch_size, seq_len]
+            reward_extra_info: Dictionary to store extra info for logging
+
+        Returns:
+            Modified reward tensor with overlong penalties applied
+        """
+        batch_size = len(data)
+        response_length = data.batch["responses"].shape[1]
+        device = reward_tensor.device
+
+        # Initialize overlong tracking in reward_extra_info
+        if "overlong_rewards" not in reward_extra_info:
+            reward_extra_info["overlong_rewards"] = []
+        if "overlong" not in reward_extra_info:
+            reward_extra_info["overlong"] = []
+
+        overlong_buffer_len = self.overlong_buffer_cfg.len
+        expected_len = self.max_resp_len - overlong_buffer_len
+        penalty_factor = self.overlong_buffer_cfg.penalty_factor
+
+        for i in range(batch_size):
+            # Get the valid response length (excluding padding)
+            prompt_length = data.batch["prompts"].shape[1]
+            attention_mask = data.batch["attention_mask"]
+            valid_response_length = attention_mask[i, prompt_length:].sum().item()
+
+            # Calculate overlong penalty
+            exceed_len = valid_response_length - expected_len
+            overlong_penalty = 0.0
+            is_overlong = False
+
+            if exceed_len > 0:
+                overlong_penalty = min(-exceed_len / overlong_buffer_len * penalty_factor, 0)
+                is_overlong = True
+
+            # Apply penalty to the reward tensor
+            # Find the position where the current reward is set (last valid token)
+            if valid_response_length > 0 and valid_response_length <= response_length:
+                reward_pos = valid_response_length - 1
+                current_reward = reward_tensor[i, reward_pos].item()
+                reward_tensor[i, reward_pos] = current_reward + overlong_penalty
+
+            # Track for logging
+            reward_extra_info["overlong_rewards"].append(overlong_penalty)
+            reward_extra_info["overlong"].append(is_overlong)
+
+            if self.overlong_buffer_cfg.log and is_overlong:
+                logger.info(
+                    f"[OVERLONG] Sample {i}: len={valid_response_length}, "
+                    f"expected={expected_len}, exceed={exceed_len}, penalty={overlong_penalty:.4f}"
+                )
+
+        return reward_tensor

@@ -29,7 +29,7 @@ from omegaconf import OmegaConf
 
 from verl.experimental.dataset.sampler import AbstractSampler
 from verl.trainer.constants_ppo import get_ppo_ray_runtime_env
-from verl.trainer.ppo.ray_trainer import RayPPOTrainer
+from verl.trainer.ppo.ray_trainer import RayPPOTrainer, RayDAPOTrainer
 from verl.trainer.ppo.reward import load_reward_manager
 from verl.utils.device import is_cuda_available
 from verl.utils.import_utils import load_extern_type
@@ -255,8 +255,22 @@ class TaskRunner:
         val_dataset = create_rl_dataset(config.data.val_files, config.data, tokenizer, processor, is_train=False)
         train_sampler = create_rl_sampler(config.data, train_dataset)
 
-        # Initialize the PPO trainer.
-        trainer = RayPPOTrainer(
+        # Select trainer based on configuration.
+        # Use RayDAPOTrainer when filter_groups is enabled (DAPO algorithm)
+        use_dapo = (
+            config.algorithm.get("filter_groups", None) is not None
+            and config.algorithm.filter_groups.enable
+        )
+
+        TrainerClass = RayDAPOTrainer if use_dapo else RayPPOTrainer
+
+        if use_dapo:
+            print(f"[DAPO] Using RayDAPOTrainer with filter_groups.enable=True")
+            print(f"[DAPO] filter_groups.metric={config.algorithm.filter_groups.metric}")
+            print(f"[DAPO] filter_groups.max_num_gen_batches={config.algorithm.filter_groups.max_num_gen_batches}")
+
+        # Initialize the PPO/DAPO trainer.
+        trainer = TrainerClass(
             config=config,
             tokenizer=tokenizer,
             processor=processor,
