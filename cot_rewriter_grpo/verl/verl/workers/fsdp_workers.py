@@ -239,13 +239,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
         # note that we have to create model in fp32. Otherwise, the optimizer is in bf16, which is incorrect
         # TODO(zhangchi.usc1992): 1. support create from random initialized model. 2. Support init with FSDP directly
-        # Get additional special tokens from config (for CoT Rewriter: <rewrite_reasoning> tags)
-        additional_special_tokens = self.config.model.get("additional_special_tokens", None)
-        self.tokenizer = hf_tokenizer(
-            local_path,
-            trust_remote_code=trust_remote_code,
-            additional_special_tokens=additional_special_tokens
-        )
+        self.tokenizer = hf_tokenizer(local_path, trust_remote_code=trust_remote_code)
         self.processor = hf_processor(local_path, trust_remote_code=trust_remote_code)
 
         if self.config.model.get("custom_chat_template", None) is not None:
@@ -271,10 +265,13 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
         self.generation_config = get_generation_config(local_path, trust_remote_code=trust_remote_code)
 
+        # Ensure vocab_size in config matches the model's original vocab_size to prevent auto-resize
+        # This is critical for vLLM compatibility which expects the original vocab_size
         override_config_kwargs = {
             "bos_token_id": self.tokenizer.bos_token_id,
             "eos_token_id": self.tokenizer.eos_token_id,
             "pad_token_id": self.tokenizer.pad_token_id,
+            "vocab_size": actor_model_config.vocab_size,  # Use original config vocab_size
         }
         override_config_kwargs.update(override_model_config)
         update_model_config(actor_model_config, override_config_kwargs=override_config_kwargs)
@@ -337,36 +334,6 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                     "bias": "none",
                 }
                 actor_module = get_peft_model(actor_module, LoraConfig(**lora_config))
-
-            # Resize token embeddings to match the tokenizer vocab size
-            # This is necessary when additional_special_tokens are added
-            old_vocab_size = actor_module.get_input_embeddings().weight.shape[0]
-            new_vocab_size = len(self.tokenizer)
-            if old_vocab_size != new_vocab_size:
-                if self.rank == 0:
-                    print(f"[{role.upper()}] Resizing token embeddings from {old_vocab_size} to {new_vocab_size}")
-                actor_module.resize_token_embeddings(new_vocab_size)
-
-                # Initialize new token embeddings with the mean of existing embeddings
-                # This provides better initialization than random for special tokens
-                input_embeddings = actor_module.get_input_embeddings()
-                output_embeddings = actor_module.get_output_embeddings() if hasattr(actor_module, 'get_output_embeddings') else None
-
-                # Compute mean of existing embeddings (excluding the newly added ones)
-                with torch.no_grad():
-                    existing_embeddings = input_embeddings.weight[:old_vocab_size]
-                    mean_embedding = existing_embeddings.mean(dim=0, keepdim=True)
-
-                    # Initialize new tokens with mean embedding
-                    num_new_tokens = new_vocab_size - old_vocab_size
-                    if num_new_tokens > 0:
-                        input_embeddings.weight[old_vocab_size:] = mean_embedding.expand(num_new_tokens, -1)
-                        if output_embeddings is not None and output_embeddings.weight.shape[0] == new_vocab_size:
-                            output_embeddings.weight[old_vocab_size:] = mean_embedding.expand(num_new_tokens, -1)
-
-                        if self.rank == 0:
-                            print(f"[{role.upper()}] Initialized {num_new_tokens} new token embeddings with mean of existing embeddings")
-
         torch.distributed.barrier()
 
         if self.rank == 0:
