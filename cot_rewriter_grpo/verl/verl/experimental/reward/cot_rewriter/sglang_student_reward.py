@@ -587,16 +587,33 @@ class SGLangStudentRewardClient:
             messages, tokenize=False, add_generation_prompt=False
         )
 
-        # Build prefix to find where answer starts
-        prefix_messages = [{'role': 'user', 'content': question}]
-        prefix_base = self.tokenizer.apply_chat_template(
-            prefix_messages, tokenize=False, add_generation_prompt=True
-        )
-        prefix_with_think = prefix_base + f"<think>\n{cot}\n</think>\n\n"
+        # Compute answer start position using two apply_chat_template calls
+        # 方法：分别用 question+cot+dummy_answer 和 question+cot+answer 进行两次 tokenize
+        # answer_start_idx 就是第一次（用 dummy_answer）tokenize 后的长度
+        #
+        # 原理：无论 answer 是什么，chat template 在  后面的格式是固定的
+        # 所以 dummy_answer 和 answer 的 token 序列只在 answer 内容处不同
+        # 第一次 tokenize 的长度就是 answer 开始的位置
 
-        # Tokenize to get positions
-        prefix_token_ids = self.tokenizer.encode(prefix_with_think, add_special_tokens=False)
-        answer_start_idx = len(prefix_token_ids)
+        # 第一次：用 dummy_answer (一个字符，如 "X")
+        dummy_answer = "X"
+        messages_with_dummy = [
+            {'role': 'user', 'content': question},
+            {'role': 'assistant', 'content': dummy_answer, 'reasoning_content': cot}
+        ]
+        text_with_dummy = self.tokenizer.apply_chat_template(
+            messages_with_dummy, tokenize=False, add_generation_prompt=False
+        )
+        tokens_with_dummy = self.tokenizer.encode(text_with_dummy, add_special_tokens=False)
+
+        # 找到 dummy_answer ("X") 在 tokens 中的位置
+        # 这个位置就是 answer 开始的地方
+        dummy_token_id = self.tokenizer.encode(dummy_answer, add_special_tokens=False)[0]
+        # 从后向前找 dummy_token_id（因为可能有重复）
+        for i in range(len(tokens_with_dummy) - 1, -1, -1):
+            if tokens_with_dummy[i] == dummy_token_id:
+                answer_start_idx = i
+                break
 
         return full_text, answer_start_idx
 

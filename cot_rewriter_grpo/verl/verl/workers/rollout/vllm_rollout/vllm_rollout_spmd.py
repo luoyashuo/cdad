@@ -328,10 +328,13 @@ class vLLMRollout(BaseRollout):
 
             response = []
             rollout_log_probs = []
+            finish_reasons = []
             for output in outputs:
                 for sample_id in range(len(output.outputs)):
                     response_ids = output.outputs[sample_id].token_ids
                     response.append(response_ids)
+                    # Collect finish_reason for penalty computation
+                    finish_reasons.append(output.outputs[sample_id].finish_reason)
                     if self.config.calculate_log_probs:
                         curr_log_prob = []
                         for i, logprob in enumerate(output.outputs[sample_id].logprobs):
@@ -380,6 +383,9 @@ class vLLMRollout(BaseRollout):
         if self.config.calculate_log_probs:
             # we will recompute old log prob with actor
             batch["rollout_log_probs"] = rollout_log_probs
+
+        # Store finish_reasons in non_tensor_batch for penalty computation in reward stage
+        non_tensor_batch["finish_reasons"] = np.array(finish_reasons, dtype=object)
 
         return DataProto(batch=batch, non_tensor_batch=non_tensor_batch)
 

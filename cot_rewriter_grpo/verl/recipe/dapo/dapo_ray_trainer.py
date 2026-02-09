@@ -202,34 +202,59 @@ class RayDAPOTrainer(RayPPOTrainer):
                         batch = new_batch
                     else:  # NOTE: When prompts after filtering is less than train batch size,
                         # we skip to the next generation batch
-                        metric_name = self.config.algorithm.filter_groups.metric
-                        if metric_name == "seq_final_reward":
-                            # Turn to numpy for easier filtering
-                            new_batch.non_tensor_batch["seq_final_reward"] = (
-                                new_batch.batch["token_level_rewards"].sum(dim=-1).numpy()
-                            )
-                        elif metric_name == "seq_reward":
-                            new_batch.non_tensor_batch["seq_reward"] = (
-                                new_batch.batch["token_level_scores"].sum(dim=-1).numpy()
-                            )
+                        filter_mode = self.config.algorithm.filter_groups.get("metric", "reward_std")
 
-                        # Collect the sequence reward for each trajectory
-                        prompt_uid2metric_vals = defaultdict(list)
-                        for uid, metric_val in zip(
-                            new_batch.non_tensor_batch["uid"], new_batch.non_tensor_batch[metric_name], strict=True
-                        ):
-                            prompt_uid2metric_vals[uid].append(metric_val)
+                        if filter_mode == "truncated":
+                            # Filter groups where at least 2 samples are NOT truncated (finish_reason != "length")
+                            finish_reasons = new_batch.non_tensor_batch.get("finish_reasons", [])
 
-                        prompt_uid2metric_std = {}
-                        for prompt_uid, metric_vals in prompt_uid2metric_vals.items():
-                            prompt_uid2metric_std[prompt_uid] = np.std(metric_vals)
+                            # Group truncation status by prompt uid
+                            prompt_uid2truncated = defaultdict(list)
+                            for uid, finish_reason in zip(new_batch.non_tensor_batch["uid"], finish_reasons, strict=False):
+                                is_truncated = (finish_reason == "length")
+                                prompt_uid2truncated[uid].append(is_truncated)
 
-                        kept_prompt_uids = [
-                            uid
-                            for uid, std in prompt_uid2metric_std.items()
-                            if std > 0 or len(prompt_uid2metric_vals[uid]) == 1
-                        ]
-                        num_prompt_in_batch += len(kept_prompt_uids)
+                            # Keep groups where at least 2 samples are NOT truncated
+                            kept_prompt_uids = []
+                            for uid, truncated_list in prompt_uid2truncated.items():
+                                # Count non-truncated samples
+                                non_truncated_count = sum(1 for is_trunc in truncated_list if not is_trunc)
+                                # Keep if at least 2 samples are NOT truncated
+                                if non_truncated_count >= 2:
+                                    kept_prompt_uids.append(uid)
+
+                            num_prompt_in_batch += len(kept_prompt_uids)
+
+                        else:
+                            # Original logic: filter by reward standard deviation
+                            metric_name = filter_mode
+                            if metric_name == "seq_final_reward":
+                                # Turn to numpy for easier filtering
+                                new_batch.non_tensor_batch["seq_final_reward"] = (
+                                    new_batch.batch["token_level_rewards"].sum(dim=-1).numpy()
+                                )
+                            elif metric_name == "seq_reward":
+                                new_batch.non_tensor_batch["seq_reward"] = (
+                                    new_batch.batch["token_level_scores"].sum(dim=-1).numpy()
+                                )
+
+                            # Collect the sequence reward for each trajectory
+                            prompt_uid2metric_vals = defaultdict(list)
+                            for uid, metric_val in zip(
+                                new_batch.non_tensor_batch["uid"], new_batch.non_tensor_batch[metric_name], strict=True
+                            ):
+                                prompt_uid2metric_vals[uid].append(metric_val)
+
+                            prompt_uid2metric_std = {}
+                            for prompt_uid, metric_vals in prompt_uid2metric_vals.items():
+                                prompt_uid2metric_std[prompt_uid] = np.std(metric_vals)
+
+                            kept_prompt_uids = [
+                                uid
+                                for uid, std in prompt_uid2metric_std.items()
+                                if std > 0 or len(prompt_uid2metric_vals[uid]) == 1
+                            ]
+                            num_prompt_in_batch += len(kept_prompt_uids)
 
                         kept_traj_idxs = []
                         for idx, traj_from_prompt_uid in enumerate(new_batch.non_tensor_batch["uid"]):

@@ -1,5 +1,5 @@
 # 任务
-训练任务: bash scripts/grpo/start.sh
+训练任务: bash scripts/grpo/start_qc.sh
 运行环境(uv)：
 ```
 source /root/luoys/projects/cdad/cot_rewriter_grpo/.venv/bin/activate
@@ -14,4 +14,4 @@ source /root/luoys/projects/cdad/cot_rewriter_grpo/.venv/bin/activate
 /root/luoys/projects/cdad/cot_rewriter_grpo/logs/grpo/qwen3_4b_grpo_8x80g_vllm_rollout_sglang_reward.log
 ```
 # 问题
-训练突然挂掉，帮我看看原因
+

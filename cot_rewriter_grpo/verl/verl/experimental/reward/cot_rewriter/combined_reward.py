@@ -331,6 +331,8 @@ def compute_cot_rewriter_reward(
     student_max_num_seqs: int = 1,  # limit concurrent sequences in vLLM
     student_tensor_parallel_size: int = 1,  # TP size for Student Model
     student_logprob_last_n_tokens: Optional[int] = None,  # SGLang: only compute last N tokens
+    truncation_penalty: float = 0.5,  # Penalty for truncated responses (configured as positive)
+    format_penalty: float = 0.5,  # Penalty for format violations (configured as positive)
     **kwargs,
 ) -> Dict[str, Any]:
     # Use alpha if provided (from config), otherwise use alpha_cog
@@ -497,6 +499,40 @@ def compute_cot_rewriter_reward(
         dtype=torch.bfloat16,
     )
 
+    # Apply penalties
+    # 1. Truncation penalty: if rollout result was truncated (finish_reason == "length")
+    # 2. Format penalty: if response (lowercased) contains "# question" or "# rewrit"
+    finish_reasons = data.non_tensor_batch.get("finish_reasons", [])
+    # Penalties are configured as positive values, applied as negative to rewards
+    format_check_strings = ["# question", "# rewrit"]  # 检查这两个字符串（lower 后）
+
+    penalties = [0.0] * batch_size
+    truncation_penalties = [0.0] * batch_size  # Track truncation penalties separately for logging
+    format_penalties = [0.0] * batch_size  # Track format penalties separately for logging
+
+    for i in range(batch_size):
+        # Truncation penalty (configured as positive, applied as negative)
+        if i < len(finish_reasons) and finish_reasons[i] == "length":
+            penalties[i] -= truncation_penalty
+            truncation_penalties[i] = -truncation_penalty
+            logger.info(f"[PENALTY] Sample {i}: Truncated (finish_reason=length), penalty=-{truncation_penalty}")
+
+        # Format penalty: check if full response (lowercased) contains forbidden strings
+        if rewrite_cots and i < len(rewrite_cots):
+            response_lower = rewrite_cots[i].lower()
+            for check_string in format_check_strings:
+                if check_string in response_lower:
+                    penalties[i] -= format_penalty
+                    format_penalties[i] = -format_penalty
+                    logger.info(
+                        f"[PENALTY] Sample {i}: Format violation ('{check_string}' found in response), "
+                        f"response_preview='{rewrite_cots[i][:100]}...', penalty=-{format_penalty}"
+                    )
+                    break  # 只惩罚一次
+
+    # Apply penalties to total_rewards
+    total_rewards = total_rewards + torch.tensor(penalties, device=device, dtype=torch.bfloat16)
+
     # Handle NaN and extreme values
     total_rewards = torch.nan_to_num(total_rewards, nan=0.0)
     total_rewards = total_rewards.clamp(-100, 100)
@@ -537,6 +573,9 @@ def compute_cot_rewriter_reward(
             "total_rewards": result["total_rewards"],
             "original_fsfs": result["extra_info"]["original_fsfs"],
             "rewrite_fsfs": result["extra_info"]["rewrite_fsfs"],
+            # Penalties for SwanLab logging
+            "truncation_penalties": truncation_penalties,
+            "format_penalties": format_penalties,
         },
     }
 
