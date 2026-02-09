@@ -265,13 +265,16 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
         self.generation_config = get_generation_config(local_path, trust_remote_code=trust_remote_code)
 
-        # Ensure vocab_size in config matches the model's original vocab_size to prevent auto-resize
-        # This is critical for vLLM compatibility which expects the original vocab_size
+        # For Qwen3: vLLM uses len(tokenizer) for vocab_size, not config.vocab_size
+        # We need to match vLLM's vocab_size to avoid embedding size mismatch
+        # Qwen3-4B: config.vocab_size=151936, len(tokenizer)=151669
+        tokenizer_vocab_size = len(self.tokenizer)
+
         override_config_kwargs = {
             "bos_token_id": self.tokenizer.bos_token_id,
             "eos_token_id": self.tokenizer.eos_token_id,
             "pad_token_id": self.tokenizer.pad_token_id,
-            "vocab_size": actor_model_config.vocab_size,  # Use original config vocab_size
+            "vocab_size": tokenizer_vocab_size,  # Match vLLM's vocab_size (len(tokenizer))
         }
         override_config_kwargs.update(override_model_config)
         update_model_config(actor_model_config, override_config_kwargs=override_config_kwargs)
