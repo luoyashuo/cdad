@@ -103,6 +103,9 @@ export RAY_ADDRESS=local
 # Python 路径
 export PYTHONPATH="${PROJECT_BASE_DIR}:${PROJECT_BASE_DIR}/verl:${PROJECT_BASE_DIR}/.venv/lib/python3.12/site-packages:${PYTHONPATH}"
 
+# 强制 Ray 使用虚拟环境的 Python 解释器
+export RAY_PYTHON_EXECUTABLE="${PROJECT_BASE_DIR}/.venv/bin/python"
+
 # SwanLab 配置
 export SWANLAB_MODE=cloud
 export SWANLAB_API_KEY=xmtHYzg2Bw5uh1dprg81E
@@ -119,6 +122,9 @@ if [ -f "${PROJECT_BASE_DIR}/.venv/bin/activate" ]; then
     echo "Activating virtual environment..."
     source "${PROJECT_BASE_DIR}/.venv/bin/activate"
 fi
+
+# 确保 Ray worker 能正确找到 Python 模块
+export PATH="${PROJECT_BASE_DIR}/.venv/bin:${PATH}"
 
 # ============================================
 # 清理目标 GPU 上的进程

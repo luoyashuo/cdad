@@ -184,7 +184,7 @@ custom_reward_function:
   name: compute_cot_rewriter_reward
   reward_kwargs:
     # ========== Student Model 配置（认知奖励必需）==========
-    student_model_path: ${oc.env:MODEL_BASE_DIR}/Qwen/Qwen3-1.7B
+    student_model_path: ${oc.env:MODEL_BASE_DIR}/Qwen/Qwen3-1.7B-Base
     student_tensor_parallel_size: 2
     student_max_model_len: 12000
     student_micro_batch_size: 2

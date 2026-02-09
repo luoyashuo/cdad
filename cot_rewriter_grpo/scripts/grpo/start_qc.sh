@@ -11,9 +11,9 @@ set -e
 # ========================================
 # QC 环境路径配置 - 根据实际情况修改
 # ========================================
-export MODEL_BASE_DIR="/root/luoys/modelscope_cache/models"
-export DATA_BASE_DIR="/root/luoys/data/cdad"
-export CHECKPOINT_BASE_DIR="/root/luoys/checkpoints/cdad"
+export MODEL_BASE_DIR="/data/luoys/modelscope_cache/models"
+export DATA_BASE_DIR="/data/luoys/data/cdad"
+export CHECKPOINT_BASE_DIR="/data/luoys/checkpoints/cdad"
 # ========================================
 
 # 获取脚本目录

@@ -110,3 +110,4 @@ uv pip install torch-memory-saver
   - 加kl_penalty
 5. tp不能开太大，因为返回logits的时候rank 0 有额外开销汇总logits，所以tp开太大可能会导致OOM
 6. 需要增加格式惩罚和超长截断，不然有些句子虽然超长，但是ppl并不低
+7. uv环境迁移最好不要拷贝.venv文件夹，而是用cache重新安装依赖
