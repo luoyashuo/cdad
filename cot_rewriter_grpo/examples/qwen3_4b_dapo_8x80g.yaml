@@ -89,7 +89,7 @@ actor_rollout_ref:
     clip_ratio_high: 0.28    # DAPO: 上界 clip ratio (1.4x low)
     # ========== DAPO: Token-level Loss ==========
     loss_agg_mode: "token-mean"  # DAPO: token 级别损失聚合
-    entropy_coeff: 0.01
+    entropy_coeff: 0.05
     grad_clip: 1.0
     ppo_mini_batch_size: 2
     ppo_micro_batch_size_per_gpu: 1
@@ -137,8 +137,16 @@ actor_rollout_ref:
       num_workers: 8
 
   ref:
-    enable: false
+    enable: true
     log_prob_micro_batch_size_per_gpu: 2
+    strategy: fsdp2
+    fsdp_config:
+      dtype: bfloat16
+      param_offload: true  # 开启参数 offload 以节省显存
+      mixed_precision:
+        param_dtype: bf16
+        reduce_dtype: fp32
+        buffer_dtype: bf16
 
 # ============ Algorithm Configuration ============
 algorithm:
@@ -153,11 +161,12 @@ algorithm:
     kl_coef: 0.0
 
   # ========== DAPO: 动态采样过滤 ==========
-  # 禁用：之前所有样本被截断导致无法训练，先不使用过滤
+  # 使用 format_valid 过滤：组内至少 1 个样本格式正确才保留
+  # 使用 format_valid 过滤：组内至少 1 个样本格式正确才保留
   filter_groups:
     _target_: verl.trainer.config.FilterGroupsConfig
     enable: true
-    metric: "truncated"  # 按截断过滤：组内至少 2 个样本未截断才保留
+    metric: "format_valid"  # 按格式正确性过滤：组内至少 1 个样本格式正确才保留
     max_num_gen_batches: 10  # 最多生成 10 轮，<=0 表示无限制
 
 # ============ Critic Configuration (GRPO/DAPO doesn't need) ============
@@ -204,7 +213,7 @@ custom_reward_function:
     # ========== 其他配置 ==========
     print_samples: 2
     truncation_penalty: 0.0   # 截断惩罚（finish_reason == "length" 时应用，配置为正数）
-    format_penalty: 0.5        # 格式惩罚（响应包含 "# question" 或 "# rewrit" 时应用，配置为正数）
+    format_penalty: 0.2        # 格式惩罚
     field_mapping:
       prompt_key: problem
       reward_model_key: reward_model

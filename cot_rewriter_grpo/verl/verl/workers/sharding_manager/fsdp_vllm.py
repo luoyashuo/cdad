@@ -393,35 +393,12 @@ class FSDPVLLMShardingManager(BaseShardingManager):
 
         patch_vllm_moe_model_weight_loader(model)
         device = get_device_id()  # used when fsdp2 set cpu_offload_policy
-
-        # Handle vocab_size mismatch between FSDP and vLLM
-        # For Qwen3: FSDP uses model.config.vocab_size (151936) while vLLM uses tokenizer.vocab_size (151669)
-        # We need to truncate embedding weights to match vLLM's vocab_size
-        vllm_vocab_size = model.config.vocab_size if hasattr(model, 'config') else None
-
-        if self.rank == 0:
-            logger.info(f"[update_params] vllm_vocab_size = {vllm_vocab_size}")
-
-        def prepare_params():
-            for name, param in updated_params.items():
-                if isinstance(param, DTensor):
-                    param = param.to(device, non_blocking=True).full_tensor()
-                else:
-                    param = param.to(device, non_blocking=True)
-
-                # Truncate embedding weights if vocab_size mismatch
-                if vllm_vocab_size is not None and name in ['model.embed_tokens.weight', 'lm_head.weight']:
-                    original_shape = param.shape[0]
-                    if self.rank == 0:
-                        logger.info(f"[update_params] {name}: original_shape = {original_shape}, vllm_vocab_size = {vllm_vocab_size}")
-                    if original_shape > vllm_vocab_size:
-                        param = param[:vllm_vocab_size]
-                        if self.rank == 0:
-                            logger.warning(f"Truncated {name} from {original_shape} to {vllm_vocab_size}")
-
-                yield name, param
-
-        loaded_params = model.load_weights(prepare_params())
+        loaded_params = model.load_weights(
+            (
+                (name, param.to(device, non_blocking=True).full_tensor() if isinstance(param, DTensor) else param)
+                for name, param in updated_params.items()
+            )
+        )
 
         self.base_sync_done = True
         logger.info(f"vLLM load weights, loaded_params: {len(loaded_params) if loaded_params else -1}")

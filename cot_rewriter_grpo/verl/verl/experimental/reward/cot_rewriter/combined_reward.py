@@ -492,15 +492,32 @@ def compute_cot_rewriter_reward(
     print_samples = kwargs.get("print_samples", 2)
 
     # Extract <rewrite_reasoning> content from rewrite_cots for reward computation
-    # This ensures we only compute reward on the actual rewritten reasoning content
+    # and track which samples have valid format
     extracted_rewrite_cots = []
+    format_valid_flags = []  # 1 if valid, 0 if invalid
+
     for i, rewrite_cot in enumerate(rewrite_cots):
         extracted_cot, has_valid_format = extract_rewrite_reasoning(rewrite_cot)
-        extracted_rewrite_cots.append(extracted_cot)
+        # For valid format: use extracted content; for invalid format: use original text
+        extracted_rewrite_cots.append(extracted_cot if has_valid_format else rewrite_cot)
+        format_valid_flags.append(1 if has_valid_format else 0)
         if not has_valid_format:
-            logger.info(f"[REWARD] Sample {i}: No valid <rewrite_reasoning> tags found, using original text for reward computation")
+            logger.info(f"[REWARD] Sample {i}: No valid <rewrite_reasoning> tags found, will use original text for cognitive reward and apply format penalty")
 
-    # Compute rewards for ALL samples (no truncation filtering)
+    # Prepare result containers for all samples
+    batch_size = len(questions)
+    cognitive_rewards = [0.0] * batch_size
+    rewrite_mean_log_probs = [0.0] * batch_size
+    original_mean_log_probs = [0.0] * batch_size
+    logic_rewards = [0.0] * batch_size
+    total_rewards = [0.0] * batch_size
+    token_log_probs = [[] for _ in range(batch_size)]
+    token_ids = [[] for _ in range(batch_size)]
+    original_fsfs = [0.0] * batch_size
+    rewrite_fsfs = [0.0] * batch_size
+
+    # Compute rewards for ALL samples (both valid and invalid format)
+    # For samples with invalid format, we use the original text instead of extracted content
     reward_computer = get_reward_computer(
         student_model_path=student_model_path,
         fsf_model_path=fsf_model_path,
@@ -525,17 +542,20 @@ def compute_cot_rewriter_reward(
     result = reward_computer.compute_reward(
         questions=questions,
         original_cots=original_cots,
-        rewrite_cots=extracted_rewrite_cots,  # Use extracted content for reward computation
+        rewrite_cots=extracted_rewrite_cots,
         answers=answers,
     )
 
-    # Convert to tensor
-    device = data.batch["responses"].device
-    total_rewards = torch.tensor(
-        result["total_rewards"],
-        device=device,
-        dtype=torch.bfloat16,
-    )
+    # Fill in results for all samples
+    cognitive_rewards = result["cognitive_rewards"]
+    rewrite_mean_log_probs = result["rewrite_mean_log_probs"]
+    original_mean_log_probs = result["original_mean_log_probs"]
+    logic_rewards = result["logic_rewards"]
+    total_rewards = result["total_rewards"]
+    token_log_probs = result["token_log_probs"]
+    token_ids = result["token_ids"]
+    original_fsfs = result["extra_info"]["original_fsfs"]
+    rewrite_fsfs = result["extra_info"]["rewrite_fsfs"]
 
     # Apply penalties
     # 1. Truncation penalty: if rollout result was truncated (finish_reason == "length")
@@ -556,22 +576,28 @@ def compute_cot_rewriter_reward(
             logger.info(f"[PENALTY] Sample {i}: Truncated (finish_reason=length), penalty=-{truncation_penalty}")
 
         # Format penalty: check if response contains valid <rewrite_reasoning> tags
-        if rewrite_cots and i < len(rewrite_cots):
-            _, has_valid_format = extract_rewrite_reasoning(rewrite_cots[i])
-            if not has_valid_format:
-                penalties[i] -= format_penalty
-                format_penalties[i] = -format_penalty
-                logger.info(
-                    f"[PENALTY] Sample {i}: Format violation (no valid <rewrite_reasoning> tags found), "
-                    f"response_preview='{rewrite_cots[i][:100]}...', penalty=-{format_penalty}"
-                )
+        # Note: format_valid_flags is already computed above
+        if format_valid_flags[i] == 0:
+            penalties[i] -= format_penalty
+            format_penalties[i] = -format_penalty
+            logger.info(
+                f"[PENALTY] Sample {i}: Format violation (no valid <rewrite_reasoning> tags found), "
+                f"response_preview='{rewrite_cots[i][:100]}...', penalty=-{format_penalty}, "
+                f"no cognitive reward computed"
+            )
 
-    # Apply penalties to total_rewards
-    total_rewards = total_rewards + torch.tensor(penalties, device=device, dtype=torch.bfloat16)
+    # Convert total_rewards to tensor and apply penalties
+    device = data.batch["responses"].device
+    total_rewards_tensor = torch.tensor(
+        total_rewards,
+        device=device,
+        dtype=torch.bfloat16,
+    )
+    total_rewards_tensor = total_rewards_tensor + torch.tensor(penalties, device=device, dtype=torch.bfloat16)
 
     # Handle NaN and extreme values
-    total_rewards = torch.nan_to_num(total_rewards, nan=0.0)
-    total_rewards = total_rewards.clamp(-100, 100)
+    total_rewards_tensor = torch.nan_to_num(total_rewards_tensor, nan=0.0)
+    total_rewards_tensor = total_rewards_tensor.clamp(-100, 100)
 
     # Convert to token-level rewards
     response_length = data.batch["responses"].shape[1]
@@ -579,7 +605,7 @@ def compute_cot_rewriter_reward(
         batch_size,
         response_length,
         device=device,
-        dtype=total_rewards.dtype,
+        dtype=total_rewards_tensor.dtype,
     )
 
     # Get actual sequence lengths from response mask
@@ -597,23 +623,26 @@ def compute_cot_rewriter_reward(
 
     # Assign reward to the last valid token of each sequence
     for i in range(batch_size):
-        token_level_rewards[i, seq_lengths[i]] = total_rewards[i]
+        token_level_rewards[i, seq_lengths[i]] = total_rewards_tensor[i]
 
     reward_result = {
         "reward_tensor": token_level_rewards,
         "reward_extra_info": {
-            "cognitive_rewards": result["cognitive_rewards"],
-            "rewrite_mean_log_probs": result["rewrite_mean_log_probs"],
-            "original_mean_log_probs": result["original_mean_log_probs"],
-            "logic_rewards": result["logic_rewards"],
-            "total_rewards": result["total_rewards"],
-            "original_fsfs": result["extra_info"]["original_fsfs"],
-            "rewrite_fsfs": result["extra_info"]["rewrite_fsfs"],
+            "cognitive_rewards": cognitive_rewards,
+            "rewrite_mean_log_probs": rewrite_mean_log_probs,
+            "original_mean_log_probs": original_mean_log_probs,
+            "logic_rewards": logic_rewards,
+            "total_rewards": total_rewards,
+            "original_fsfs": original_fsfs,
+            "rewrite_fsfs": rewrite_fsfs,
             # Penalties for SwanLab logging
             "truncation_penalties": truncation_penalties,
             "format_penalties": format_penalties,
             # DAPO filter_groups support: "truncated" flag (1 if truncated, 0 otherwise)
             "truncated": truncated_flags,
+            # DAPO filter_groups support: "format_valid" flag (1 if valid, 0 if invalid)
+            # Used to filter out groups with all invalid format samples
+            "format_valid": format_valid_flags,
         },
     }
 

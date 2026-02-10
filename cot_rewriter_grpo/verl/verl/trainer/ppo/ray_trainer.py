@@ -1784,6 +1784,13 @@ class RayDAPOTrainer(RayPPOTrainer):
                                 for uid, metric_vals in prompt_uid2metric_vals.items()
                                 if sum(1 for v in metric_vals if v == 0) >= 2  # at least 2 non-truncated samples
                             ]
+                        # Special handling for 'format_valid' metric: keep groups with at least 1 valid format sample
+                        elif metric_name == "format_valid":
+                            kept_prompt_uids = [
+                                uid
+                                for uid, metric_vals in prompt_uid2metric_vals.items()
+                                if sum(1 for v in metric_vals if v == 1) >= 1  # at least 1 valid format sample
+                            ]
                         else:
                             # For other metrics (seq_reward, etc.), use variance-based filtering
                             prompt_uid2metric_std = {}
