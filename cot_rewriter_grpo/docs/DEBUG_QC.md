@@ -14,4 +14,8 @@ source /data/luoys/projects/cdad/cot_rewriter_grpo/.venv/bin/activate
 /data/luoys/projects/cdad/cot_rewriter_grpo/logs/grpo/qwen3_4b_dapo_8x80g_vllm_rollout_sglang_reward.log
 ```
 # 问题
-报错了，帮我解决，但是不要进行任何resize！不用额外加special token!可以参考原版verl逻辑
+我想要修改这个参数too_short_threshold
+就是设置一个上下界：
+too_short_threshold_high: 0.8
+too_short_threshold_low: 0.4
+在上下界内部，惩罚线性增长，超过上下界，惩罚固定为最大值

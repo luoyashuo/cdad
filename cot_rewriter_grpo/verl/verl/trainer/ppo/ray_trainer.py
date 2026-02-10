@@ -1791,6 +1791,40 @@ class RayDAPOTrainer(RayPPOTrainer):
                                 for uid, metric_vals in prompt_uid2metric_vals.items()
                                 if sum(1 for v in metric_vals if v == 1) >= 1  # at least 1 valid format sample
                             ]
+                        # Special handling for 'length_ratio' metric: keep groups with at least 1 sample >= low threshold
+                        elif metric_name == "length_ratio":
+                            # Get low threshold from config (default to 0.4)
+                            length_threshold = 0.4
+                            if hasattr(self.config, 'custom_reward_function') and hasattr(self.config.custom_reward_function, 'reward_kwargs'):
+                                length_threshold = self.config.custom_reward_function.reward_kwargs.get('too_short_threshold_low', 0.4)
+
+                            # Filter groups: keep only groups with at least 1 sample >= length_threshold
+                            kept_prompt_uids = []
+                            discarded_prompt_uids = []
+                            for uid, metric_vals in prompt_uid2metric_vals.items():
+                                max_ratio = max(metric_vals) if metric_vals else 0.0
+                                num_valid = sum(1 for v in metric_vals if v >= length_threshold)
+                                if num_valid >= 1:
+                                    kept_prompt_uids.append(uid)
+                                else:
+                                    discarded_prompt_uids.append((uid, metric_vals, max_ratio))
+
+                            # Log filtering results
+                            print(f"[DAPO] length_ratio filter (threshold={length_threshold}):")
+                            print(f"  Total groups: {len(prompt_uid2metric_vals)}, Kept: {len(kept_prompt_uids)}, Discarded: {len(discarded_prompt_uids)}")
+                            if discarded_prompt_uids:
+                                # Log first few discarded groups for debugging
+                                num_log = min(3, len(discarded_prompt_uids))
+                                print(f"  Discarded groups (first {num_log}):")
+                                for uid, ratios, max_ratio in discarded_prompt_uids[:num_log]:
+                                    print(f"    uid={uid}, ratios={ratios}, max_ratio={max_ratio:.3f}")
+                            if kept_prompt_uids:
+                                # Log first few kept groups for verification
+                                num_log = min(3, len(kept_prompt_uids))
+                                print(f"  Kept groups (first {num_log}):")
+                                for uid in kept_prompt_uids[:num_log]:
+                                    ratios = prompt_uid2metric_vals[uid]
+                                    print(f"    uid={uid}, ratios={ratios}, max_ratio={max(ratios):.3f}")
                         else:
                             # For other metrics (seq_reward, etc.), use variance-based filtering
                             prompt_uid2metric_std = {}

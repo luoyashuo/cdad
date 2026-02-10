@@ -34,30 +34,40 @@ logger = get_logger("reward")
 
 def extract_rewrite_reasoning(text: str) -> Tuple[str, bool]:
     """
-    Extract content from <rewrite_reasoning> tags.
+    Extract content from <rewrite_reasoning> tags with STRICT format checking.
+
+    Strict format requirements:
+    - The text must START with <rewrite_reasoning> (after stripping leading whitespace)
+    - The text must END with </rewrite_reasoning> (after stripping trailing whitespace)
 
     Args:
         text: The raw response text from the model
 
     Returns:
         Tuple of (extracted_content, success_flag)
-        - extracted_content: The content inside the tags, or original text if tags not found
-        - success_flag: True if tags were found and extracted, False otherwise
+        - extracted_content: The content inside the tags if valid, empty string otherwise
+        - success_flag: True if format is strictly valid, False otherwise
     """
     if not text:
         return "", False
 
-    # Try to extract content between <rewrite_reasoning> and </rewrite_reasoning>
-    # Use DOTALL to match across newlines
-    pattern = r'<rewrite_reasoning>\s*(.*?)\s*</rewrite_reasoning>'
-    match = re.search(pattern, text, re.DOTALL)
+    # Strip leading/trailing whitespace for format checking
+    stripped_text = text.strip()
 
-    if match:
-        content = match.group(1).strip()
+    # Strict format check:
+    # 1. Must start with <rewrite_reasoning>
+    # 2. Must end with </rewrite_reasoning>
+    starts_with_open_tag = stripped_text.startswith('<rewrite_reasoning>')
+    ends_with_close_tag = stripped_text.endswith('</rewrite_reasoning>')
+
+    if starts_with_open_tag and ends_with_close_tag:
+        # Extract content between tags
+        # Remove opening tag and closing tag
+        content = stripped_text[len('<rewrite_reasoning>'):-len('</rewrite_reasoning>')].strip()
         return content, True
 
-    # Tags not found, return original text with failure flag
-    return text.strip(), False
+    # Format violation - return empty content and failure flag
+    return "", False
 
 
 class CombinedRewardComputer:
@@ -90,6 +100,10 @@ class CombinedRewardComputer:
         student_max_num_seqs: int = 1,  # limit concurrent sequences (vLLM only)
         student_tensor_parallel_size: int = 1,  # TP size for Student Model (1=disable)
         student_logprob_last_n_tokens: Optional[int] = None,  # SGLang: only compute last N tokens
+        too_short_threshold: float = 0.5,  # Deprecated: use too_short_threshold_low/high instead
+        too_short_threshold_low: float = 0.4,  # Lower threshold for too_short_penalty
+        too_short_threshold_high: float = 0.8,  # Upper threshold for too_short_penalty
+        too_short_max_penalty: float = 0.5,  # Maximum penalty for too short outputs
         **kwargs,  # Ignore deprecated params
     ):
         """
@@ -113,6 +127,12 @@ class CombinedRewardComputer:
             student_max_num_seqs: Maximum concurrent sequences in vLLM (lower saves memory, vLLM only)
             student_tensor_parallel_size: Tensor parallelism size for Student Model (default: 1)
             student_logprob_last_n_tokens: SGLang only - only compute last N tokens' logprobs to save memory
+            too_short_threshold: Deprecated. Use too_short_threshold_low/high instead.
+            too_short_threshold_low: Lower threshold for too_short_penalty (default: 0.4). When
+                rewrite_ratio < low, penalty is at maximum. Between low and high, penalty scales linearly.
+            too_short_threshold_high: Upper threshold for too_short_penalty (default: 0.8). When
+                rewrite_ratio >= high, no penalty is applied.
+            too_short_max_penalty: Maximum penalty for too short outputs (default: 0.5).
         """
         self.lambda_logic = lambda_logic
         self.use_logic_reward = use_logic_reward
@@ -120,6 +140,20 @@ class CombinedRewardComputer:
         self.reward_micro_batch_size = reward_micro_batch_size
         self.gpu_batch_size = gpu_batch_size
         self.reward_backend = reward_backend
+        # Use low/high thresholds if provided, otherwise fall back to old single threshold
+        if kwargs.get('too_short_threshold_low') is not None or kwargs.get('too_short_threshold_high') is not None:
+            self.too_short_threshold_low = too_short_threshold_low
+            self.too_short_threshold_high = too_short_threshold_high
+            # For backward compatibility, if only single threshold is provided
+            if kwargs.get('too_short_threshold_low') is None:
+                self.too_short_threshold_low = too_short_threshold
+            if kwargs.get('too_short_threshold_high') is None:
+                self.too_short_threshold_high = 1.0  # No upper limit
+        else:
+            # Backward compatibility: use single threshold as low, high as 1.0
+            self.too_short_threshold_low = too_short_threshold
+            self.too_short_threshold_high = 1.0
+        self.too_short_max_penalty = too_short_max_penalty
 
         # Initialize Student Reward client based on backend
         if reward_backend == "sglang":
@@ -243,8 +277,72 @@ class CombinedRewardComputer:
             original_fsfs = [0.0] * batch_size
             rewrite_fsfs = [0.0] * batch_size
 
-        # Combine rewards: R = R_cog + lambda * R_logic
-        total_rewards = [c + self.lambda_logic * l for c, l in zip(r_cog, r_logic)]
+        # Compute too_short_penalty: penalize rewrites that are too short compared to original_cot
+        # Penalty formula with low/high thresholds:
+        #   ratio = rewrite_token_len / original_token_len
+        #   - If ratio >= high: penalty = 0
+        #   - If low <= ratio < high: penalty = -max_penalty * (high - ratio) / (high - low)
+        #   - If ratio < low: penalty = -max_penalty
+        too_short_penalties = [0.0] * batch_size
+        length_ratios = [0.0] * batch_size  # Track length ratios for DAPO filter_groups
+
+        # Get tokenizer from student_client for token length calculation
+        tokenizer = getattr(self.student_client, 'tokenizer', None)
+        if tokenizer is None:
+            logger.warning("[TOO_SHORT_PENALTY] Tokenizer not available, skipping too_short_penalty")
+        else:
+            for i in range(batch_size):
+                original_text = original_cots[i] if original_cots[i] else ""
+                rewrite_text = rewrite_cots[i] if rewrite_cots[i] else ""
+
+                if original_text:
+                    # Calculate token lengths using tokenizer
+                    original_token_len = len(tokenizer.encode(original_text, add_special_tokens=False))
+                    rewrite_token_len = len(tokenizer.encode(rewrite_text, add_special_tokens=False)) if rewrite_text else 0
+
+                    if original_token_len > 0:
+                        ratio = rewrite_token_len / original_token_len
+                        length_ratios[i] = ratio  # Store for DAPO filter_groups
+                        low = self.too_short_threshold_low
+                        high = self.too_short_threshold_high
+
+                        if ratio >= high:
+                            # No penalty when ratio is above high threshold
+                            penalty = 0.0
+                        elif ratio < low:
+                            # Maximum penalty when ratio is below low threshold
+                            penalty = -self.too_short_max_penalty
+                        else:
+                            # Linear penalty between low and high: 0 at high, max_penalty at low
+                            penalty = -self.too_short_max_penalty * (high - ratio) / (high - low)
+
+                        if penalty != 0:
+                            too_short_penalties[i] = penalty
+                            if i < 3:  # Log first few samples
+                                logger.info(
+                                    f"[TOO_SHORT_PENALTY] Sample {i}: "
+                                    f"original_token_len={original_token_len}, rewrite_token_len={rewrite_token_len}, "
+                                    f"ratio={ratio:.3f} (low={low}, high={high}), penalty={penalty:.4f}"
+                                )
+
+        # Log length_ratio statistics for DAPO filter_groups
+        valid_ratios = [r for r in length_ratios if r > 0]
+        if valid_ratios:
+            low = self.too_short_threshold_low
+            high = self.too_short_threshold_high
+            num_above_low = sum(1 for r in valid_ratios if r >= low)
+            num_above_high = sum(1 for r in valid_ratios if r >= high)
+            logger.info(
+                f"[LENGTH_RATIO] batch_size={batch_size}, "
+                f"mean={sum(valid_ratios)/len(valid_ratios):.3f}, "
+                f"min={min(valid_ratios):.3f}, max={max(valid_ratios):.3f}, "
+                f"low={low}, high={high}, "
+                f"num_above_low={num_above_low}/{len(valid_ratios)}, "
+                f"num_above_high={num_above_high}/{len(valid_ratios)}"
+            )
+
+        # Combine rewards: R = R_cog + lambda * R_logic + too_short_penalty
+        total_rewards = [c + self.lambda_logic * l + p for c, l, p in zip(r_cog, r_logic, too_short_penalties)]
         
         # Log per-sample prompts with computed rewards
         logger.log_per_sample_rewards(
@@ -271,6 +369,8 @@ class CombinedRewardComputer:
                 "original_fsfs": original_fsfs,
                 "rewrite_fsfs": rewrite_fsfs,
                 "lambda_logic": self.lambda_logic,
+                "too_short_penalties": too_short_penalties,
+                "length_ratios": length_ratios,  # For DAPO filter_groups
             },
         }
 
@@ -362,6 +462,10 @@ def compute_cot_rewriter_reward(
     student_logprob_last_n_tokens: Optional[int] = None,  # SGLang: only compute last N tokens
     truncation_penalty: float = 0.5,  # Penalty for truncated responses (configured as positive)
     format_penalty: float = 0.5,  # Penalty for format violations (configured as positive)
+    too_short_threshold: float = 0.5,  # Deprecated: use too_short_threshold_low/high instead
+    too_short_threshold_low: float = 0.4,  # Lower threshold for too_short_penalty
+    too_short_threshold_high: float = 0.8,  # Upper threshold for too_short_penalty
+    too_short_max_penalty: float = 0.5,  # Maximum penalty for too short outputs
     **kwargs,
 ) -> Dict[str, Any]:
     # Use alpha if provided (from config), otherwise use alpha_cog
@@ -498,11 +602,15 @@ def compute_cot_rewriter_reward(
 
     for i, rewrite_cot in enumerate(rewrite_cots):
         extracted_cot, has_valid_format = extract_rewrite_reasoning(rewrite_cot)
-        # For valid format: use extracted content; for invalid format: use original text
-        extracted_rewrite_cots.append(extracted_cot if has_valid_format else rewrite_cot)
+        # For valid format: use extracted content; for invalid format: use empty string (no cognitive reward)
+        extracted_rewrite_cots.append(extracted_cot if has_valid_format else "")
         format_valid_flags.append(1 if has_valid_format else 0)
         if not has_valid_format:
-            logger.info(f"[REWARD] Sample {i}: No valid <rewrite_reasoning> tags found, will use original text for cognitive reward and apply format penalty")
+            stripped_preview = rewrite_cot.strip()[:100] if rewrite_cot else ""
+            logger.info(
+                f"[REWARD] Sample {i}: Format violation - response must start with '<rewrite_reasoning>' and end with '</rewrite_reasoning>'. "
+                f"Preview: '{stripped_preview}...'. Will apply format penalty without cognitive reward."
+            )
 
     # Prepare result containers for all samples
     batch_size = len(questions)
@@ -536,6 +644,10 @@ def compute_cot_rewriter_reward(
         student_max_num_seqs=student_max_num_seqs,
         student_tensor_parallel_size=student_tensor_parallel_size,
         student_logprob_last_n_tokens=student_logprob_last_n_tokens,
+        too_short_threshold=too_short_threshold,
+        too_short_threshold_low=too_short_threshold_low,
+        too_short_threshold_high=too_short_threshold_high,
+        too_short_max_penalty=too_short_max_penalty,
     )
 
     # Compute rewards for all samples
@@ -556,6 +668,8 @@ def compute_cot_rewriter_reward(
     token_ids = result["token_ids"]
     original_fsfs = result["extra_info"]["original_fsfs"]
     rewrite_fsfs = result["extra_info"]["rewrite_fsfs"]
+    too_short_penalties = result["extra_info"].get("too_short_penalties", [0.0] * batch_size)
+    length_ratios = result["extra_info"].get("length_ratios", [0.0] * batch_size)
 
     # Apply penalties
     # 1. Truncation penalty: if rollout result was truncated (finish_reason == "length")
@@ -638,11 +752,14 @@ def compute_cot_rewriter_reward(
             # Penalties for SwanLab logging
             "truncation_penalties": truncation_penalties,
             "format_penalties": format_penalties,
+            "too_short_penalties": too_short_penalties,
             # DAPO filter_groups support: "truncated" flag (1 if truncated, 0 otherwise)
             "truncated": truncated_flags,
             # DAPO filter_groups support: "format_valid" flag (1 if valid, 0 if invalid)
             # Used to filter out groups with all invalid format samples
             "format_valid": format_valid_flags,
+            # DAPO filter_groups support: "length_ratio" metric for length-based filtering
+            "length_ratio": length_ratios,
         },
     }
 

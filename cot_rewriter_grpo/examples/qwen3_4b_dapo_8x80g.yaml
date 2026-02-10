@@ -48,8 +48,8 @@ trainer:
 
 data:
   # 数据路径（使用 DATA_BASE_DIR 环境变量）
-  train_files: ${oc.env:DATA_BASE_DIR}/cot_rewrite_max_fsf_v3/train.jsonl
-  val_files: ${oc.env:DATA_BASE_DIR}/cot_rewrite_max_fsf_v3/val.jsonl
+  train_files: ${oc.env:DATA_BASE_DIR}/cot_rewrite_max_fsf_v4/train.jsonl
+  val_files: ${oc.env:DATA_BASE_DIR}/cot_rewrite_max_fsf_v4/val.jsonl
   train_batch_size: 2
   val_batch_size: 2
   gen_batch_size: 2    # DAPO: 可能因过滤需要多轮生成
@@ -88,20 +88,20 @@ actor_rollout_ref:
     clip_ratio_low: 0.2      # DAPO: 下界 clip ratio
     clip_ratio_high: 0.28    # DAPO: 上界 clip ratio (1.4x low)
     # ========== DAPO: Token-level Loss ==========
-    loss_agg_mode: "token-mean"  # DAPO: token 级别损失聚合
-    entropy_coeff: 0.05
+    loss_agg_mode: "seq-mean-token-mean"  # DAPO: token 级别损失聚合
+    entropy_coeff: 0.01
     grad_clip: 1.0
     ppo_mini_batch_size: 2
     ppo_micro_batch_size_per_gpu: 1
     use_kl_in_reward: false
     use_kl_loss: true
-    kl_loss_coef: 0.001
+    kl_loss_coef: 0.05
     kl_loss_type: low_var_kl
     entropy_from_logits_with_chunking: true
 
     fsdp_config:
       dtype: bfloat16
-      param_offload: false
+      param_offload: true
       optimizer_offload: false
       mixed_precision:
         param_dtype: bf16
@@ -121,10 +121,10 @@ actor_rollout_ref:
     tensor_model_parallel_size: 4
     gpu_memory_utilization: 0.65
     dtype: bfloat16
-    load_format: dummy_dtensor
+    load_format: auto
     log_prob_micro_batch_size_per_gpu: 2
     n: 8  # GRPO/DAPO 组大小
-    temperature: 1.0
+    temperature: 0.7
     top_p: 0.95
     prompt_length: 5500
     response_length: 10000
@@ -161,12 +161,11 @@ algorithm:
     kl_coef: 0.0
 
   # ========== DAPO: 动态采样过滤 ==========
-  # 使用 format_valid 过滤：组内至少 1 个样本格式正确才保留
-  # 使用 format_valid 过滤：组内至少 1 个样本格式正确才保留
+  # 使用 length_ratio 过滤：组内至少 1 个样本长度达到 low 阈值 (0.4) 才保留
   filter_groups:
     _target_: verl.trainer.config.FilterGroupsConfig
     enable: true
-    metric: "format_valid"  # 按格式正确性过滤：组内至少 1 个样本格式正确才保留
+    metric: "length_ratio"  # 按长度比例过滤：组内至少 1 个样本 length_ratio >= low (0.4) 才保留
     max_num_gen_batches: 10  # 最多生成 10 轮，<=0 表示无限制
 
 # ============ Critic Configuration (GRPO/DAPO doesn't need) ============
@@ -186,7 +185,7 @@ reward_model:
     overlong_buffer_cfg:
       enable: true         # Disabled: using truncation_penalty in compute_cot_rewriter_reward instead
       len: 3000            # Buffer length (penalty starts after max_response_length - buffer_len)
-      penalty_factor: 0.5  # Maximum penalty value
+      penalty_factor: 1.0  # Maximum penalty value
       log: false           # Whether to log overlong reward
     max_resp_len: 10000    # Required when overlong_buffer_cfg.enable=true
 
@@ -213,7 +212,10 @@ custom_reward_function:
     # ========== 其他配置 ==========
     print_samples: 2
     truncation_penalty: 0.0   # 截断惩罚（finish_reason == "length" 时应用，配置为正数）
-    format_penalty: 0.2        # 格式惩罚
+    format_penalty: 1.0        # 格式惩罚
+    too_short_threshold_low: 0.4   # 过短惩罚下界：ratio < low 时惩罚为最大值
+    too_short_threshold_high: 0.8  # 过短惩罚上界：ratio >= high 时无惩罚
+    too_short_max_penalty: 1.0     # 过短最大惩罚值
     field_mapping:
       prompt_key: problem
       reward_model_key: reward_model
