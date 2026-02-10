@@ -47,6 +47,7 @@ from verl.trainer.ppo import core_algos
 from verl.trainer.ppo.core_algos import AdvantageEstimator, agg_loss
 from verl.trainer.ppo.metric_utils import (
     compute_data_metrics,
+    compute_reward_breakdown_metrics,
     compute_throughout_metrics,
     compute_timing_metrics,
     process_validation_metrics,
@@ -1340,10 +1341,14 @@ class RayPPOTrainer:
                             future_reward = compute_reward_async.remote(data=batch, reward_fn=self.reward_fn)
                         else:
                             reward_tensor, reward_extra_infos_dict = compute_reward(batch, self.reward_fn)
-                        
+
+                            # Log reward breakdown statistics to SwanLab
+                            reward_breakdown = compute_reward_breakdown_metrics(reward_extra_infos_dict)
+                            metrics.update(reward_breakdown)
+
                         # === REWARD END ===
                         training_logger.log_gpu_memory(f"[STEP_{self.global_steps}][REWARD_END]")
-                        
+
                         # Log reward statistics (vLLM-style)
                         if reward_tensor is not None:
                             training_logger.log_rewards(
@@ -1356,7 +1361,7 @@ class RayPPOTrainer:
                                 name="SAMPLE_REWARD",
                                 prefix=f"[STEP_{self.global_steps}][REWARD]"
                             )
-                        
+
                         training_logger.log_data_stats(
                             batch,
                             prefix=f"[STEP_{self.global_steps}][REWARD_POST]",
@@ -1420,6 +1425,9 @@ class RayPPOTrainer:
                         reward_extra_infos_dict: dict[str, list]
                         if self.config.reward_model.launch_reward_fn_async:
                             reward_tensor, reward_extra_infos_dict = ray.get(future_reward)
+                            # Log reward breakdown statistics to SwanLab
+                            reward_breakdown = compute_reward_breakdown_metrics(reward_extra_infos_dict)
+                            metrics.update(reward_breakdown)
                         batch.batch["token_level_scores"] = reward_tensor
 
                         if reward_extra_infos_dict:
@@ -1480,11 +1488,26 @@ class RayPPOTrainer:
                             inputs = self.tokenizer.batch_decode(batch.batch["prompts"], skip_special_tokens=True)
                             outputs = self.tokenizer.batch_decode(batch.batch["responses"], skip_special_tokens=True)
                             scores = batch.batch["token_level_scores"].sum(-1).cpu().tolist()
+
+                            # Collect all reward-related fields from non_tensor_batch
+                            # reward_extra_infos_dict from compute_reward already contains reward breakdown
                             if "request_id" in batch.non_tensor_batch:
                                 reward_extra_infos_dict.setdefault(
                                     "request_id",
                                     batch.non_tensor_batch["request_id"].tolist(),
                                 )
+                            # Also add any other reward fields from non_tensor_batch
+                            reward_fields = [
+                                "original_cot", "ground_truth",
+                                "cognitive_rewards", "rewrite_mean_log_probs", "original_mean_log_probs",
+                                "logic_rewards", "total_rewards", "original_fsfs", "rewrite_fsfs",
+                                "truncation_penalties", "format_penalties", "too_short_penalties",
+                                "truncated", "format_valid", "length_ratio",
+                            ]
+                            for field in reward_fields:
+                                if field in batch.non_tensor_batch and field not in reward_extra_infos_dict:
+                                    reward_extra_infos_dict[field] = batch.non_tensor_batch[field].tolist()
+
                             self._dump_generations(
                                 inputs=inputs,
                                 outputs=outputs,
@@ -1728,6 +1751,66 @@ class RayDAPOTrainer(RayPPOTrainer):
                     if "response_mask" not in new_batch.batch.keys():
                         new_batch.batch["response_mask"] = compute_response_mask(new_batch)
 
+                    # === PRE-FILTER FOR length_ratio (DAPO optimization) ===
+                    # If filter_groups uses length_ratio, compute it first without loading Student Model
+                    # This avoids wasting time computing R_cog for samples that will be filtered out
+                    if (
+                        self.config.algorithm.filter_groups.enable
+                        and self.config.algorithm.filter_groups.metric == "length_ratio"
+                    ):
+                        print("[DAPO] Pre-filtering using length_ratio (without loading Student Model)...")
+                        from verl.experimental.reward.cot_rewriter.combined_reward import compute_length_ratio_only
+
+                        # Get low threshold from config
+                        length_threshold = 0.4
+                        if hasattr(self.config, 'custom_reward_function') and hasattr(self.config.custom_reward_function, 'reward_kwargs'):
+                            length_threshold = self.config.custom_reward_function.reward_kwargs.get('too_short_threshold_low', 0.4)
+
+                        # Compute length_ratio only (fast, no Student Model)
+                        field_mapping = None
+                        if hasattr(self.config, 'custom_reward_function') and hasattr(self.config.custom_reward_function, 'reward_kwargs'):
+                            field_mapping = self.config.custom_reward_function.reward_kwargs.get('field_mapping')
+
+                        length_ratio_result = compute_length_ratio_only(
+                            data=new_batch,
+                            tokenizer=self.tokenizer,
+                            field_mapping=field_mapping,
+                        )
+                        length_ratios = length_ratio_result["length_ratio"]
+                        new_batch.non_tensor_batch["length_ratio"] = np.array(length_ratios)
+
+                        # Pre-filter: keep only groups with at least 1 sample >= length_threshold
+                        prompt_uid2metric_vals = defaultdict(list)
+                        for uid, metric_val in zip(new_batch.non_tensor_batch["uid"], length_ratios, strict=True):
+                            prompt_uid2metric_vals[uid].append(metric_val)
+
+                        kept_prompt_uids = [
+                            uid
+                            for uid, metric_vals in prompt_uid2metric_vals.items()
+                            if sum(1 for v in metric_vals if v >= length_threshold) >= 1
+                        ]
+
+                        kept_traj_idxs = [
+                            idx for idx, uid in enumerate(new_batch.non_tensor_batch["uid"])
+                            if uid in kept_prompt_uids
+                        ]
+
+                        num_before = len(new_batch.non_tensor_batch["uid"])
+                        new_batch = new_batch[kept_traj_idxs]
+                        num_after = len(new_batch.non_tensor_batch["uid"])
+                        print(f"[DAPO] Pre-filter: {num_before} -> {num_after} samples ({len(kept_prompt_uids)} groups kept)")
+
+                        # If no samples left, skip to next generation
+                        if num_after == 0:
+                            print(f"[DAPO] All groups filtered out by length_ratio pre-filter. Continuing to next generation...")
+                            max_num_gen_batches = self.config.algorithm.filter_groups.max_num_gen_batches
+                            if max_num_gen_batches <= 0 or num_gen_batches < max_num_gen_batches:
+                                progress_bar.update(1)
+                                self.gen_steps += 1
+                                continue
+                            else:
+                                raise ValueError("[DAPO] All groups filtered out and max_num_gen_batches reached.")
+
                     # === REWARD ===
                     with marked_timer("reward", timing_raw):
                         training_logger.log_gpu_memory(f"[STEP_{self.global_steps}][REWARD_START]")
@@ -1745,6 +1828,10 @@ class RayDAPOTrainer(RayPPOTrainer):
                                 {k: np.array(v) for k, v in reward_extra_infos_dict.items()}
                             )
 
+                        # Log reward breakdown statistics to SwanLab
+                        reward_breakdown = compute_reward_breakdown_metrics(reward_extra_infos_dict)
+                        metrics.update(reward_breakdown)
+
                         # compute rewards. apply_kl_penalty if available
                         if self.config.algorithm.use_kl_in_reward:
                             new_batch, kl_metrics = apply_kl_penalty(
@@ -1761,90 +1848,77 @@ class RayDAPOTrainer(RayPPOTrainer):
                         batch = new_batch
                     else:
                         metric_name = self.config.algorithm.filter_groups.metric
-                        if metric_name == "seq_final_reward":
-                            new_batch.non_tensor_batch["seq_final_reward"] = (
-                                new_batch.batch["token_level_rewards"].sum(dim=-1).numpy()
-                            )
-                        elif metric_name == "seq_reward":
-                            new_batch.non_tensor_batch["seq_reward"] = (
-                                new_batch.batch["token_level_scores"].sum(dim=-1).numpy()
-                            )
-
-                        # Collect the sequence reward for each trajectory
-                        prompt_uid2metric_vals = defaultdict(list)
-                        for uid, metric_val in zip(
-                            new_batch.non_tensor_batch["uid"], new_batch.non_tensor_batch[metric_name], strict=True
-                        ):
-                            prompt_uid2metric_vals[uid].append(metric_val)
-
-                        # Special handling for 'truncated' metric: keep groups with at least 2 non-truncated samples
-                        if metric_name == "truncated":
-                            kept_prompt_uids = [
-                                uid
-                                for uid, metric_vals in prompt_uid2metric_vals.items()
-                                if sum(1 for v in metric_vals if v == 0) >= 2  # at least 2 non-truncated samples
-                            ]
-                        # Special handling for 'format_valid' metric: keep groups with at least 1 valid format sample
-                        elif metric_name == "format_valid":
-                            kept_prompt_uids = [
-                                uid
-                                for uid, metric_vals in prompt_uid2metric_vals.items()
-                                if sum(1 for v in metric_vals if v == 1) >= 1  # at least 1 valid format sample
-                            ]
-                        # Special handling for 'length_ratio' metric: keep groups with at least 1 sample >= low threshold
-                        elif metric_name == "length_ratio":
-                            # Get low threshold from config (default to 0.4)
-                            length_threshold = 0.4
-                            if hasattr(self.config, 'custom_reward_function') and hasattr(self.config.custom_reward_function, 'reward_kwargs'):
-                                length_threshold = self.config.custom_reward_function.reward_kwargs.get('too_short_threshold_low', 0.4)
-
-                            # Filter groups: keep only groups with at least 1 sample >= length_threshold
-                            kept_prompt_uids = []
-                            discarded_prompt_uids = []
-                            for uid, metric_vals in prompt_uid2metric_vals.items():
-                                max_ratio = max(metric_vals) if metric_vals else 0.0
-                                num_valid = sum(1 for v in metric_vals if v >= length_threshold)
-                                if num_valid >= 1:
-                                    kept_prompt_uids.append(uid)
-                                else:
-                                    discarded_prompt_uids.append((uid, metric_vals, max_ratio))
-
-                            # Log filtering results
-                            print(f"[DAPO] length_ratio filter (threshold={length_threshold}):")
-                            print(f"  Total groups: {len(prompt_uid2metric_vals)}, Kept: {len(kept_prompt_uids)}, Discarded: {len(discarded_prompt_uids)}")
-                            if discarded_prompt_uids:
-                                # Log first few discarded groups for debugging
-                                num_log = min(3, len(discarded_prompt_uids))
-                                print(f"  Discarded groups (first {num_log}):")
-                                for uid, ratios, max_ratio in discarded_prompt_uids[:num_log]:
-                                    print(f"    uid={uid}, ratios={ratios}, max_ratio={max_ratio:.3f}")
-                            if kept_prompt_uids:
-                                # Log first few kept groups for verification
-                                num_log = min(3, len(kept_prompt_uids))
-                                print(f"  Kept groups (first {num_log}):")
-                                for uid in kept_prompt_uids[:num_log]:
-                                    ratios = prompt_uid2metric_vals[uid]
-                                    print(f"    uid={uid}, ratios={ratios}, max_ratio={max(ratios):.3f}")
+                        # Skip filtering for length_ratio since we already pre-filtered
+                        if metric_name == "length_ratio":
+                            batch = new_batch
+                            print(f"[DAPO] Skipping post-filter for length_ratio (already pre-filtered)")
+                            # Update num_prompt_in_batch for the loop condition
+                            unique_uids = set(new_batch.non_tensor_batch["uid"])
+                            num_prompt_in_batch = len(unique_uids)
                         else:
-                            # For other metrics (seq_reward, etc.), use variance-based filtering
-                            prompt_uid2metric_std = {}
-                            for prompt_uid, metric_vals in prompt_uid2metric_vals.items():
-                                prompt_uid2metric_std[prompt_uid] = np.std(metric_vals)
+                            # For other metrics, use the original filter logic
+                            if metric_name == "seq_final_reward":
+                                new_batch.non_tensor_batch["seq_final_reward"] = (
+                                    new_batch.batch["token_level_rewards"].sum(dim=-1).numpy()
+                                )
+                            elif metric_name == "seq_reward":
+                                new_batch.non_tensor_batch["seq_reward"] = (
+                                    new_batch.batch["token_level_scores"].sum(dim=-1).numpy()
+                                )
 
-                            kept_prompt_uids = [
-                                uid
-                                for uid, std in prompt_uid2metric_std.items()
-                                if std > 0 or len(prompt_uid2metric_vals[uid]) == 1
-                            ]
-                        num_prompt_in_batch += len(kept_prompt_uids)
+                            # Collect the sequence reward for each trajectory
+                            prompt_uid2metric_vals = defaultdict(list)
+                            for uid, metric_val in zip(
+                                new_batch.non_tensor_batch["uid"], new_batch.non_tensor_batch[metric_name], strict=True
+                            ):
+                                prompt_uid2metric_vals[uid].append(metric_val)
 
-                        kept_traj_idxs = []
-                        for idx, traj_from_prompt_uid in enumerate(new_batch.non_tensor_batch["uid"]):
-                            if traj_from_prompt_uid in kept_prompt_uids:
-                                kept_traj_idxs.append(idx)
+                            # Special handling for 'truncated' metric: keep groups with at least 2 non-truncated samples
+                            if metric_name == "truncated":
+                                kept_prompt_uids = [
+                                    uid
+                                    for uid, metric_vals in prompt_uid2metric_vals.items()
+                                    if sum(1 for v in metric_vals if v == 0) >= 2  # at least 2 non-truncated samples
+                                ]
+                            # Special handling for 'format_valid' metric: keep groups with at least 1 valid format sample
+                            elif metric_name == "format_valid":
+                                kept_prompt_uids = [
+                                    uid
+                                    for uid, metric_vals in prompt_uid2metric_vals.items()
+                                    if sum(1 for v in metric_vals if v == 1) >= 1  # at least 1 valid format sample
+                                ]
+                            # Special handling for 'length_ratio' metric (not expected here since we pre-filter, but kept for safety)
+                            elif metric_name == "length_ratio":
+                                # Get low threshold from config (default to 0.4)
+                                length_threshold = 0.4
+                                if hasattr(self.config, 'custom_reward_function') and hasattr(self.config.custom_reward_function, 'reward_kwargs'):
+                                    length_threshold = self.config.custom_reward_function.reward_kwargs.get('too_short_threshold_low', 0.4)
 
-                        new_batch = new_batch[kept_traj_idxs]
-                        batch = new_batch if batch is None else DataProto.concat([batch, new_batch])
+                                kept_prompt_uids = [
+                                    uid
+                                    for uid, metric_vals in prompt_uid2metric_vals.items()
+                                    if sum(1 for v in metric_vals if v >= length_threshold) >= 1
+                                ]
+                            else:
+                                # For other metrics (seq_reward, etc.), use variance-based filtering
+                                prompt_uid2metric_std = {}
+                                for prompt_uid, metric_vals in prompt_uid2metric_vals.items():
+                                    prompt_uid2metric_std[prompt_uid] = np.std(metric_vals)
+
+                                kept_prompt_uids = [
+                                    uid
+                                    for uid, std in prompt_uid2metric_std.items()
+                                    if std > 0 or len(prompt_uid2metric_vals[uid]) == 1
+                                ]
+                            num_prompt_in_batch += len(kept_prompt_uids)
+
+                            kept_traj_idxs = []
+                            for idx, traj_from_prompt_uid in enumerate(new_batch.non_tensor_batch["uid"]):
+                                if traj_from_prompt_uid in kept_prompt_uids:
+                                    kept_traj_idxs.append(idx)
+
+                            new_batch = new_batch[kept_traj_idxs]
+                            batch = new_batch if batch is None else DataProto.concat([batch, new_batch])
 
                         prompt_bsz = self.config.data.train_batch_size
                         if num_prompt_in_batch < prompt_bsz:
@@ -1929,13 +2003,23 @@ class RayDAPOTrainer(RayPPOTrainer):
                             inputs = self.tokenizer.batch_decode(batch.batch["prompts"], skip_special_tokens=True)
                             outputs = self.tokenizer.batch_decode(batch.batch["responses"], skip_special_tokens=True)
                             scores = batch.batch["token_level_scores"].sum(-1).cpu().tolist()
+
+                            # Collect all reward-related fields from non_tensor_batch
                             reward_extra_infos_dict = {}
-                            if "request_id" in batch.non_tensor_batch:
-                                reward_extra_infos_dict["request_id"] = batch.non_tensor_batch["request_id"].tolist()
-                            if "original_cot" in batch.non_tensor_batch:
-                                reward_extra_infos_dict["original_cot"] = batch.non_tensor_batch["original_cot"].tolist()
-                            if "ground_truth" in batch.non_tensor_batch:
-                                reward_extra_infos_dict["ground_truth"] = batch.non_tensor_batch["ground_truth"].tolist()
+                            reward_fields = [
+                                "request_id", "original_cot", "ground_truth",
+                                # Reward breakdown fields
+                                "cognitive_rewards", "rewrite_mean_log_probs", "original_mean_log_probs",
+                                "logic_rewards", "total_rewards", "original_fsfs", "rewrite_fsfs",
+                                # Penalty fields
+                                "truncation_penalties", "format_penalties", "too_short_penalties",
+                                # DAPO filter_groups flags
+                                "truncated", "format_valid", "length_ratio",
+                            ]
+                            for field in reward_fields:
+                                if field in batch.non_tensor_batch:
+                                    reward_extra_infos_dict[field] = batch.non_tensor_batch[field].tolist()
+
                             self._dump_generations(
                                 inputs=inputs,
                                 outputs=outputs,

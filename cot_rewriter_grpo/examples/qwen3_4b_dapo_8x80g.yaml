@@ -206,8 +206,8 @@ custom_reward_function:
     use_logic_reward: false
     alpha: 0.01
     reward_backend: sglang
-    sglang_mem_fraction_static: 0.30
-    cleanup_after_compute: true
+    sglang_mem_fraction_static: 0.20
+    cleanup_after_compute: false
 
     # ========== 其他配置 ==========
     print_samples: 2

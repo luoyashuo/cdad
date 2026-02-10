@@ -140,19 +140,10 @@ class CombinedRewardComputer:
         self.reward_micro_batch_size = reward_micro_batch_size
         self.gpu_batch_size = gpu_batch_size
         self.reward_backend = reward_backend
-        # Use low/high thresholds if provided, otherwise fall back to old single threshold
-        if kwargs.get('too_short_threshold_low') is not None or kwargs.get('too_short_threshold_high') is not None:
-            self.too_short_threshold_low = too_short_threshold_low
-            self.too_short_threshold_high = too_short_threshold_high
-            # For backward compatibility, if only single threshold is provided
-            if kwargs.get('too_short_threshold_low') is None:
-                self.too_short_threshold_low = too_short_threshold
-            if kwargs.get('too_short_threshold_high') is None:
-                self.too_short_threshold_high = 1.0  # No upper limit
-        else:
-            # Backward compatibility: use single threshold as low, high as 1.0
-            self.too_short_threshold_low = too_short_threshold
-            self.too_short_threshold_high = 1.0
+        # Use low/high thresholds directly (no longer need backward compatibility check)
+        # The caller should provide too_short_threshold_low/high explicitly
+        self.too_short_threshold_low = too_short_threshold_low
+        self.too_short_threshold_high = too_short_threshold_high
         self.too_short_max_penalty = too_short_max_penalty
 
         # Initialize Student Reward client based on backend
@@ -377,19 +368,35 @@ class CombinedRewardComputer:
 
 # Global singleton
 _reward_computer: Optional[CombinedRewardComputer] = None
+_reward_computer_kwargs: Optional[dict] = None  # Track kwargs used to create the singleton
 
 
 def get_reward_computer(**kwargs) -> CombinedRewardComputer:
     """Get or create Combined Reward Computer singleton."""
-    global _reward_computer
+    global _reward_computer, _reward_computer_kwargs
     if _reward_computer is None:
+        _reward_computer_kwargs = kwargs.copy()
+        logger.info(f"[REWARD] Creating new CombinedRewardComputer with too_short_threshold_low={kwargs.get('too_short_threshold_low')}, too_short_threshold_high={kwargs.get('too_short_threshold_high')}")
         _reward_computer = CombinedRewardComputer(**kwargs)
+    else:
+        # Log if kwargs differ from initial creation
+        threshold_low = kwargs.get('too_short_threshold_low')
+        threshold_high = kwargs.get('too_short_threshold_high')
+        initial_low = _reward_computer_kwargs.get('too_short_threshold_low')
+        initial_high = _reward_computer_kwargs.get('too_short_threshold_high')
+        if threshold_low != initial_low or threshold_high != initial_high:
+            logger.warning(
+                f"[REWARD] Reward computer already exists with different thresholds! "
+                f"Initial: low={initial_low}, high={initial_high}. "
+                f"Current call: low={threshold_low}, high={threshold_high}. "
+                f"Using initial values."
+            )
     return _reward_computer
 
 
 def cleanup_reward_computer():
     """Cleanup the global reward computer to release GPU memory."""
-    global _reward_computer
+    global _reward_computer, _reward_computer_kwargs
     if _reward_computer is not None:
         logger.info("[REWARD] Cleaning up reward computer...")
         if hasattr(_reward_computer, 'student_client') and _reward_computer.student_client is not None:
@@ -398,6 +405,7 @@ def cleanup_reward_computer():
             # FSF Judge cleanup if needed
             del _reward_computer.fsf_judge
         _reward_computer = None
+        _reward_computer_kwargs = None  # Reset kwargs for next creation
 
         # Force garbage collection
         import gc
@@ -548,14 +556,14 @@ def compute_cot_rewriter_reward(
 
     for i in range(batch_size):
         # Get reward info from non_tensor_batch
+        # IMPORTANT: Use data[i] to get per-sample data (like VERL's naive.py/prime.py/dapo.py)
+        # This ensures each sample gets its own reward_model dict, not a shared reference
+        data_item = data[i]
+
         if use_flat_structure:
             reward_info = {}
         else:
-            reward_info_data = data.non_tensor_batch.get(reward_model_key, {})
-            if hasattr(reward_info_data, '__len__') and not isinstance(reward_info_data, dict):
-                reward_info = reward_info_data[i] if i < len(reward_info_data) else {}
-            else:
-                reward_info = reward_info_data
+            reward_info = data_item.non_tensor_batch.get(reward_model_key, {})
             if not isinstance(reward_info, dict):
                 reward_info = {}
 
@@ -565,27 +573,29 @@ def compute_cot_rewriter_reward(
             answer = reward_info.get("ground_truth", "")
         if not answer:
             answer = reward_info.get("answer", "")
-        if not answer and ground_truth_key in data.non_tensor_batch:
-            gt_list = data.non_tensor_batch[ground_truth_key]
-            if isinstance(gt_list, list) and i < len(gt_list):
-                answer = gt_list[i]
+        if not answer and ground_truth_key in data_item.non_tensor_batch:
+            gt_data = data_item.non_tensor_batch[ground_truth_key]
+            if gt_data:
+                answer = gt_data
         answers.append(answer)
 
         # Extract original CoT
+        # First try from data_item.non_tensor_batch directly (like VERL's batch.py)
         orig_cot = ""
-        if original_cot_key in data.non_tensor_batch:
-            orig_cots_data = data.non_tensor_batch[original_cot_key]
-            if hasattr(orig_cots_data, '__len__') and i < len(orig_cots_data):
-                orig_cot = orig_cots_data[i]
+        if original_cot_key in data_item.non_tensor_batch:
+            orig_cot_data = data_item.non_tensor_batch[original_cot_key]
+            if orig_cot_data:
+                orig_cot = orig_cot_data
                 if hasattr(orig_cot, 'item'):
                     orig_cot = orig_cot.item()
+        # Fallback to reward_model (like VERL's naive.py/prime.py)
         if not orig_cot and original_cot_key in reward_info:
             orig_cot = reward_info.get(original_cot_key, "")
         if not orig_cot:
             orig_cot = reward_info.get("original_cot", "")
         original_cots.append(orig_cot if orig_cot else "")
 
-        # Extract question
+        # Extract question (like VERL's naive.py/prime.py)
         question = reward_info.get(question_key, "")
         if not question:
             question = reward_info.get("question", "")
@@ -768,3 +778,96 @@ def compute_cot_rewriter_reward(
         cleanup_reward_computer()
 
     return reward_result
+
+
+def compute_length_ratio_only(
+    data: DataProto,
+    tokenizer: Any,
+    field_mapping: Optional[Dict[str, str]] = None,
+) -> Dict[str, Any]:
+    """
+    Lightweight function that only computes length_ratio for filtering.
+
+    This function does NOT load the Student Model, making it fast for pre-filtering.
+
+    Args:
+        data: VERL DataProto containing batch data
+        tokenizer: Tokenizer for computing token lengths
+        field_mapping: Optional dict to customize field names in data
+
+    Returns:
+        Dictionary with:
+            - length_ratio: List of length ratios (rewrite_len / original_len)
+            - reward_extra_info: Additional metrics for logging
+    """
+    # Default field mapping
+    default_mapping = {
+        "prompt_key": "prompt",
+        "reward_model_key": "reward_model",
+        "question_key": "question",
+        "original_cot_key": "original_cot",
+        "ground_truth_key": "ground_truth",
+    }
+    if field_mapping:
+        default_mapping.update(field_mapping)
+
+    prompt_key = default_mapping["prompt_key"]
+    reward_model_key = default_mapping.get("reward_model_key", "reward_model")
+    original_cot_key = default_mapping["original_cot_key"]
+
+    # Handle case where reward_model_key is None or empty (flat structure)
+    use_flat_structure = not reward_model_key or reward_model_key == "null"
+
+    batch_size = data.batch["responses"].shape[0]
+
+    # Decode responses
+    rewrite_cots = tokenizer.batch_decode(
+        data.batch["responses"],
+        skip_special_tokens=True,
+    )
+
+    # Extract metadata from non_tensor_batch
+    original_cots = []
+    for i in range(batch_size):
+        # Extract original CoT
+        # IMPORTANT: Use data[i] to get per-sample data (like VERL's naive.py/prime.py/dapo.py)
+        # This ensures each sample gets its own reward_model dict, not a shared reference
+        data_item = data[i]
+
+        orig_cot = ""
+        if original_cot_key in data_item.non_tensor_batch:
+            orig_cot_data = data_item.non_tensor_batch[original_cot_key]
+            if orig_cot_data:
+                orig_cot = orig_cot_data
+                if hasattr(orig_cot, 'item'):
+                    orig_cot = orig_cot.item()
+        if not orig_cot and not use_flat_structure:
+            reward_info = data_item.non_tensor_batch.get(reward_model_key, {})
+            if isinstance(reward_info, dict):
+                orig_cot = reward_info.get(original_cot_key, "")
+        original_cots.append(orig_cot if orig_cot else "")
+
+    # Compute length_ratios without loading Student Model
+    length_ratios = [0.0] * batch_size
+    for i in range(batch_size):
+        original_text = original_cots[i] if original_cots[i] else ""
+        rewrite_text = rewrite_cots[i] if rewrite_cots[i] else ""
+
+        if original_text:
+            original_token_len = len(tokenizer.encode(original_text, add_special_tokens=False))
+            rewrite_token_len = len(tokenizer.encode(rewrite_text, add_special_tokens=False)) if rewrite_text else 0
+            if original_token_len > 0:
+                length_ratios[i] = rewrite_token_len / original_token_len
+
+    # Log statistics
+    valid_ratios = [r for r in length_ratios if r > 0]
+    if valid_ratios:
+        logger.info(
+            f"[LENGTH_RATIO_ONLY] batch_size={batch_size}, "
+            f"mean={sum(valid_ratios)/len(valid_ratios):.3f}, "
+            f"min={min(valid_ratios):.3f}, max={max(valid_ratios):.3f}"
+        )
+
+    return {
+        "length_ratio": length_ratios,
+    }

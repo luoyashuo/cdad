@@ -444,3 +444,96 @@ def process_validation_metrics(
                 data_src2var2metric2val[data_source][var_name][metric_name] = np.mean(prompt_vals)
 
     return data_src2var2metric2val
+
+
+def compute_reward_breakdown_metrics(reward_extra_infos_dict: dict[str, list[Any]]) -> dict[str, Any]:
+    """
+    Computes detailed breakdown statistics for reward components.
+
+    This function calculates statistics (mean, max, min) for each reward component
+    including cognitive rewards, logic rewards, and various penalties. These metrics
+    help with debugging and understanding the reward composition during training.
+
+    Args:
+        reward_extra_infos_dict: Dictionary from reward computation containing:
+            - cognitive_rewards: List of cognitive reward values
+            - logic_rewards: List of logic reward values
+            - total_rewards: List of total reward values
+            - truncation_penalties: List of truncation penalty values
+            - format_penalties: List of format penalty values
+            - too_short_penalties: List of too_short penalty values
+            - length_ratio: List of length ratio values
+            - format_valid: List of format validity flags (0/1)
+            - truncated: List of truncation flags (0/1)
+
+    Returns:
+        A dictionary with metrics in the format:
+        {
+            "reward/{component}/mean": mean value,
+            "reward/{component}/max": max value,
+            "reward/{component}/min": min value,
+            ...
+        }
+    """
+    import numpy as np
+
+    metrics = {}
+
+    # Define reward components to track
+    # Each component: (key in reward_extra_infos_dict, prefix for metric name)
+    reward_components = [
+        ("cognitive_rewards", "reward/cognitive"),
+        ("logic_rewards", "reward/logic"),
+        ("total_rewards", "reward/total"),
+        ("truncation_penalties", "penalty/truncation"),
+        ("format_penalties", "penalty/format"),
+        ("too_short_penalties", "penalty/too_short"),
+        ("length_ratio", "stats/length_ratio"),
+    ]
+
+    for dict_key, metric_prefix in reward_components:
+        if dict_key not in reward_extra_infos_dict:
+            continue
+
+        values = reward_extra_infos_dict[dict_key]
+        if not values or len(values) == 0:
+            continue
+
+        # Convert to numpy array for easier computation
+        values_array = np.array(values, dtype=np.float64)
+
+        # Compute statistics
+        metrics[f"{metric_prefix}/mean"] = float(np.mean(values_array))
+        metrics[f"{metric_prefix}/max"] = float(np.max(values_array))
+        metrics[f"{metric_prefix}/min"] = float(np.min(values_array))
+
+    # Additional aggregate statistics for flags
+    if "format_valid" in reward_extra_infos_dict:
+        format_valid_list = reward_extra_infos_dict["format_valid"]
+        if format_valid_list:
+            valid_count = sum(1 for v in format_valid_list if v == 1)
+            metrics["stats/format_valid_rate"] = valid_count / len(format_valid_list)
+            metrics["stats/format_valid_count"] = valid_count
+
+    if "truncated" in reward_extra_infos_dict:
+        truncated_list = reward_extra_infos_dict["truncated"]
+        if truncated_list:
+            truncated_count = sum(1 for v in truncated_list if v == 1)
+            metrics["stats/truncated_rate"] = truncated_count / len(truncated_list)
+            metrics["stats/truncated_count"] = truncated_count
+
+    # Length ratio specific statistics
+    if "length_ratio" in reward_extra_infos_dict:
+        length_ratios = reward_extra_infos_dict["length_ratio"]
+        if length_ratios:
+            ratios_array = np.array(length_ratios, dtype=np.float64)
+            # Count how many samples are below/above thresholds
+            low_threshold = 0.4
+            high_threshold = 0.8
+            below_low = np.sum(ratios_array < low_threshold)
+            above_high = np.sum(ratios_array >= high_threshold)
+            metrics["stats/length_ratio_below_low"] = below_low
+            metrics["stats/length_ratio_above_high"] = above_high
+            metrics["stats/length_ratio_in_range"] = len(ratios_array) - below_low - above_high
+
+    return metrics
