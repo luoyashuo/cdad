@@ -50,6 +50,7 @@ class SGLangWorkerActor:
         max_model_len: int = 8192,
         micro_batch_size: int = 4,
         logprob_last_n_tokens: Optional[int] = None,  # 只计算最后 N 个 token 的 logprobs
+        base_port: int = 30000,  # Base port for this worker (different per worker to avoid conflicts)
     ):
         import os
         import subprocess
@@ -63,6 +64,7 @@ class SGLangWorkerActor:
         self.gpu_ids = gpu_ids
         self.tensor_parallel_size = tensor_parallel_size
         self.logprob_last_n_tokens = logprob_last_n_tokens
+        self._base_port = base_port  # Store base port for SGLang Engine
         worker_name = f"SGLangWorker-{gpu_ids}"
 
         # Ray actor inherits CUDA_VISIBLE_DEVICES from parent process
@@ -152,6 +154,13 @@ class SGLangWorkerActor:
         # Initialize SGLang Engine
         # Using enable_memory_saver=True to support memory release/resume mechanism
         # This avoids port conflicts from cleanup/recreate cycles
+        #
+        # IMPORTANT: Each worker uses a different base_port to avoid port conflicts
+        # during parallel initialization. SGLang uses port + random.randint(100, 1000)
+        # for inter-process communication, so we use non-overlapping port ranges:
+        # - Worker 0: 30000 + random[100, 1000]  -> [30100, 31000)
+        # - Worker 1: 31000 + random[100, 1000]  -> [31100, 32000)
+        # - Worker N: (30000 + N*1000) + random[100, 1000) -> [30000+N*1000+100, 30000+N*1000+1000)
         self.engine = sgl.Engine(
             model_path=self._model_path,
             tp_size=self._tensor_parallel_size,
@@ -159,6 +168,7 @@ class SGLangWorkerActor:
             dtype=self._dtype,
             trust_remote_code=True,
             enable_memory_saver=True,
+            port=self._base_port,  # Use unique base port per worker
         )
 
         # CRITICAL: Re-create event loop after Engine creation
@@ -536,9 +546,57 @@ class SGLangStudentRewardClient:
             gpu_groups.append(group)
 
         # Create Ray actors, one per GPU group
+        # Each worker gets a unique base_port to avoid port conflicts during parallel initialization
+        # SGLang uses port + random.randint(100, 1000) for inter-process communication,
+        # so we use non-overlapping port ranges with 1000-port spacing:
+        # - Worker 0: 30000 + random[100, 1000)  -> [30100, 31000)
+        # - Worker 1: 31000 + random[100, 1000)  -> [31100, 32000)
+        # - Worker N: (30000 + N*1000) + random[100, 1000)
+        base_port_start = 30000
+        port_spacing = 1000  # Large enough to avoid overlap with random[100, 1000)
+        max_port_attempts = 100  # Max attempts to find an available port
+
+        def is_port_available(port: int) -> bool:
+            """Check if a port is available for binding."""
+            import socket
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                    s.bind(("127.0.0.1", port))
+                    return True
+            except OSError:
+                return False
+
+        # Find available ports for all workers
+        assigned_ports = []
+        for group_idx in range(len(gpu_groups)):
+            preferred_port = base_port_start + group_idx * port_spacing
+            port = preferred_port
+            attempts = 0
+
+            # Try to find an available port, starting from preferred_port
+            while not is_port_available(port) and attempts < max_port_attempts:
+                attempts += 1
+                # Try next port with port_spacing
+                port = base_port_start + (group_idx + attempts * len(gpu_groups)) * port_spacing
+
+            if not is_port_available(port):
+                # Fallback: try any port in a wider range
+                for fallback_attempt in range(max_port_attempts):
+                    port = base_port_start + group_idx * port_spacing + fallback_attempt * 100
+                    if is_port_available(port):
+                        break
+                else:
+                    raise RuntimeError(f"Cannot find available port for worker {group_idx} after {max_port_attempts} attempts")
+
+            assigned_ports.append(port)
+            logger.info(f"[SGLangStudentReward] Worker {group_idx}: using port {port} (preferred: {preferred_port})")
+
         for group_idx, gpu_group in enumerate(gpu_groups):
             # Compute logical GPU IDs for this group
             logical_gpu_ids = [physical_to_logical.get(gpu, 0) for gpu in gpu_group]
+            # Assign unique base_port for each worker
+            base_port = assigned_ports[group_idx]
             # Note: num_gpus=0 because we set CUDA_VISIBLE_DEVICES inside the actor
             worker = SGLangWorkerActor.options(num_gpus=0, num_cpus=1).remote(
                 model_path=self.model_path,
@@ -550,23 +608,29 @@ class SGLangStudentRewardClient:
                 max_model_len=self.max_model_len,
                 micro_batch_size=self.micro_batch_size,
                 logprob_last_n_tokens=self.logprob_last_n_tokens,
+                base_port=base_port,  # Unique base port per worker
             )
             self.workers.append(worker)
+            logger.info(f"[SGLangStudentReward] Created worker {group_idx} on GPUs {gpu_group} with base_port={base_port}")
 
-        # IMPORTANT: Initialize workers SERIALLY (one at a time) to avoid port conflicts
-        # SGLang uses random port allocation (server_args.port + random[100, 1000])
-        # When multiple workers initialize simultaneously, they may pick the same port
-        # causing EADDRINUSE errors. By initializing sequentially, each worker gets a
-        # unique port or retries until available.
-        logger.info(f"[SGLangStudentReward] Initializing {len(self.workers)} workers serially to avoid port conflicts...")
+        # IMPORTANT: Initialize workers IN PARALLEL using unique ports
+        # Each worker has a different base_port, so their random port ranges don't overlap:
+        # - Worker 0 uses ports in [30100, 31000)
+        # - Worker 1 uses ports in [31100, 32000)
+        # - etc.
+        logger.info(f"[SGLangStudentReward] Initializing {len(self.workers)} workers IN PARALLEL with unique ports...")
+        init_futures = []
         for i, worker in enumerate(self.workers):
-            try:
-                logger.info(f"[SGLangStudentReward] Initializing worker {i}/{len(self.workers)} on GPUs {gpu_groups[i]}...")
-                result = ray.get(worker.compute_logprobs.remote(["test"], [0]), timeout=180)  # 3 min timeout
-                logger.info(f"[SGLangStudentReward] Worker {i}/{len(self.workers)} initialized successfully")
-            except Exception as e:
-                logger.error(f"[SGLangStudentReward] Worker {i} init FAILED: {e}")
-                raise
+            logger.info(f"[SGLangStudentReward] Submitting init for worker {i}/{len(self.workers)} on GPUs {gpu_groups[i]} (base_port={assigned_ports[i]})...")
+            init_futures.append(worker.compute_logprobs.remote(["test"], [0]))
+
+        # Wait for all workers to complete initialization in parallel
+        try:
+            results = ray.get(init_futures, timeout=180)  # 3 min timeout for all workers
+            logger.info(f"[SGLangStudentReward] All {len(self.workers)} workers initialized successfully in parallel")
+        except Exception as e:
+            logger.error(f"[SGLangStudentReward] Parallel init FAILED: {e}")
+            raise
 
         self._initialized = True
         logger.info(f"[SGLangStudentReward] All {len(self.workers)} workers initialized")

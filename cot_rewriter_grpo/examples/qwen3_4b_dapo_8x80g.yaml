@@ -50,9 +50,9 @@ data:
   # 数据路径（使用 DATA_BASE_DIR 环境变量）
   train_files: ${oc.env:DATA_BASE_DIR}/cot_rewrite_max_fsf_v4/train.jsonl
   val_files: ${oc.env:DATA_BASE_DIR}/cot_rewrite_max_fsf_v4/val.jsonl
-  train_batch_size: 2
-  val_batch_size: 2
-  gen_batch_size: 2    # DAPO: 可能因过滤需要多轮生成
+  train_batch_size: 1
+  val_batch_size: 1
+  gen_batch_size: 1    # DAPO: 可能因过滤需要多轮生成
   max_prompt_length: 5500
   max_response_length: 10000
   return_raw_chat: true
@@ -91,7 +91,7 @@ actor_rollout_ref:
     loss_agg_mode: "seq-mean-token-mean"  # DAPO: token 级别损失聚合
     entropy_coeff: 0.01
     grad_clip: 1.0
-    ppo_mini_batch_size: 2
+    ppo_mini_batch_size: 1
     ppo_micro_batch_size_per_gpu: 1
     use_kl_in_reward: false
     use_kl_loss: true
@@ -122,7 +122,7 @@ actor_rollout_ref:
     gpu_memory_utilization: 0.65
     dtype: bfloat16
     load_format: auto
-    log_prob_micro_batch_size_per_gpu: 2
+    log_prob_micro_batch_size_per_gpu: 1
     n: 8  # GRPO/DAPO 组大小
     temperature: 0.7
     top_p: 0.95
@@ -138,7 +138,7 @@ actor_rollout_ref:
 
   ref:
     enable: true
-    log_prob_micro_batch_size_per_gpu: 2
+    log_prob_micro_batch_size_per_gpu: 1
     strategy: fsdp2
     fsdp_config:
       dtype: bfloat16
@@ -200,20 +200,20 @@ custom_reward_function:
     student_model_path: ${oc.env:MODEL_BASE_DIR}/Qwen/Qwen3-1.7B-Base
     student_tensor_parallel_size: 2
     student_max_model_len: 12000
-    student_micro_batch_size: 2
+    student_micro_batch_size: 1
 
     # ========== 奖励计算配置 ==========
     use_logic_reward: false
     alpha: 0.01
     reward_backend: sglang
-    sglang_mem_fraction_static: 0.20
-    cleanup_after_compute: false
+    sglang_mem_fraction_static: 0.30
+    cleanup_after_compute: true # 必须开启，否则会导致 OOM
 
     # ========== 其他配置 ==========
     print_samples: 2
     truncation_penalty: 0.0   # 截断惩罚（finish_reason == "length" 时应用，配置为正数）
     format_penalty: 1.0        # 格式惩罚
-    too_short_threshold_low: 0.4   # 过短惩罚下界：ratio < low 时惩罚为最大值
+    too_short_threshold_low: 0.5   # 过短惩罚下界：ratio < low 时惩罚为最大值
     too_short_threshold_high: 0.8  # 过短惩罚上界：ratio >= high 时无惩罚
     too_short_max_penalty: 1.0     # 过短最大惩罚值
     field_mapping:
