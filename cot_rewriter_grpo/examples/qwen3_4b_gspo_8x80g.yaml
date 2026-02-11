@@ -104,13 +104,13 @@ actor_rollout_ref:
     # ========== GSPO: 序列级别损失聚合 ==========
     loss_agg_mode: "seq-mean-token-mean"  # GSPO 推荐配置
 
-    entropy_coeff: 0.08
+    entropy_coeff: 0.1
     grad_clip: 1.0
     ppo_mini_batch_size: 1
     ppo_micro_batch_size_per_gpu: 1
     use_kl_in_reward: false
     use_kl_loss: true
-    kl_loss_coef: 0.005
+    kl_loss_coef: 0.002
     kl_loss_type: low_var_kl
     entropy_from_logits_with_chunking: true
 
@@ -237,10 +237,10 @@ custom_reward_function:
     # ========== 其他配置 ==========
     print_samples: 2
     truncation_penalty: 0.0
-    format_penalty: 0.2
+    format_penalty: 0.5
     too_short_threshold_low: 0.2
-    too_short_threshold_high: 0.4
-    too_short_max_penalty: 0.0
+    too_short_threshold_high: 0.5
+    too_short_max_penalty: 0.5
     field_mapping:
       prompt_key: problem
       reward_model_key: reward_model

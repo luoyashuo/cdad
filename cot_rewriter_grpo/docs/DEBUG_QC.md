@@ -11,9 +11,7 @@ source /data/luoys/projects/cdad/cot_rewriter_grpo/.venv/bin/activate
 5. 参考原版verl逻辑：/data/luoys/projects/verl-0.5.0
 # LOG
 ```
-/data/luoys/projects/cdad/cot_rewriter_grpo/logs/grpo/qwen3_4b_dapo_8x80g_vllm_rollout_sglang_reward.log
+/data/luoys/projects/cdad/cot_rewriter_grpo/logs/grpo/qwen3_4b_gspo_8x80g.log
 ```
 # 问题
-1. 我想要调整Reward计算方式，
-answer_log_prob(rewrite) - answer_log_prob(original) 
-此外还要加上一个avg(logprob(student(Answer|Question, Rewrite_CoT))) - avg(logprob(student(Answer|Question))) 这一项代表改写后cot的有用程度，后者和前者要分开记录log到swanlab
+为什么记录的length_ratio min和mean有时候是0

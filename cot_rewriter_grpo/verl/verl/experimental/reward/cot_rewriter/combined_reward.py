@@ -43,51 +43,100 @@ def extract_rewrite_reasoning(text: str) -> Tuple[str, bool, str]:
     - Must have EXACTLY ONE opening tag and ONE closing tag
     - Tags must be properly paired
 
+    FALLBACK extraction (when strict format fails):
+    - Uses strip().lstrip("<rewrite_reasoning>").rstrip("</rewrite_reasoning>")
+    - Returns the extracted content with success_flag=False
+    - This allows reward computation even with malformed format
+
     Args:
         text: The raw response text from the model
 
     Returns:
         Tuple of (extracted_content, success_flag, error_reason)
-        - extracted_content: The content inside the tags if valid, empty string otherwise
+        - extracted_content: The content inside the tags (strict or fallback extraction)
         - success_flag: True if format is strictly valid, False otherwise
         - error_reason: Description of why validation failed (for logging)
     """
     if not text:
         return "", False, "empty_text"
 
+    # Define tags
+    open_tag = '<rewrite_reasoning>'
+    close_tag = '</rewrite_reasoning>'
+
     # Strip leading/trailing whitespace for format checking
     stripped_text = text.strip()
 
     # Count tags - must be exactly 1 of each
-    open_tag_count = stripped_text.count('<rewrite_reasoning>')
-    close_tag_count = stripped_text.count('</rewrite_reasoning>')
-
-    # Check tag counts
-    if open_tag_count != 1:
-        return "", False, f"wrong_open_tag_count:{open_tag_count}"
-    if close_tag_count != 1:
-        return "", False, f"wrong_close_tag_count:{close_tag_count}"
+    open_tag_count = stripped_text.count(open_tag)
+    close_tag_count = stripped_text.count(close_tag)
 
     # Strict format check:
-    # 1. Must start with <rewrite_reasoning>
-    # 2. Must end with </rewrite_reasoning>
-    starts_with_open_tag = stripped_text.startswith('<rewrite_reasoning>')
-    ends_with_close_tag = stripped_text.endswith('</rewrite_reasoning>')
+    # 1. Must have exactly 1 opening tag and 1 closing tag
+    # 2. Must start with <rewrite_reasoning>
+    # 3. Must end with </rewrite_reasoning>
+    starts_with_open_tag = stripped_text.startswith(open_tag)
+    ends_with_close_tag = stripped_text.endswith(close_tag)
+    has_exact_tags = open_tag_count == 1 and close_tag_count == 1
 
-    if not starts_with_open_tag:
-        return "", False, "not_start_with_open_tag"
-    if not ends_with_close_tag:
-        return "", False, "not_end_with_close_tag"
+    # Check for nested tags
+    has_nested = False
+    if has_exact_tags and starts_with_open_tag and ends_with_close_tag:
+        content = stripped_text[len(open_tag):-len(close_tag)]
+        has_nested = open_tag in content or close_tag in content
+        if not has_nested:
+            # Strict format valid
+            return content.strip(), True, "ok"
 
-    # Extract content between tags
-    # Remove opening tag and closing tag
-    content = stripped_text[len('<rewrite_reasoning>'):-len('</rewrite_reasoning>')].strip()
+    # === STRICT FORMAT FAILED - USE FALLBACK EXTRACTION ===
+    # Use strip().lstrip(open_tag).rstrip(close_tag) for fallback extraction
+    # This handles cases like:
+    # - "some text <rewrite_reasoning>content</rewrite_reasoning>"
+    # - "<rewrite_reasoning>content</rewrite_reasoning> some text"
+    # - multiple tags (takes first match)
 
-    # Additional check: content should not contain the tags (nested tags not allowed)
-    if '<rewrite_reasoning>' in content or '</rewrite_reasoning>' in content:
-        return "", False, "nested_tags_detected"
+    error_reason = ""
+    if open_tag_count == 0:
+        error_reason = "missing_open_tag"
+    elif close_tag_count == 0:
+        error_reason = "missing_close_tag"
+    elif open_tag_count > 1:
+        error_reason = f"multiple_open_tags:{open_tag_count}"
+    elif close_tag_count > 1:
+        error_reason = f"multiple_close_tags:{close_tag_count}"
+    elif not starts_with_open_tag:
+        error_reason = "not_start_with_open_tag"
+    elif not ends_with_close_tag:
+        error_reason = "not_end_with_close_tag"
+    elif has_nested:
+        error_reason = "nested_tags_detected"
+    else:
+        error_reason = "unknown_format_error"
 
-    return content, True, "ok"
+    # Fallback extraction: strip whitespace, then remove tags from ends
+    fallback_content = (
+        stripped_text
+        .removeprefix(open_tag)  # Remove from start if present
+        .removesuffix(close_tag)  # Remove from end if present
+    )
+
+    # If tags are in the middle (not at ends), use lstrip/rstrip as fallback
+    if open_tag in fallback_content or close_tag in fallback_content:
+        # More aggressive fallback: find first opening and last closing
+        open_idx = stripped_text.find(open_tag)
+        close_idx = stripped_text.rfind(close_tag)
+        if open_idx != -1 and close_idx != -1 and close_idx > open_idx + len(open_tag):
+            fallback_content = stripped_text[open_idx + len(open_tag):close_idx].strip()
+        else:
+            # Last resort: try lstrip/rstrip (Python 3.9+ str methods)
+            temp = stripped_text
+            if temp.startswith(open_tag):
+                temp = temp[len(open_tag):]
+            if temp.endswith(close_tag):
+                temp = temp[:-len(close_tag)]
+            fallback_content = temp.strip()
+
+    return fallback_content, False, error_reason
 
 
 class CombinedRewardComputer:
@@ -389,12 +438,14 @@ class CombinedRewardComputer:
             rewrite_fsfs = [0.0] * batch_size
 
         # Compute too_short_penalty: penalize rewrites that are too short compared to original_cot
+        # Uses RELATIVE penalty: penalty = coefficient * range(R_cog + R_useful)
         # Penalty formula with low/high thresholds:
         #   ratio = rewrite_token_len / original_token_len
-        #   - If ratio >= high: penalty = 0
-        #   - If low <= ratio < high: penalty = -max_penalty * (high - ratio) / (high - low)
-        #   - If ratio < low: penalty = -max_penalty
+        #   - If ratio >= high: penalty_coefficient = 0
+        #   - If low <= ratio < high: penalty_coefficient = max_penalty * (high - ratio) / (high - low)
+        #   - If ratio < low: penalty_coefficient = max_penalty
         too_short_penalties = [0.0] * batch_size
+        too_short_penalty_coeffs = [0.0] * batch_size  # Coefficients before multiplying by range
         length_ratios = [0.0] * batch_size  # Track length ratios for DAPO filter_groups
 
         # Get tokenizer from student_client for token length calculation
@@ -419,22 +470,21 @@ class CombinedRewardComputer:
 
                         if ratio >= high:
                             # No penalty when ratio is above high threshold
-                            penalty = 0.0
+                            penalty_coeff = 0.0
                         elif ratio < low:
-                            # Maximum penalty when ratio is below low threshold
-                            penalty = -self.too_short_max_penalty
+                            # Maximum penalty coefficient when ratio is below low threshold
+                            penalty_coeff = self.too_short_max_penalty
                         else:
-                            # Linear penalty between low and high: 0 at high, max_penalty at low
-                            penalty = -self.too_short_max_penalty * (high - ratio) / (high - low)
+                            # Linear penalty between low and high: 0 at high, max_coeff at low
+                            penalty_coeff = self.too_short_max_penalty * (high - ratio) / (high - low)
 
-                        if penalty != 0:
-                            too_short_penalties[i] = penalty
-                            if i < 3:  # Log first few samples
-                                logger.info(
-                                    f"[TOO_SHORT_PENALTY] Sample {i}: "
-                                    f"original_token_len={original_token_len}, rewrite_token_len={rewrite_token_len}, "
-                                    f"ratio={ratio:.3f} (low={low}, high={high}), penalty={penalty:.4f}"
-                                )
+                        too_short_penalty_coeffs[i] = penalty_coeff
+                        if penalty_coeff != 0 and i < 3:  # Log first few samples
+                            logger.info(
+                                f"[TOO_SHORT_PENALTY] Sample {i}: "
+                                f"original_token_len={original_token_len}, rewrite_token_len={rewrite_token_len}, "
+                                f"ratio={ratio:.3f} (low={low}, high={high}), penalty_coeff={penalty_coeff:.4f}"
+                            )
 
         # Log length_ratio statistics for DAPO filter_groups
         valid_ratios = [r for r in length_ratios if r > 0]
@@ -452,9 +502,44 @@ class CombinedRewardComputer:
                 f"num_above_high={num_above_high}/{len(valid_ratios)}"
             )
 
-        # Combine rewards: R = R_cog + lambda_useful * R_useful + lambda_logic * R_logic + too_short_penalty
-        total_rewards = [c + self.lambda_useful * u + self.lambda_logic * l + p
-                        for c, u, l, p in zip(r_cog, r_useful, r_logic, too_short_penalties)]
+        # Compute base rewards: R_base = R_cog + lambda_useful * R_useful + lambda_logic * R_logic
+        base_rewards = [c + self.lambda_useful * u + self.lambda_logic * l
+                       for c, u, l in zip(r_cog, r_useful, r_logic)]
+
+        # Compute range of base_rewards (R_cog + R_useful) for relative penalty scaling
+        # The range is max - min, representing the spread of rewards within the group
+        base_reward_range = max(base_rewards) - min(base_rewards) if len(base_rewards) > 1 else 1.0
+        # Avoid zero or extremely small ranges
+        base_reward_range = max(base_reward_range, 1e-6)
+
+        logger.info(
+            f"[RELATIVE_PENALTY] batch_size={batch_size}, "
+            f"base_reward_range={base_reward_range:.4f} (min={min(base_rewards):.4f}, max={max(base_rewards):.4f})"
+        )
+
+        # Apply relative penalties: penalty = penalty_coeff * base_reward_range
+        # too_short_penalties stores coefficients for logging
+        # too_short_penalties_actual stores actual penalty values for reward calculation
+        too_short_penalties_actual = [0.0] * batch_size
+        for i in range(batch_size):
+            too_short_penalties_actual[i] = -too_short_penalty_coeffs[i] * base_reward_range
+            too_short_penalties[i] = too_short_penalty_coeffs[i]  # Log coefficient
+            if too_short_penalty_coeffs[i] != 0:
+                logger.info(
+                    f"[RELATIVE_PENALTY] Sample {i}: "
+                    f"too_short_penalty={too_short_penalty_coeffs[i]:.4f} * {base_reward_range:.4f} = {too_short_penalties_actual[i]:.4f}"
+                )
+
+        # Combine rewards: R = R_base + too_short_penalty (relative)
+        total_rewards = [b + p for b, p in zip(base_rewards, too_short_penalties_actual)]
+
+        # Return penalty coefficients for use in format/truncation penalty calculation
+        # Store in extra_info for external use
+        extra_info_penalty_coeffs = {
+            "base_rewards": base_rewards,
+            "base_reward_range": base_reward_range,
+            "too_short_penalty_coeffs": too_short_penalty_coeffs,
+        }
         
         # Log per-sample prompts with computed rewards
         logger.log_per_sample_rewards(
@@ -485,7 +570,11 @@ class CombinedRewardComputer:
                 "lambda_logic": self.lambda_logic,
                 "lambda_useful": self.lambda_useful,
                 "too_short_penalties": too_short_penalties,
+                "too_short_penalty_coeffs": too_short_penalty_coeffs,  # Coefficients for logging
                 "length_ratios": length_ratios,  # For DAPO filter_groups
+                # Relative penalty info for external use (format/truncation penalties)
+                "base_rewards": base_rewards,
+                "base_reward_range": base_reward_range,
             },
         }
 
@@ -740,14 +829,16 @@ def compute_cot_rewriter_reward(
 
     for i, rewrite_cot in enumerate(rewrite_cots):
         extracted_cot, has_valid_format, error_reason = extract_rewrite_reasoning(rewrite_cot)
-        # For valid format: use extracted content; for invalid format: use empty string (no cognitive reward)
-        extracted_rewrite_cots.append(extracted_cot if has_valid_format else "")
+        # Always use extracted content (strict or fallback), format_valid_flag controls penalty only
+        extracted_rewrite_cots.append(extracted_cot)
         format_valid_flags.append(1 if has_valid_format else 0)
         if not has_valid_format:
             stripped_preview = rewrite_cot.strip()[:100] if rewrite_cot else ""
+            extracted_preview = extracted_cot[:100] if extracted_cot else ""
             logger.info(
                 f"[REWARD] Sample {i}: Format violation - reason={error_reason}. "
-                f"Preview: '{stripped_preview}...'. Will apply format penalty without cognitive reward."
+                f"Preview: '{stripped_preview}...'. "
+                f"Using fallback extraction: '{extracted_preview}...' (format penalty will be applied)"
             )
 
     # Prepare result containers for all samples
@@ -813,9 +904,12 @@ def compute_cot_rewriter_reward(
     original_fsfs = result["extra_info"]["original_fsfs"]
     rewrite_fsfs = result["extra_info"]["rewrite_fsfs"]
     too_short_penalties = result["extra_info"].get("too_short_penalties", [0.0] * batch_size)
+    too_short_penalty_coeffs = result["extra_info"].get("too_short_penalty_coeffs", [0.0] * batch_size)
     length_ratios = result["extra_info"].get("length_ratios", [0.0] * batch_size)
+    base_rewards = result["extra_info"].get("base_rewards", [0.0] * batch_size)
+    base_reward_range = result["extra_info"].get("base_reward_range", 1.0)
 
-    # Apply penalties
+    # Apply RELATIVE penalties: penalty = penalty_coefficient * base_reward_range
     # 1. Truncation penalty: if rollout result was truncated (finish_reason == "length")
     # 2. Format penalty: if response does not contain valid <rewrite_reasoning> tags
     finish_reasons = data.non_tensor_batch.get("finish_reasons", [])
@@ -826,22 +920,27 @@ def compute_cot_rewriter_reward(
     truncated_flags = [0] * batch_size  # Track truncated flags for DAPO filter_groups
 
     for i in range(batch_size):
-        # Truncation penalty (configured as positive, applied as negative)
+        # Truncation penalty (relative): penalty = truncation_penalty_coeff * base_reward_range
         if i < len(finish_reasons) and finish_reasons[i] == "length":
-            penalties[i] -= truncation_penalty
-            truncation_penalties[i] = -truncation_penalty
+            trunc_penalty = -truncation_penalty * base_reward_range
+            penalties[i] += trunc_penalty
+            truncation_penalties[i] = truncation_penalty  # Log coefficient (for logging)
             truncated_flags[i] = 1  # Mark as truncated for DAPO filter_groups
-            logger.info(f"[PENALTY] Sample {i}: Truncated (finish_reason=length), penalty=-{truncation_penalty}")
+            logger.info(
+                f"[RELATIVE_PENALTY] Sample {i}: Truncated (finish_reason=length), "
+                f"penalty={truncation_penalty} * {base_reward_range:.4f} = {trunc_penalty:.4f}"
+            )
 
-        # Format penalty: check if response contains valid <rewrite_reasoning> tags
+        # Format penalty (relative): penalty = format_penalty_coeff * base_reward_range
         # Note: format_valid_flags is already computed above
         if format_valid_flags[i] == 0:
-            penalties[i] -= format_penalty
-            format_penalties[i] = -format_penalty
+            fmt_penalty = -format_penalty * base_reward_range
+            penalties[i] += fmt_penalty
+            format_penalties[i] = format_penalty  # Log coefficient (for logging)
             logger.info(
-                f"[PENALTY] Sample {i}: Format violation (no valid <rewrite_reasoning> tags found), "
-                f"response_preview='{rewrite_cots[i][:100]}...', penalty=-{format_penalty}, "
-                f"no cognitive reward computed"
+                f"[RELATIVE_PENALTY] Sample {i}: Format violation (no valid <rewrite_reasoning> tags found), "
+                f"response_preview='{rewrite_cots[i][:100]}...', "
+                f"penalty={format_penalty} * {base_reward_range:.4f} = {fmt_penalty:.4f}"
             )
 
     # Convert total_rewards to tensor and apply penalties
@@ -934,6 +1033,7 @@ def compute_length_ratio_only(
     Returns:
         Dictionary with:
             - length_ratio: List of length ratios (rewrite_len / original_len)
+            - format_valid: List of format validity flags (1 if valid, 0 if invalid)
             - reward_extra_info: Additional metrics for logging
     """
     # Default field mapping
@@ -983,11 +1083,20 @@ def compute_length_ratio_only(
                 orig_cot = reward_info.get(original_cot_key, "")
         original_cots.append(orig_cot if orig_cot else "")
 
+    # Extract <rewrite_reasoning> content and check format validity
+    extracted_rewrite_cots = []
+    format_valid_flags = []
+    for rewrite_cot in rewrite_cots:
+        extracted_cot, has_valid_format, _ = extract_rewrite_reasoning(rewrite_cot)
+        extracted_rewrite_cots.append(extracted_cot)  # Always use extracted content (strict or fallback)
+        format_valid_flags.append(1 if has_valid_format else 0)
+
     # Compute length_ratios without loading Student Model
     length_ratios = [0.0] * batch_size
     for i in range(batch_size):
         original_text = original_cots[i] if original_cots[i] else ""
-        rewrite_text = rewrite_cots[i] if rewrite_cots[i] else ""
+        # Use extracted content (strict or fallback) for length calculation
+        rewrite_text = extracted_rewrite_cots[i] if extracted_rewrite_cots[i] else ""
 
         if original_text:
             original_token_len = len(tokenizer.encode(original_text, add_special_tokens=False))
@@ -997,13 +1106,16 @@ def compute_length_ratio_only(
 
     # Log statistics
     valid_ratios = [r for r in length_ratios if r > 0]
+    valid_format_count = sum(format_valid_flags)
     if valid_ratios:
         logger.info(
             f"[LENGTH_RATIO_ONLY] batch_size={batch_size}, "
+            f"format_valid={valid_format_count}/{batch_size}, "
             f"mean={sum(valid_ratios)/len(valid_ratios):.3f}, "
             f"min={min(valid_ratios):.3f}, max={max(valid_ratios):.3f}"
         )
 
     return {
         "length_ratio": length_ratios,
+        "format_valid": format_valid_flags,
     }
