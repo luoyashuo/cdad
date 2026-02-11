@@ -1777,18 +1777,38 @@ class RayDAPOTrainer(RayPPOTrainer):
                             field_mapping=field_mapping,
                         )
                         length_ratios = length_ratio_result["length_ratio"]
+                        format_valids = length_ratio_result["format_valid"]  # Get format validity flags
                         new_batch.non_tensor_batch["length_ratio"] = np.array(length_ratios)
+                        new_batch.non_tensor_batch["format_valid"] = np.array(format_valids)
 
                         # Pre-filter: keep only groups with at least 1 sample >= length_threshold
-                        prompt_uid2metric_vals = defaultdict(list)
-                        for uid, metric_val in zip(new_batch.non_tensor_batch["uid"], length_ratios, strict=True):
-                            prompt_uid2metric_vals[uid].append(metric_val)
+                        # AND at least 1 sample with valid format
+                        prompt_uid2length_vals = defaultdict(list)
+                        prompt_uid2format_vals = defaultdict(list)
+                        for uid, length_val, format_val in zip(
+                            new_batch.non_tensor_batch["uid"], length_ratios, format_valids, strict=True
+                        ):
+                            prompt_uid2length_vals[uid].append(length_val)
+                            prompt_uid2format_vals[uid].append(format_val)
 
-                        kept_prompt_uids = [
-                            uid
-                            for uid, metric_vals in prompt_uid2metric_vals.items()
-                            if sum(1 for v in metric_vals if v >= length_threshold) >= 1
-                        ]
+                        kept_prompt_uids = []
+                        filtered_by_length = []
+                        filtered_by_format = []
+                        for uid in prompt_uid2length_vals.keys():
+                            length_vals = prompt_uid2length_vals[uid]
+                            format_vals = prompt_uid2format_vals[uid]
+
+                            # Check: at least 1 sample >= length_threshold
+                            has_valid_length = sum(1 for v in length_vals if v >= length_threshold) >= 1
+                            # Check: at least 1 sample with valid format
+                            has_valid_format = sum(1 for v in format_vals if v == 1) >= 1
+
+                            if has_valid_length and has_valid_format:
+                                kept_prompt_uids.append(uid)
+                            elif not has_valid_length:
+                                filtered_by_length.append(uid)
+                            elif not has_valid_format:
+                                filtered_by_format.append(uid)
 
                         kept_traj_idxs = [
                             idx for idx, uid in enumerate(new_batch.non_tensor_batch["uid"])
@@ -1799,10 +1819,12 @@ class RayDAPOTrainer(RayPPOTrainer):
                         new_batch = new_batch[kept_traj_idxs]
                         num_after = len(new_batch.non_tensor_batch["uid"])
                         print(f"[DAPO] Pre-filter: {num_before} -> {num_after} samples ({len(kept_prompt_uids)} groups kept)")
+                        print(f"[DAPO]   - Filtered by length_ratio < {length_threshold}: {len(filtered_by_length)} groups")
+                        print(f"[DAPO]   - Filtered by all invalid format: {len(filtered_by_format)} groups")
 
                         # If no samples left, skip to next generation
                         if num_after == 0:
-                            print(f"[DAPO] All groups filtered out by length_ratio pre-filter. Continuing to next generation...")
+                            print(f"[DAPO] All groups filtered out by pre-filter. Continuing to next generation...")
                             max_num_gen_batches = self.config.algorithm.filter_groups.max_num_gen_batches
                             if max_num_gen_batches <= 0 or num_gen_batches < max_num_gen_batches:
                                 progress_bar.update(1)

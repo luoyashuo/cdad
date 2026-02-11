@@ -179,7 +179,7 @@ algorithm:
   # GSPO 通过序列级别比率自然处理长度差异
   filter_groups:
     _target_: verl.trainer.config.FilterGroupsConfig
-    enable: false  # GSPO 不需要动态采样过滤
+    enable: true  # GSPO 不需要动态采样过滤
     metric: "length_ratio"
     max_num_gen_batches: -1
 
