@@ -1499,7 +1499,7 @@ class RayPPOTrainer:
                             # Also add any other reward fields from non_tensor_batch
                             reward_fields = [
                                 "original_cot", "ground_truth",
-                                "cognitive_rewards", "rewrite_mean_log_probs", "original_mean_log_probs",
+                                "cognitive_rewards", "useful_rewards", "rewrite_mean_log_probs", "original_mean_log_probs", "no_cot_mean_log_probs",
                                 "logic_rewards", "total_rewards", "original_fsfs", "rewrite_fsfs",
                                 "truncation_penalties", "format_penalties", "too_short_penalties",
                                 "truncated", "format_valid", "length_ratio",
@@ -2040,7 +2040,7 @@ class RayDAPOTrainer(RayPPOTrainer):
                             reward_fields = [
                                 "request_id", "original_cot", "ground_truth",
                                 # Reward breakdown fields
-                                "cognitive_rewards", "rewrite_mean_log_probs", "original_mean_log_probs",
+                                "cognitive_rewards", "useful_rewards", "rewrite_mean_log_probs", "original_mean_log_probs", "no_cot_mean_log_probs",
                                 "logic_rewards", "total_rewards", "original_fsfs", "rewrite_fsfs",
                                 # Penalty fields
                                 "truncation_penalties", "format_penalties", "too_short_penalties",

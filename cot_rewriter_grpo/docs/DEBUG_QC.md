@@ -15,4 +15,5 @@ source /data/luoys/projects/cdad/cot_rewriter_grpo/.venv/bin/activate
 ```
 # 问题
 1. 我想要调整Reward计算方式，
-R_cog =  - ppl P_student(Answer | Question, Rewrite_CoT) - (- ppl P_student(Answer | Question, Original_CoT))
+answer_log_prob(rewrite) - answer_log_prob(original) 
+此外还要加上一个avg(logprob(student(Answer|Question, Rewrite_CoT))) - avg(logprob(student(Answer|Question))) 这一项代表改写后cot的有用程度，后者和前者要分开记录log到swanlab

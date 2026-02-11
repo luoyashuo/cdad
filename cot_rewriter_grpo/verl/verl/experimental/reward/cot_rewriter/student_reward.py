@@ -418,6 +418,38 @@ class VLLMStudentRewardClient:
 
         return full_text, answer_start_idx
 
+    def _build_prompt_without_cot(self, question: str, answer: str) -> tuple[str, int]:
+        """
+        Build prompt without CoT for computing R_useful baseline.
+
+        This builds a prompt of the form:
+        Question + Answer (without any CoT/reasoning)
+
+        Returns:
+            tuple: (full_prompt, answer_start_token_idx)
+        """
+        # Build prompt WITHOUT reasoning_content
+        # This represents the baseline: how well does the model predict Answer given only Question
+        messages = [
+            {'role': 'user', 'content': question},
+            {'role': 'assistant', 'content': answer}  # No reasoning_content
+        ]
+        full_text = self.tokenizer.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=False
+        )
+
+        # Find where answer starts (after the question and assistant header)
+        prefix_messages = [{'role': 'user', 'content': question}]
+        prefix_base = self.tokenizer.apply_chat_template(
+            prefix_messages, tokenize=False, add_generation_prompt=True
+        )
+
+        # Tokenize to get answer start position
+        prefix_token_ids = self.tokenizer.encode(prefix_base, add_special_tokens=False)
+        answer_start_idx = len(prefix_token_ids)
+
+        return full_text, answer_start_idx
+
     def compute_cognitive_reward_batch(
         self,
         questions: List[str],
@@ -433,6 +465,10 @@ class VLLMStudentRewardClient:
         Each Ray actor runs vLLM on a separate GPU. We split the batch across
         all actors for true data parallelism.
 
+        Computes two reward components:
+        1. R_cog = answer_log_prob(Q, Rewrite_CoT, A) - answer_log_prob(Q, Original_CoT, A)
+        2. R_useful = answer_log_prob(Q, Rewrite_CoT, A) - answer_log_prob(Q, A)
+
         Args:
             questions: List of questions
             rewrite_cots: List of rewritten CoTs
@@ -441,7 +477,7 @@ class VLLMStudentRewardClient:
             alpha_cog: Weight for min log prob term (only used in logprob mode)
 
         Returns:
-            Dict containing rewards and log probs
+            Dict containing rewards and log probs including R_cog and R_useful
         """
         import time
 
@@ -457,6 +493,9 @@ class VLLMStudentRewardClient:
         original_prompts = []
         original_ans_starts = []
         original_indices = []  # Track which indices have original_cot
+        # New: Build prompts WITHOUT CoT for R_useful baseline
+        no_cot_prompts = []
+        no_cot_ans_starts = []
 
         for i in range(batch_size):
             # Rewrite prompt
@@ -470,6 +509,11 @@ class VLLMStudentRewardClient:
                 original_prompts.append(orig_prompt)
                 original_ans_starts.append(orig_ans_start)
                 original_indices.append(i)
+
+            # No-CoT prompt for R_useful baseline (Question + Answer only, no CoT)
+            no_cot_prompt, no_cot_ans_start = self._build_prompt_without_cot(questions[i], answers[i])
+            no_cot_prompts.append(no_cot_prompt)
+            no_cot_ans_starts.append(no_cot_ans_start)
 
         prep_time = time.time() - start_time
 
@@ -498,6 +542,16 @@ class VLLMStudentRewardClient:
                     future = self.workers[worker_idx].compute_logprobs.remote(prompts_chunk, ans_starts_chunk)
                     original_futures.append((worker_idx, len(prompts_chunk), future))
 
+        # Split no_cot prompts across actors for R_useful baseline
+        no_cot_chunks = self._split_into_chunks(no_cot_prompts, self.num_actors)
+        no_cot_ans_start_chunks = self._split_into_chunks(no_cot_ans_starts, self.num_actors)
+
+        no_cot_futures = []
+        for worker_idx, (prompts_chunk, ans_starts_chunk) in enumerate(zip(no_cot_chunks, no_cot_ans_start_chunks)):
+            if prompts_chunk:
+                future = self.workers[worker_idx].compute_logprobs.remote(prompts_chunk, ans_starts_chunk)
+                no_cot_futures.append((worker_idx, len(prompts_chunk), future))
+
         # Gather rewrite results
         rewrite_results = [None] * batch_size
         for worker_idx, chunk_size, future in rewrite_futures:
@@ -521,10 +575,22 @@ class VLLMStudentRewardClient:
                     original_idx = original_indices[start_idx + i]
                     original_results_map[original_idx] = result
 
+        # Gather no_cot results (R_useful baseline)
+        no_cot_results = [None] * batch_size
+        for worker_idx, chunk_size, future in no_cot_futures:
+            get_start = time.time()
+            chunk_results = ray.get(future)
+            get_elapsed = time.time() - get_start
+            start_idx = sum(len(no_cot_chunks[i]) for i in range(worker_idx))
+            for i, result in enumerate(chunk_results):
+                no_cot_results[start_idx + i] = result
+
         # Phase 3: Compute rewards
         rewards = []
+        useful_rewards = []  # R_useful: how much does CoT help vs baseline
         rewrite_mean_log_probs = []
         original_mean_log_probs = []
+        no_cot_mean_log_probs = []  # Baseline: Answer|Question only (no CoT)
         all_token_log_probs = []
         all_token_ids = []
 
@@ -533,6 +599,11 @@ class VLLMStudentRewardClient:
             rewrite_result = rewrite_results[i]
             rewrite_mean = rewrite_result["mean_log_prob"]
             rewrite_min = rewrite_result["min_log_prob"]
+
+            # Get no_cot result (baseline without CoT)
+            no_cot_result = no_cot_results[i]
+            no_cot_mean = no_cot_result["mean_log_prob"]
+            no_cot_min = no_cot_result["min_log_prob"]
 
             # Get original result (if available)
             if i in original_results_map:
@@ -544,6 +615,7 @@ class VLLMStudentRewardClient:
                 original_min = -100.0
 
             # ===== R_cog 计算公式 =====
+            # R_cog = answer_log_prob(Q, Rewrite_CoT, A) - answer_log_prob(Q, Original_CoT, A)
             # 根据 reward_mode 选择计算方式
             if self.reward_mode == "ppl":
                 # PPL 模式: R_cog = PPL(original) - PPL(rewrite)
@@ -559,16 +631,29 @@ class VLLMStudentRewardClient:
                 original_answer_log_prob = original_mean + alpha_cog * original_min
                 reward = rewrite_answer_log_prob - original_answer_log_prob
 
+            # ===== R_useful 计算公式 =====
+            # R_useful = answer_log_prob(Q, Rewrite_CoT, A) - answer_log_prob(Q, A)
+            # 这代表改写后CoT的有用程度：相对于没有CoT的情况，有了CoT之后预测答案的能力提升
+            # 注意：这里使用 logprob 模式计算，不使用 PPL 模式
+            # 因为我们要比较的是 logprob 的差异，而不是 PPL 的差异
+            rewrite_answer_log_prob = rewrite_mean + alpha_cog * rewrite_min
+            no_cot_answer_log_prob = no_cot_mean + alpha_cog * no_cot_min
+            useful_reward = rewrite_answer_log_prob - no_cot_answer_log_prob
+
             rewards.append(reward)
+            useful_rewards.append(useful_reward)
             rewrite_mean_log_probs.append(rewrite_mean)
             original_mean_log_probs.append(original_mean)
+            no_cot_mean_log_probs.append(no_cot_mean)
             all_token_log_probs.append(rewrite_result.get("token_log_probs", []))
             all_token_ids.append([])  # Token IDs not needed for reward
 
         return {
-            "rewards": rewards,
+            "rewards": rewards,  # R_cog
+            "useful_rewards": useful_rewards,  # R_useful
             "rewrite_mean_log_probs": rewrite_mean_log_probs,
             "original_mean_log_probs": original_mean_log_probs,
+            "no_cot_mean_log_probs": no_cot_mean_log_probs,  # Baseline (no CoT)
             "rewrite_token_log_probs": all_token_log_probs,
             "rewrite_token_ids": all_token_ids,
             "log_probs": rewrite_mean_log_probs,

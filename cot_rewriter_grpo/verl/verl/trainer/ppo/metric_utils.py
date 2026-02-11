@@ -451,12 +451,13 @@ def compute_reward_breakdown_metrics(reward_extra_infos_dict: dict[str, list[Any
     Computes detailed breakdown statistics for reward components.
 
     This function calculates statistics (mean, max, min) for each reward component
-    including cognitive rewards, logic rewards, and various penalties. These metrics
+    including cognitive rewards, logic rewards, useful rewards, and various penalties. These metrics
     help with debugging and understanding the reward composition during training.
 
     Args:
         reward_extra_infos_dict: Dictionary from reward computation containing:
-            - cognitive_rewards: List of cognitive reward values
+            - cognitive_rewards: List of cognitive reward values (R_cog)
+            - useful_rewards: List of useful reward values (R_useful)
             - logic_rewards: List of logic reward values
             - total_rewards: List of total reward values
             - truncation_penalties: List of truncation penalty values
@@ -483,6 +484,7 @@ def compute_reward_breakdown_metrics(reward_extra_infos_dict: dict[str, list[Any
     # Each component: (key in reward_extra_infos_dict, prefix for metric name)
     reward_components = [
         ("cognitive_rewards", "reward/cognitive"),
+        ("useful_rewards", "reward/useful"),  # R_useful: CoT有用程度
         ("logic_rewards", "reward/logic"),
         ("total_rewards", "reward/total"),
         ("truncation_penalties", "penalty/truncation"),

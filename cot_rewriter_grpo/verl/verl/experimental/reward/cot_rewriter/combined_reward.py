@@ -150,6 +150,7 @@ class CombinedRewardComputer:
         fsf_model_path: Optional[str] = None,
         device: str = "cuda:3",
         lambda_logic: float = 0.5,
+        lambda_useful: float = 1.0,  # Weight for R_useful (default: 1.0)
         use_logic_reward: bool = True,
         alpha_cog: float = 0.01,
         student_devices: Optional[List[str]] = None,
@@ -183,6 +184,7 @@ class CombinedRewardComputer:
             fsf_model_path: Path to FSF Judge Model (only required if use_logic_reward=True)
             device: Device to run FSF Judge on (Student uses student_devices)
             lambda_logic: Weight for logic reward
+            lambda_useful: Weight for R_useful (default: 1.0). Set to 0 to disable R_useful in training.
             use_logic_reward: Whether to use logic reward
             alpha_cog: Weight for min log prob term in cognitive reward (default: 0.01)
             student_devices: List of devices for Student (e.g., ["cuda:0", "cuda:1"])
@@ -219,6 +221,7 @@ class CombinedRewardComputer:
             0.0-0.03 -> 0.2, 0.03-0.06 -> 0.4, 0.06-0.09 -> 0.6, ...
         """
         self.lambda_logic = lambda_logic
+        self.lambda_useful = lambda_useful
         self.use_logic_reward = use_logic_reward
         self.alpha_cog = alpha_cog
         self.reward_micro_batch_size = reward_micro_batch_size
@@ -346,8 +349,10 @@ class CombinedRewardComputer:
 
         # 获取计算结果
         r_cog_raw = cog_result["rewards"]
+        r_useful = cog_result.get("useful_rewards", [0.0] * batch_size)  # R_useful: CoT有用程度
         rewrite_mean_log_probs = cog_result["rewrite_mean_log_probs"]
         original_mean_log_probs = cog_result["original_mean_log_probs"]
+        no_cot_mean_log_probs = cog_result.get("no_cot_mean_log_probs", [0.0] * batch_size)  # Baseline (no CoT)
         token_log_probs = cog_result["rewrite_token_log_probs"]
         token_ids = cog_result["rewrite_token_ids"]
 
@@ -447,8 +452,9 @@ class CombinedRewardComputer:
                 f"num_above_high={num_above_high}/{len(valid_ratios)}"
             )
 
-        # Combine rewards: R = R_cog + lambda * R_logic + too_short_penalty
-        total_rewards = [c + self.lambda_logic * l + p for c, l, p in zip(r_cog, r_logic, too_short_penalties)]
+        # Combine rewards: R = R_cog + lambda_useful * R_useful + lambda_logic * R_logic + too_short_penalty
+        total_rewards = [c + self.lambda_useful * u + self.lambda_logic * l + p
+                        for c, u, l, p in zip(r_cog, r_useful, r_logic, too_short_penalties)]
         
         # Log per-sample prompts with computed rewards
         logger.log_per_sample_rewards(
@@ -465,8 +471,10 @@ class CombinedRewardComputer:
 
         return {
             "cognitive_rewards": r_cog,
+            "useful_rewards": r_useful,  # R_useful: CoT有用程度
             "rewrite_mean_log_probs": rewrite_mean_log_probs,
             "original_mean_log_probs": original_mean_log_probs,
+            "no_cot_mean_log_probs": no_cot_mean_log_probs,  # Baseline (no CoT)
             "logic_rewards": r_logic,
             "total_rewards": total_rewards,
             "token_log_probs": token_log_probs,
@@ -475,6 +483,7 @@ class CombinedRewardComputer:
                 "original_fsfs": original_fsfs,
                 "rewrite_fsfs": rewrite_fsfs,
                 "lambda_logic": self.lambda_logic,
+                "lambda_useful": self.lambda_useful,
                 "too_short_penalties": too_short_penalties,
                 "length_ratios": length_ratios,  # For DAPO filter_groups
             },
@@ -793,8 +802,10 @@ def compute_cot_rewriter_reward(
 
     # Fill in results for all samples
     cognitive_rewards = result["cognitive_rewards"]
+    useful_rewards = result.get("useful_rewards", [0.0] * batch_size)  # R_useful: CoT有用程度
     rewrite_mean_log_probs = result["rewrite_mean_log_probs"]
     original_mean_log_probs = result["original_mean_log_probs"]
+    no_cot_mean_log_probs = result.get("no_cot_mean_log_probs", [0.0] * batch_size)  # Baseline (no CoT)
     logic_rewards = result["logic_rewards"]
     total_rewards = result["total_rewards"]
     token_log_probs = result["token_log_probs"]
@@ -876,8 +887,10 @@ def compute_cot_rewriter_reward(
         "reward_tensor": token_level_rewards,
         "reward_extra_info": {
             "cognitive_rewards": cognitive_rewards,
+            "useful_rewards": useful_rewards,  # R_useful: CoT有用程度
             "rewrite_mean_log_probs": rewrite_mean_log_probs,
             "original_mean_log_probs": original_mean_log_probs,
+            "no_cot_mean_log_probs": no_cot_mean_log_probs,  # Baseline (no CoT)
             "logic_rewards": logic_rewards,
             "total_rewards": total_rewards,
             "original_fsfs": original_fsfs,
