@@ -1,14 +1,15 @@
 """
 Student Reward (Cognitive Reward) Module - vLLM Version
 
-Computes R_cog = answer_log_prob(Q, Rewritten_CoT, A) - answer_log_prob(Q, Original_CoT, A)
+Computes R_cog = -PPL(Q, Rewrite_CoT, A) - (-PPL(Q, Original_CoT, A))
+            = PPL(original) - PPL(rewrite)
 using vLLM for fast log prob computation.
 
-其中 answer_log_prob = avg(token_log_probs) + alpha_cog * min(token_log_probs)
+其中 PPL = exp(-mean(token_log_probs))
 
 The cognitive reward encourages the rewritten CoT to help the
 Student Model predict the correct answer with higher confidence
-compared to the original CoT.
+(lower perplexity) compared to the original CoT.
 
 Uses Ray actors for multi-GPU parallelism. Supports two modes:
 1. TP=1: Each GPU runs a separate vLLM instance (Data Parallelism)
@@ -46,6 +47,7 @@ class VLLMWorkerActor:
         max_model_len: int = 8192,
         micro_batch_size: int = 4,
         max_num_seqs: int = 1,
+        reward_mode: str = "ppl",  # "ppl" or "logprob": Reward calculation mode
     ):
         import os
         import subprocess
@@ -243,6 +245,7 @@ class VLLMStudentRewardClient:
         devices: Optional[List[str]] = None,
         micro_batch_size: int = 4,
         max_num_seqs: int = 1,
+        reward_mode: str = "ppl",  # "ppl" or "logprob": Reward calculation mode
     ):
         """
         Initialize Multi-GPU vLLM Student Reward Client with Ray actors.
@@ -259,6 +262,7 @@ class VLLMStudentRewardClient:
             devices: List of CUDA devices (e.g., ["cuda:0", "cuda:1", "cuda:2", "cuda:3"])
             micro_batch_size: Batch size for each micro-batch to avoid OOM
             max_num_seqs: Maximum concurrent sequences in vLLM scheduler
+            reward_mode: Reward calculation mode - "ppl" or "logprob"
         """
 
         self.model_path = model_path
@@ -268,6 +272,7 @@ class VLLMStudentRewardClient:
         self.max_model_len = max_model_len
         self.micro_batch_size = micro_batch_size
         self.max_num_seqs = max_num_seqs
+        self.reward_mode = reward_mode
 
         # Auto-detect devices if not specified
         if devices is None:
@@ -370,6 +375,7 @@ class VLLMStudentRewardClient:
                 max_model_len=self.max_model_len,
                 micro_batch_size=self.micro_batch_size,
                 max_num_seqs=self.max_num_seqs,
+                reward_mode=self.reward_mode,
             )
             self.workers.append(worker)
 
@@ -432,7 +438,7 @@ class VLLMStudentRewardClient:
             rewrite_cots: List of rewritten CoTs
             answers: List of ground truth answers
             original_cots: Optional list of original CoTs
-            alpha_cog: Weight for min log prob term
+            alpha_cog: Weight for min log prob term (only used in logprob mode)
 
         Returns:
             Dict containing rewards and log probs
@@ -527,31 +533,31 @@ class VLLMStudentRewardClient:
             rewrite_result = rewrite_results[i]
             rewrite_mean = rewrite_result["mean_log_prob"]
             rewrite_min = rewrite_result["min_log_prob"]
-            rewrite_answer_log_prob = rewrite_mean + alpha_cog * rewrite_min
 
             # Get original result (if available)
             if i in original_results_map:
                 original_result = original_results_map[i]
                 original_mean = original_result["mean_log_prob"]
                 original_min = original_result["min_log_prob"]
-                original_answer_log_prob = original_mean + alpha_cog * original_min
             else:
                 original_mean = -100.0
-                original_answer_log_prob = -100.0
+                original_min = -100.0
 
             # ===== R_cog 计算公式 =====
-            # R_cog = answer_log_prob(Q, Rewritten_CoT, A) - answer_log_prob(Q, Original_CoT, A)
-            # 其中 answer_log_prob = mean(token_log_probs) + alpha_cog * min(token_log_probs)
-            #
-            # 这个差值公式鼓励 rewrite 后的 CoT 比 original CoT 更能帮助 Student Model 预测答案
-            # 如果 rewrite 后答案的 log prob 更高，说明 rewrite 质量更好，reward 为正
-            # 如果 rewrite 后答案的 log prob 更低，说明 rewrite 质量更差，reward 为负
-            reward = rewrite_answer_log_prob - original_answer_log_prob
-
-            # ===== 旧的实现（仅使用 rewrite log prob，不减去 original）=====
-            # R_cog = rewrite_log_prob (不减去 original_log_prob)
-            # 直接使用 rewrite 的 answer log prob 作为 reward
-            # reward = rewrite_answer_log_prob
+            # 根据 reward_mode 选择计算方式
+            if self.reward_mode == "ppl":
+                # PPL 模式: R_cog = PPL(original) - PPL(rewrite)
+                # 其中 PPL = exp(-mean_log_prob)
+                import math
+                rewrite_ppl = math.exp(-rewrite_mean)
+                original_ppl = math.exp(-original_mean)
+                reward = original_ppl - rewrite_ppl
+            else:  # "logprob" 模式
+                # Logprob 模式: R_cog = answer_log_prob(rewrite) - answer_log_prob(original)
+                # 其中 answer_log_prob = mean(token_log_probs) + alpha_cog * min(token_log_probs)
+                rewrite_answer_log_prob = rewrite_mean + alpha_cog * rewrite_min
+                original_answer_log_prob = original_mean + alpha_cog * original_min
+                reward = rewrite_answer_log_prob - original_answer_log_prob
 
             rewards.append(reward)
             rewrite_mean_log_probs.append(rewrite_mean)

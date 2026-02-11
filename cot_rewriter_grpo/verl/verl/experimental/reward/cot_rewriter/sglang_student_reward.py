@@ -1,14 +1,15 @@
 """
 Student Reward (Cognitive Reward) Module - SGLang Version
 
-Computes R_cog = answer_log_prob(Q, Rewritten_CoT, A) - answer_log_prob(Q, Original_CoT, A)
+Computes R_cog = -PPL(Q, Rewrite_CoT, A) - (-PPL(Q, Original_CoT, A))
+            = PPL(original) - PPL(rewrite)
 using SGLang for fast log prob computation.
 
-其中 answer_log_prob = avg(token_log_probs) + alpha_cog * min(token_log_probs)
+其中 PPL = exp(-mean(token_log_probs))
 
 The cognitive reward encourages the rewritten CoT to help the
 Student Model predict the correct answer with higher confidence
-compared to the original CoT.
+(lower perplexity) compared to the original CoT.
 
 Uses Ray actors for multi-GPU parallelism. Supports two modes:
 1. TP=1: Each GPU runs a separate SGLang instance (Data Parallelism)
@@ -51,6 +52,7 @@ class SGLangWorkerActor:
         micro_batch_size: int = 4,
         logprob_last_n_tokens: Optional[int] = None,  # 只计算最后 N 个 token 的 logprobs
         base_port: int = 30000,  # Base port for this worker (different per worker to avoid conflicts)
+        reward_mode: str = "ppl",  # "ppl" or "logprob": Reward calculation mode
     ):
         import os
         import subprocess
@@ -424,6 +426,7 @@ class SGLangStudentRewardClient:
         devices: Optional[List[str]] = None,
         micro_batch_size: int = 4,
         logprob_last_n_tokens: Optional[int] = None,  # 只计算最后 N 个 token 的 logprobs
+        reward_mode: str = "ppl",  # "ppl" or "logprob": Reward calculation mode
     ):
         """
         Initialize Multi-GPU SGLang Student Reward Client with Ray actors.
@@ -440,6 +443,7 @@ class SGLangStudentRewardClient:
             devices: List of CUDA devices (e.g., ["cuda:0", "cuda:1", "cuda:2", "cuda:3"])
             micro_batch_size: Batch size for each micro-batch to avoid OOM
             logprob_last_n_tokens: 只计算 answer 部分最后 N 个 token 的 logprobs，节省显存
+            reward_mode: Reward calculation mode - "ppl" or "logprob"
         """
 
         self.model_path = model_path
@@ -449,6 +453,7 @@ class SGLangStudentRewardClient:
         self.max_model_len = max_model_len
         self.micro_batch_size = micro_batch_size
         self.logprob_last_n_tokens = logprob_last_n_tokens
+        self.reward_mode = reward_mode
 
         # Auto-detect devices if not specified
         if devices is None:
@@ -609,6 +614,7 @@ class SGLangStudentRewardClient:
                 micro_batch_size=self.micro_batch_size,
                 logprob_last_n_tokens=self.logprob_last_n_tokens,
                 base_port=base_port,  # Unique base port per worker
+                reward_mode=self.reward_mode,
             )
             self.workers.append(worker)
             logger.info(f"[SGLangStudentReward] Created worker {group_idx} on GPUs {gpu_group} with base_port={base_port}")
@@ -799,26 +805,31 @@ class SGLangStudentRewardClient:
             rewrite_result = rewrite_results[i]
             rewrite_mean = rewrite_result["mean_log_prob"]
             rewrite_min = rewrite_result["min_log_prob"]
-            rewrite_answer_log_prob = rewrite_mean + alpha_cog * rewrite_min
 
             # Get original result (if available)
             if i in original_results_map:
                 original_result = original_results_map[i]
                 original_mean = original_result["mean_log_prob"]
                 original_min = original_result["min_log_prob"]
-                original_answer_log_prob = original_mean + alpha_cog * original_min
             else:
                 original_mean = -100.0
-                original_answer_log_prob = -100.0
+                original_min = -100.0
 
             # ===== R_cog 计算公式 =====
-            # R_cog = answer_log_prob(Q, Rewritten_CoT, A) - answer_log_prob(Q, Original_CoT, A)
-            # 其中 answer_log_prob = mean(token_log_probs) + alpha_cog * min(token_log_probs)
-            #
-            # 这个差值公式鼓励 rewrite 后的 CoT 比 original CoT 更能帮助 Student Model 预测答案
-            # 如果 rewrite 后答案的 log prob 更高，说明 rewrite 质量更好，reward 为正
-            # 如果 rewrite 后答案的 log prob 更低，说明 rewrite 质量更差，reward 为负
-            reward = rewrite_answer_log_prob - original_answer_log_prob
+            # 根据 reward_mode 选择计算方式
+            if self.reward_mode == "ppl":
+                # PPL 模式: R_cog = PPL(original) - PPL(rewrite)
+                # 其中 PPL = exp(-mean_log_prob)
+                import math
+                rewrite_ppl = math.exp(-rewrite_mean)
+                original_ppl = math.exp(-original_mean)
+                reward = original_ppl - rewrite_ppl
+            else:  # "logprob" 模式
+                # Logprob 模式: R_cog = answer_log_prob(rewrite) - answer_log_prob(original)
+                # 其中 answer_log_prob = mean(token_log_probs) + alpha_cog * min(token_log_probs)
+                rewrite_answer_log_prob = rewrite_mean + alpha_cog * rewrite_min
+                original_answer_log_prob = original_mean + alpha_cog * original_min
+                reward = rewrite_answer_log_prob - original_answer_log_prob
 
             rewards.append(reward)
             rewrite_mean_log_probs.append(rewrite_mean)

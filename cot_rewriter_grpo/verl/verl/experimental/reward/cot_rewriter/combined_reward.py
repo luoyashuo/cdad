@@ -2,15 +2,16 @@
 Combined Reward Function for CoT Rewriter GRPO
 
 Reward 计算逻辑:
-- 使用 Qwen3 chat template 格式计算 Student Model 的 log prob
-- answer_log_prob(Q, CoT, A) = avg(token_log_probs) + alpha_cog * min(token_log_probs)
-- R_cog = answer_log_prob(Q, Rewritten_CoT, A) - answer_log_prob(Q, Original_CoT, A)
-- alpha_cog 为可配置参数，默认为 0.01
-- (可选) R_logic: FSF Judge 比较失败分支比例
+- 使用 Qwen3 chat template 格式计算 Student Model 的困惑度 (Perplexity)
+- PPL(Q, CoT, A) = exp(-mean(token_log_probs))
+- R_cog = -PPL(Q, Rewrite_CoT, A) - (-PPL(Q, Original_CoT, A))
+        = PPL(original) - PPL(rewrite)
 
-差值公式的含义:
-- 如果 rewrite 后答案的 log prob 更高，说明 rewrite 质量更好，reward 为正
-- 如果 rewrite 后答案的 log prob 更低，说明 rewrite 质量更差，reward 为负
+困惑度公式的含义:
+- PPL 越低表示模型预测越准确
+- 如果 rewrite 后的 PPL 更低（模型预测更准确），则 PPL(original) - PPL(rewrite) > 0，reward 为正
+- 如果 rewrite 后的 PPL 更高（模型预测更差），则 PPL(original) - PPL(rewrite) < 0，reward 为负
+- (可选) R_logic: FSF Judge 比较失败分支比例
 
 This module provides the VERL-compatible interface for reward computation.
 
@@ -169,6 +170,9 @@ class CombinedRewardComputer:
         use_tiered_reward: bool = True,  # Whether to use tiered reward for R_cog
         tier_step: float = 0.05,  # 区间大小：每个阶梯的 R_cog 范围
         tier_reward: float = 0.1,  # 每阶梯奖励值：第一阶梯得 tier_reward，第二阶梯得 2*tier_reward
+        reward_mode: str = "ppl",  # "ppl" or "logprob": Reward calculation mode
+                                   # - "ppl": R_cog = PPL(original) - PPL(rewrite)
+                                   # - "logprob": R_cog = answer_log_prob(rewrite) - answer_log_prob(original)
         **kwargs,  # Ignore deprecated params
     ):
         """
@@ -201,6 +205,10 @@ class CombinedRewardComputer:
             use_tiered_reward: Whether to use tiered (step-wise) reward for R_cog (default: True).
             tier_step: 区间大小，每个阶梯的 R_cog 区间 (default: 0.05).
             tier_reward: 每阶梯奖励值，第一阶梯得 tier_reward，第二阶梯得 2*tier_reward (default: 0.1).
+            reward_mode: Reward calculation mode (default: "ppl").
+                - "ppl": R_cog = PPL(original) - PPL(rewrite), where PPL = exp(-mean_log_prob)
+                - "logprob": R_cog = answer_log_prob(rewrite) - answer_log_prob(original),
+                  where answer_log_prob = mean(token_log_probs) + alpha_cog * min(token_log_probs)
 
         阶梯式奖励配置示例:
         - tier_step=0.05, tier_reward=0.1:
@@ -224,6 +232,7 @@ class CombinedRewardComputer:
         self.use_tiered_reward = use_tiered_reward
         self.tier_step = tier_step
         self.tier_reward = tier_reward
+        self.reward_mode = reward_mode
 
         # Initialize Student Reward client based on backend
         if reward_backend == "sglang":
@@ -236,6 +245,7 @@ class CombinedRewardComputer:
                 devices=student_devices,
                 micro_batch_size=student_micro_batch_size,
                 logprob_last_n_tokens=student_logprob_last_n_tokens,
+                reward_mode=reward_mode,
             )
         else:
             from verl.experimental.reward.cot_rewriter.student_reward import VLLMStudentRewardClient
@@ -247,6 +257,7 @@ class CombinedRewardComputer:
                 devices=student_devices,
                 micro_batch_size=student_micro_batch_size,
                 max_num_seqs=student_max_num_seqs,
+                reward_mode=reward_mode,
             )
 
         # Initialize FSF Judge client (if needed)
@@ -280,9 +291,14 @@ class CombinedRewardComputer:
         """
         Compute combined reward.
 
-        Reward 逻辑:
-        - answer_log_prob(Q, CoT, A) = avg(token_log_probs) + alpha_cog × min(token_log_probs)
-        - R_cog = answer_log_prob(Q, Rewritten_CoT, A) - answer_log_prob(Q, Original_CoT, A)
+        Reward 逻辑 (根据 reward_mode 选择):
+        - "ppl" 模式:
+            - PPL(Q, CoT, A) = exp(-mean(token_log_probs))
+            - R_cog = -PPL(Q, Rewrite_CoT, A) - (-PPL(Q, Original_CoT, A))
+                    = PPL(original) - PPL(rewrite)
+        - "logprob" 模式:
+            - answer_log_prob(Q, CoT, A) = mean(token_log_probs) + alpha_cog * min(token_log_probs)
+            - R_cog = answer_log_prob(Q, Rewrite_CoT, A) - answer_log_prob(Q, Original_CoT, A)
         - (可选) R_logic = FSF based reward
         - Total = R_cog + lambda * R_logic
 
@@ -296,7 +312,7 @@ class CombinedRewardComputer:
             Dictionary with reward info and extra metrics
         """
         batch_size = len(questions)
-        
+
         # Log per-sample prompts before reward computation
         logger.log_per_sample_rewards(
             questions=questions,
@@ -310,9 +326,16 @@ class CombinedRewardComputer:
             max_samples=2
         )
 
-        # Compute cognitive reward
-        # R_cog = answer_log_prob(Q, Rewritten_CoT, A) - answer_log_prob(Q, Original_CoT, A)
-        # 其中 answer_log_prob = avg(token_log_probs) + alpha_cog * min(token_log_probs)
+        # Compute cognitive reward (mode depends on self.reward_mode)
+        if self.reward_mode == "ppl":
+            # R_cog = -PPL(Q, Rewrite_CoT, A) - (-PPL(Q, Original_CoT, A))
+            #      = PPL(original) - PPL(rewrite)
+            # 其中 PPL = exp(-mean_log_prob)
+            pass
+        else:  # "logprob" mode
+            # R_cog = answer_log_prob(Q, Rewrite_CoT, A) - answer_log_prob(Q, Original_CoT, A)
+            # 其中 answer_log_prob = mean(token_log_probs) + alpha_cog * min(token_log_probs)
+            pass
         cog_result = self.student_client.compute_cognitive_reward_batch(
             questions=questions,
             rewrite_cots=rewrite_cots,
@@ -569,6 +592,7 @@ def compute_cot_rewriter_reward(
     use_tiered_reward: bool = True,  # Whether to use tiered (step-wise) reward for R_cog
     tier_step: float = 0.05,  # 区间大小：每个阶梯的 R_cog 范围
     tier_reward: float = 0.1,  # 每阶梯奖励值：第一阶梯得 tier_reward，第二阶梯得 2*tier_reward
+    reward_mode: str = "ppl",  # "ppl" or "logprob": Reward calculation mode
     **kwargs,
 ) -> Dict[str, Any]:
     # Use alpha if provided (from config), otherwise use alpha_cog
@@ -756,6 +780,7 @@ def compute_cot_rewriter_reward(
         use_tiered_reward=use_tiered_reward,
         tier_step=tier_step,
         tier_reward=tier_reward,
+        reward_mode=reward_mode,
     )
 
     # Compute rewards for all samples
