@@ -32,27 +32,40 @@ from verl.experimental.reward.cot_rewriter.training_logger import get_logger
 logger = get_logger("reward")
 
 
-def extract_rewrite_reasoning(text: str) -> Tuple[str, bool]:
+def extract_rewrite_reasoning(text: str) -> Tuple[str, bool, str]:
     """
     Extract content from <rewrite_reasoning> tags with STRICT format checking.
 
     Strict format requirements:
     - The text must START with <rewrite_reasoning> (after stripping leading whitespace)
     - The text must END with </rewrite_reasoning> (after stripping trailing whitespace)
+    - Must have EXACTLY ONE opening tag and ONE closing tag
+    - Tags must be properly paired
 
     Args:
         text: The raw response text from the model
 
     Returns:
-        Tuple of (extracted_content, success_flag)
+        Tuple of (extracted_content, success_flag, error_reason)
         - extracted_content: The content inside the tags if valid, empty string otherwise
         - success_flag: True if format is strictly valid, False otherwise
+        - error_reason: Description of why validation failed (for logging)
     """
     if not text:
-        return "", False
+        return "", False, "empty_text"
 
     # Strip leading/trailing whitespace for format checking
     stripped_text = text.strip()
+
+    # Count tags - must be exactly 1 of each
+    open_tag_count = stripped_text.count('<rewrite_reasoning>')
+    close_tag_count = stripped_text.count('</rewrite_reasoning>')
+
+    # Check tag counts
+    if open_tag_count != 1:
+        return "", False, f"wrong_open_tag_count:{open_tag_count}"
+    if close_tag_count != 1:
+        return "", False, f"wrong_close_tag_count:{close_tag_count}"
 
     # Strict format check:
     # 1. Must start with <rewrite_reasoning>
@@ -60,14 +73,20 @@ def extract_rewrite_reasoning(text: str) -> Tuple[str, bool]:
     starts_with_open_tag = stripped_text.startswith('<rewrite_reasoning>')
     ends_with_close_tag = stripped_text.endswith('</rewrite_reasoning>')
 
-    if starts_with_open_tag and ends_with_close_tag:
-        # Extract content between tags
-        # Remove opening tag and closing tag
-        content = stripped_text[len('<rewrite_reasoning>'):-len('</rewrite_reasoning>')].strip()
-        return content, True
+    if not starts_with_open_tag:
+        return "", False, "not_start_with_open_tag"
+    if not ends_with_close_tag:
+        return "", False, "not_end_with_close_tag"
 
-    # Format violation - return empty content and failure flag
-    return "", False
+    # Extract content between tags
+    # Remove opening tag and closing tag
+    content = stripped_text[len('<rewrite_reasoning>'):-len('</rewrite_reasoning>')].strip()
+
+    # Additional check: content should not contain the tags (nested tags not allowed)
+    if '<rewrite_reasoning>' in content or '</rewrite_reasoning>' in content:
+        return "", False, "nested_tags_detected"
+
+    return content, True, "ok"
 
 
 class CombinedRewardComputer:
@@ -80,6 +99,49 @@ class CombinedRewardComputer:
     - sglang: Uses SGLang Engine for both Student and FSF Judge (recommended)
     - vllm: Uses vLLM for Student and HuggingFace for FSF Judge
     """
+
+    # Step size for tiered reward bins (0.05 per bin)
+    TIER_STEP = 0.05
+    # Reward per tier (each tier gets tier_index * tier_reward)
+    TIER_REWARD = 0.1
+
+    @staticmethod
+    def apply_tiered_reward(
+        r_cog: float,
+        tier_step: float = TIER_STEP,
+        tier_reward: float = TIER_REWARD
+    ) -> float:
+        """
+        Apply tiered (step-wise) reward function to R_cog.
+
+        Rules:
+        - If r_cog < 0: return 0 (no reward for negative deltas)
+        - If r_cog >= 0: assign to tier based on value
+
+        Formula: reward = (floor(r_cog / tier_step) + 1) * tier_reward
+
+        Examples with tier_step=0.05, tier_reward=0.1:
+        - 0.0-0.05 -> 0.1  (tier_index=0: (0+1)*0.1=0.1)
+        - 0.05-0.10 -> 0.2  (tier_index=1: (1+1)*0.1=0.2)
+        - 0.10-0.15 -> 0.3  (tier_index=2: (2+1)*0.1=0.3)
+
+        Examples with tier_step=0.1, tier_reward=0.05:
+        - 0.0-0.1 -> 0.05  (tier_index=0: (0+1)*0.05=0.05)
+        - 0.1-0.2 -> 0.10  (tier_index=1: (1+1)*0.05=0.10)
+        - 0.2-0.3 -> 0.15  (tier_index=2: (2+1)*0.05=0.15)
+
+        Args:
+            r_cog: Raw cognitive reward value
+            tier_step: 区间大小，每个阶梯的 R_cog 范围 (default: 0.05)
+            tier_reward: 每阶梯奖励值，第一阶梯得 tier_reward，第二阶梯得 2*tier_reward (default: 0.1)
+
+        Returns:
+            Tiered reward value
+        """
+        if r_cog < 0:
+            return 0.0
+        tier_index = int(r_cog / tier_step)  # floor division
+        return (tier_index + 1) * tier_reward
 
     def __init__(
         self,
@@ -104,6 +166,9 @@ class CombinedRewardComputer:
         too_short_threshold_low: float = 0.4,  # Lower threshold for too_short_penalty
         too_short_threshold_high: float = 0.8,  # Upper threshold for too_short_penalty
         too_short_max_penalty: float = 0.5,  # Maximum penalty for too short outputs
+        use_tiered_reward: bool = True,  # Whether to use tiered reward for R_cog
+        tier_step: float = 0.05,  # 区间大小：每个阶梯的 R_cog 范围
+        tier_reward: float = 0.1,  # 每阶梯奖励值：第一阶梯得 tier_reward，第二阶梯得 2*tier_reward
         **kwargs,  # Ignore deprecated params
     ):
         """
@@ -133,6 +198,17 @@ class CombinedRewardComputer:
             too_short_threshold_high: Upper threshold for too_short_penalty (default: 0.8). When
                 rewrite_ratio >= high, no penalty is applied.
             too_short_max_penalty: Maximum penalty for too short outputs (default: 0.5).
+            use_tiered_reward: Whether to use tiered (step-wise) reward for R_cog (default: True).
+            tier_step: 区间大小，每个阶梯的 R_cog 区间 (default: 0.05).
+            tier_reward: 每阶梯奖励值，第一阶梯得 tier_reward，第二阶梯得 2*tier_reward (default: 0.1).
+
+        阶梯式奖励配置示例:
+        - tier_step=0.05, tier_reward=0.1:
+            0.0-0.05 -> 0.1, 0.05-0.1 -> 0.2, 0.1-0.15 -> 0.3, ...
+        - tier_step=0.1, tier_reward=0.05:
+            0.0-0.1 -> 0.05, 0.1-0.2 -> 0.1, 0.2-0.3 -> 0.15, ...
+        - tier_step=0.03, tier_reward=0.2:
+            0.0-0.03 -> 0.2, 0.03-0.06 -> 0.4, 0.06-0.09 -> 0.6, ...
         """
         self.lambda_logic = lambda_logic
         self.use_logic_reward = use_logic_reward
@@ -145,6 +221,9 @@ class CombinedRewardComputer:
         self.too_short_threshold_low = too_short_threshold_low
         self.too_short_threshold_high = too_short_threshold_high
         self.too_short_max_penalty = too_short_max_penalty
+        self.use_tiered_reward = use_tiered_reward
+        self.tier_step = tier_step
+        self.tier_reward = tier_reward
 
         # Initialize Student Reward client based on backend
         if reward_backend == "sglang":
@@ -243,11 +322,24 @@ class CombinedRewardComputer:
         )
 
         # 获取计算结果
-        r_cog = cog_result["rewards"]
+        r_cog_raw = cog_result["rewards"]
         rewrite_mean_log_probs = cog_result["rewrite_mean_log_probs"]
         original_mean_log_probs = cog_result["original_mean_log_probs"]
         token_log_probs = cog_result["rewrite_token_log_probs"]
         token_ids = cog_result["rewrite_token_ids"]
+
+        # Apply tiered reward transformation if enabled
+        if self.use_tiered_reward:
+            r_cog = [self.apply_tiered_reward(r, self.tier_step, self.tier_reward) for r in r_cog_raw]
+            # Log tiered reward transformation for first few samples
+            for i in range(min(3, batch_size)):
+                if r_cog_raw[i] != r_cog[i]:
+                    logger.info(
+                        f"[TIERED_REWARD] Sample {i}: r_cog_raw={r_cog_raw[i]:.4f} -> r_cog_tiered={r_cog[i]:.4f} "
+                        f"(tier_step={self.tier_step}, tier_reward={self.tier_reward})"
+                    )
+        else:
+            r_cog = r_cog_raw
 
         # Compute logic reward (if enabled)
         if (
@@ -474,6 +566,9 @@ def compute_cot_rewriter_reward(
     too_short_threshold_low: float = 0.4,  # Lower threshold for too_short_penalty
     too_short_threshold_high: float = 0.8,  # Upper threshold for too_short_penalty
     too_short_max_penalty: float = 0.5,  # Maximum penalty for too short outputs
+    use_tiered_reward: bool = True,  # Whether to use tiered (step-wise) reward for R_cog
+    tier_step: float = 0.05,  # 区间大小：每个阶梯的 R_cog 范围
+    tier_reward: float = 0.1,  # 每阶梯奖励值：第一阶梯得 tier_reward，第二阶梯得 2*tier_reward
     **kwargs,
 ) -> Dict[str, Any]:
     # Use alpha if provided (from config), otherwise use alpha_cog
@@ -611,14 +706,14 @@ def compute_cot_rewriter_reward(
     format_valid_flags = []  # 1 if valid, 0 if invalid
 
     for i, rewrite_cot in enumerate(rewrite_cots):
-        extracted_cot, has_valid_format = extract_rewrite_reasoning(rewrite_cot)
+        extracted_cot, has_valid_format, error_reason = extract_rewrite_reasoning(rewrite_cot)
         # For valid format: use extracted content; for invalid format: use empty string (no cognitive reward)
         extracted_rewrite_cots.append(extracted_cot if has_valid_format else "")
         format_valid_flags.append(1 if has_valid_format else 0)
         if not has_valid_format:
             stripped_preview = rewrite_cot.strip()[:100] if rewrite_cot else ""
             logger.info(
-                f"[REWARD] Sample {i}: Format violation - response must start with '<rewrite_reasoning>' and end with '</rewrite_reasoning>'. "
+                f"[REWARD] Sample {i}: Format violation - reason={error_reason}. "
                 f"Preview: '{stripped_preview}...'. Will apply format penalty without cognitive reward."
             )
 
@@ -658,6 +753,9 @@ def compute_cot_rewriter_reward(
         too_short_threshold_low=too_short_threshold_low,
         too_short_threshold_high=too_short_threshold_high,
         too_short_max_penalty=too_short_max_penalty,
+        use_tiered_reward=use_tiered_reward,
+        tier_step=tier_step,
+        tier_reward=tier_reward,
     )
 
     # Compute rewards for all samples

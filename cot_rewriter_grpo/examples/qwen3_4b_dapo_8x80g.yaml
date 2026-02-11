@@ -27,7 +27,7 @@ trainer:
   project_name: cot_rewriter_dapo
   experiment_name: qwen3_4b_dapo_8x80g
   total_epochs: 1
-  total_training_steps: 500
+  total_training_steps: 2000
   save_freq: 50
   test_freq: 50
   val_before_train: false
@@ -53,7 +53,7 @@ data:
   train_batch_size: 1
   val_batch_size: 1
   gen_batch_size: 1    # DAPO: 可能因过滤需要多轮生成
-  max_prompt_length: 5500
+  max_prompt_length: 5000
   max_response_length: 10000
   return_raw_chat: true
   dataloader_num_workers: 8
@@ -81,7 +81,7 @@ actor_rollout_ref:
     lora_rank: 0  # 全参数训练
 
   actor:
-    strategy: fsdp2
+    strategy: fsdp
     ppo_epochs: 1
     # ========== DAPO: Separated Clip Epsilons ==========
     clip_ratio: 0.2
@@ -89,29 +89,29 @@ actor_rollout_ref:
     clip_ratio_high: 0.28    # DAPO: 上界 clip ratio (1.4x low)
     # ========== DAPO: Token-level Loss ==========
     loss_agg_mode: "seq-mean-token-mean"  # DAPO: token 级别损失聚合
-    entropy_coeff: 0.01
+    entropy_coeff: 0.05    # 提高熵系数以增强探索（从 0.01 -> 0.05）
     grad_clip: 1.0
     ppo_mini_batch_size: 1
     ppo_micro_batch_size_per_gpu: 1
     use_kl_in_reward: false
     use_kl_loss: true
-    kl_loss_coef: 0.05
+    kl_loss_coef: 0.02     # 降低 KL 惩罚系数（从 0.05 -> 0.02）
     kl_loss_type: low_var_kl
     entropy_from_logits_with_chunking: true
 
     fsdp_config:
       dtype: bfloat16
-      param_offload: true
+      param_offload: false
       optimizer_offload: false
       mixed_precision:
         param_dtype: bf16
         reduce_dtype: fp32
         buffer_dtype: bf16
     optim:
-      lr: 2e-5
+      lr: 2e-6          
       weight_decay: 0.01
       lr_scheduler_type: cosine
-      lr_warmup_steps_ratio: 0.03
+      lr_warmup_steps_ratio: 0.03  
       min_lr_ratio: 0.1
       total_training_steps: -1
 
@@ -124,12 +124,12 @@ actor_rollout_ref:
     load_format: auto
     log_prob_micro_batch_size_per_gpu: 1
     n: 8  # GRPO/DAPO 组大小
-    temperature: 0.7
+    temperature: 0.9      # 提高温度以增强探索（从 0.7 -> 0.9）
     top_p: 0.95
-    prompt_length: 5500
+    prompt_length: 5000
     response_length: 10000
     max_num_batched_tokens: 62000
-    max_model_len: 15500
+    max_model_len: 15000
     enforce_eager: true
     free_cache_engine: true
     sleep_level: 1
@@ -139,7 +139,7 @@ actor_rollout_ref:
   ref:
     enable: true
     log_prob_micro_batch_size_per_gpu: 1
-    strategy: fsdp2
+    strategy: fsdp
     fsdp_config:
       dtype: bfloat16
       param_offload: true  # 开启参数 offload 以节省显存
@@ -166,7 +166,7 @@ algorithm:
     _target_: verl.trainer.config.FilterGroupsConfig
     enable: true
     metric: "length_ratio"  # 按长度比例过滤：组内至少 1 个样本 length_ratio >= low (0.4) 才保留
-    max_num_gen_batches: 10  # 最多生成 10 轮，<=0 表示无限制
+    max_num_gen_batches: -1  # 最多生成 10 轮，<=0 表示无限制
 
 # ============ Critic Configuration (GRPO/DAPO doesn't need) ============
 critic:
@@ -209,11 +209,22 @@ custom_reward_function:
     sglang_mem_fraction_static: 0.30
     cleanup_after_compute: true # 必须开启，否则会导致 OOM
 
+    # ========== 阶梯式奖励配置 ==========
+    # R_cog < 0 -> reward = 0
+    # reward = (floor(r_cog / tier_step) + 1) * tier_reward
+    # 配置示例：
+    # - tier_step=0.05, tier_reward=0.1: 0.0-0.05 -> 0.1, 0.05-0.1 -> 0.2, 0.1-0.15 -> 0.3, ...
+    # - tier_step=0.1, tier_reward=0.05: 0.0-0.1 -> 0.05, 0.1-0.2 -> 0.1, 0.2-0.3 -> 0.15, ...
+    # - tier_step=0.03, tier_reward=0.2: 0.0-0.03 -> 0.2, 0.03-0.06 -> 0.4, 0.06-0.09 -> 0.6, ...
+    use_tiered_reward: true
+    tier_step: 0.05       # 区间大小：每个阶梯的 R_cog 范围
+    tier_reward: 0.2      # 每阶梯奖励值：第一阶梯得 0.1，第二阶梯得 0.2，第三阶梯得 0.3，...
+
     # ========== 其他配置 ==========
     print_samples: 2
     truncation_penalty: 0.0   # 截断惩罚（finish_reason == "length" 时应用，配置为正数）
-    format_penalty: 1.0        # 格式惩罚
-    too_short_threshold_low: 0.5   # 过短惩罚下界：ratio < low 时惩罚为最大值
+    format_penalty: 1.0        # 格式惩罚（提高以强化格式正确性）
+    too_short_threshold_low: 0.25   # 过短惩罚下界：ratio < low 时惩罚为最大值
     too_short_threshold_high: 0.8  # 过短惩罚上界：ratio >= high 时无惩罚
     too_short_max_penalty: 1.0     # 过短最大惩罚值
     field_mapping:

@@ -1848,22 +1848,53 @@ class RayDAPOTrainer(RayPPOTrainer):
                         batch = new_batch
                     else:
                         metric_name = self.config.algorithm.filter_groups.metric
-                        # Skip filtering for length_ratio since we already pre-filtered
+                        # For length_ratio: apply reward variance filter after reward computation
                         if metric_name == "length_ratio":
+                            # Compute seq_final_reward for variance filtering
+                            new_batch.non_tensor_batch["seq_final_reward"] = (
+                                new_batch.batch["token_level_rewards"].sum(dim=-1).float().numpy()
+                            )
+
+                            # Group by uid and compute variance
+                            prompt_uid2rewards = defaultdict(list)
+                            for uid, reward in zip(
+                                new_batch.non_tensor_batch["uid"], new_batch.non_tensor_batch["seq_final_reward"], strict=True
+                            ):
+                                prompt_uid2rewards[uid].append(reward)
+
+                            # Filter out groups with zero variance
+                            total_groups = len(prompt_uid2rewards)
+                            filtered_by_variance = []
+                            kept_prompt_uids = []
+
+                            for uid, rewards in prompt_uid2rewards.items():
+                                variance = np.var(rewards)
+                                if variance > 0 or len(rewards) == 1:
+                                    kept_prompt_uids.append(uid)
+                                else:
+                                    filtered_by_variance.append(uid)
+
+                            kept_traj_idxs = [
+                                idx for idx, uid in enumerate(new_batch.non_tensor_batch["uid"])
+                                if uid in kept_prompt_uids
+                            ]
+
+                            num_before = len(new_batch.non_tensor_batch["uid"])
+                            new_batch = new_batch[kept_traj_idxs]
+                            num_after = len(new_batch.non_tensor_batch["uid"])
                             batch = new_batch
-                            print(f"[DAPO] Skipping post-filter for length_ratio (already pre-filtered)")
-                            # Update num_prompt_in_batch for the loop condition
-                            unique_uids = set(new_batch.non_tensor_batch["uid"])
-                            num_prompt_in_batch = len(unique_uids)
+                            num_prompt_in_batch = len(kept_prompt_uids)
+                            print(f"[DAPO] Post-filter (reward variance): {num_before} -> {num_after} samples ({len(kept_prompt_uids)}/{total_groups} groups kept)")
+                            print(f"[DAPO]   - Filtered by reward variance==0: {len(filtered_by_variance)} groups")
                         else:
                             # For other metrics, use the original filter logic
                             if metric_name == "seq_final_reward":
                                 new_batch.non_tensor_batch["seq_final_reward"] = (
-                                    new_batch.batch["token_level_rewards"].sum(dim=-1).numpy()
+                                    new_batch.batch["token_level_rewards"].sum(dim=-1).float().numpy()
                                 )
                             elif metric_name == "seq_reward":
                                 new_batch.non_tensor_batch["seq_reward"] = (
-                                    new_batch.batch["token_level_scores"].sum(dim=-1).numpy()
+                                    new_batch.batch["token_level_scores"].sum(dim=-1).float().numpy()
                                 )
 
                             # Collect the sequence reward for each trajectory
