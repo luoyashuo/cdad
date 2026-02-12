@@ -81,7 +81,7 @@ actor_rollout_ref:
     # 使用原始 Qwen3-4B 模型（不含 dummy token，避免模型"变傻"）
     path: ${oc.env:MODEL_BASE_DIR}/Qwen/Qwen3-4B
     trust_remote_code: true
-    enable_gradient_checkpointing: false
+    enable_gradient_checkpointing: true
     use_remove_padding: false
     lora_rank: 0  # 全参数训练
 
@@ -139,7 +139,7 @@ actor_rollout_ref:
     load_format: auto
     log_prob_micro_batch_size_per_gpu: 1
     n: 8  # GRPO/GSPO 组大小
-    temperature: 0.7 # qwen3 推荐
+    temperature: 0.6 # qwen3 推荐
     top_k: 20
     top_p: 0.95
     presence_penalty: 1.0

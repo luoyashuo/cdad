@@ -427,6 +427,7 @@ class SGLangStudentRewardClient:
         micro_batch_size: int = 4,
         logprob_last_n_tokens: Optional[int] = None,  # 只计算最后 N 个 token 的 logprobs
         reward_mode: str = "ppl",  # "ppl" or "logprob": Reward calculation mode
+        reward_only_use_logprob: bool = False,  # If True, R_cog = answer_log_prob(rewrite) only (no delta)
     ):
         """
         Initialize Multi-GPU SGLang Student Reward Client with Ray actors.
@@ -444,6 +445,7 @@ class SGLangStudentRewardClient:
             micro_batch_size: Batch size for each micro-batch to avoid OOM
             logprob_last_n_tokens: 只计算 answer 部分最后 N 个 token 的 logprobs，节省显存
             reward_mode: Reward calculation mode - "ppl" or "logprob"
+            reward_only_use_logprob: If True, R_cog = answer_log_prob(rewrite) only (no delta)
         """
 
         self.model_path = model_path
@@ -454,6 +456,7 @@ class SGLangStudentRewardClient:
         self.micro_batch_size = micro_batch_size
         self.logprob_last_n_tokens = logprob_last_n_tokens
         self.reward_mode = reward_mode
+        self.reward_only_use_logprob = reward_only_use_logprob
 
         # Auto-detect devices if not specified
         if devices is None:
@@ -734,6 +737,7 @@ class SGLangStudentRewardClient:
         answers: List[str],
         original_cots: Optional[List[str]] = None,
         alpha_cog: float = 0.01,
+        reward_only_use_logprob: Optional[bool] = None,
         **kwargs,  # Accept extra args for compatibility
     ) -> Dict[str, Any]:
         """
@@ -744,6 +748,8 @@ class SGLangStudentRewardClient:
 
         Computes two reward components:
         1. R_cog = answer_log_prob(Q, Rewrite_CoT, A) - answer_log_prob(Q, Original_CoT, A)
+                  OR (if reward_only_use_logprob=True):
+                  R_cog = answer_log_prob(Q, Rewrite_CoT, A) only (no delta)
         2. R_useful = answer_log_prob(Q, Rewrite_CoT, A) - answer_log_prob(Q, A)
 
         Args:
@@ -752,10 +758,14 @@ class SGLangStudentRewardClient:
             answers: List of ground truth answers
             original_cots: Optional list of original CoTs
             alpha_cog: Weight for min log prob term
+            reward_only_use_logprob: If True, use only rewrite logprob (no delta from original)
 
         Returns:
             Dict containing rewards and log probs including R_cog and R_useful
         """
+        # Use instance value if not provided in call
+        if reward_only_use_logprob is None:
+            reward_only_use_logprob = self.reward_only_use_logprob
         import time
 
         self.initialize()
@@ -896,20 +906,33 @@ class SGLangStudentRewardClient:
 
             # ===== R_cog 计算公式 =====
             # R_cog = answer_log_prob(Q, Rewrite_CoT, A) - answer_log_prob(Q, Original_CoT, A)
+            # OR (if reward_only_use_logprob=True):
+            # R_cog = answer_log_prob(Q, Rewrite_CoT, A) only (no delta)
             # 根据 reward_mode 选择计算方式
             if self.reward_mode == "ppl":
                 # PPL 模式: R_cog = PPL(original) - PPL(rewrite)
                 # 其中 PPL = exp(-mean_log_prob)
                 import math
                 rewrite_ppl = math.exp(-rewrite_mean)
-                original_ppl = math.exp(-original_mean)
-                reward = original_ppl - rewrite_ppl
+                if reward_only_use_logprob:
+                    # When reward_only_use_logprob=True, use only rewrite PPL (no delta)
+                    # Reward = -PPL(rewrite) so higher rewrite quality = higher reward
+                    reward = -rewrite_ppl
+                else:
+                    # Default: compute delta from original
+                    original_ppl = math.exp(-original_mean) if original_mean > -100 else 100.0
+                    reward = original_ppl - rewrite_ppl
             else:  # "logprob" 模式
                 # Logprob 模式: R_cog = answer_log_prob(rewrite) - answer_log_prob(original)
                 # 其中 answer_log_prob = mean(token_log_probs) + alpha_cog * min(token_log_probs)
                 rewrite_answer_log_prob = rewrite_mean + alpha_cog * rewrite_min
-                original_answer_log_prob = original_mean + alpha_cog * original_min
-                reward = rewrite_answer_log_prob - original_answer_log_prob
+                if reward_only_use_logprob:
+                    # When reward_only_use_logprob=True, use only rewrite logprob (no delta)
+                    reward = rewrite_answer_log_prob
+                else:
+                    # Default: compute delta from original
+                    original_answer_log_prob = original_mean + alpha_cog * original_min
+                    reward = rewrite_answer_log_prob - original_answer_log_prob
 
             # ===== R_useful 计算公式 =====
             # R_useful = answer_log_prob(Q, Rewrite_CoT, A) - answer_log_prob(Q, A)

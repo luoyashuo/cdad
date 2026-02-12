@@ -3,6 +3,11 @@ Custom RL Dataset with JSONL Support for CoT Rewriter GRPO
 
 This module extends VERL's RLHFDataset to support JSONL file format.
 It also handles plain text prompts by converting them to chat message format.
+
+Supported data formats:
+1. New format: system_prompt + user_prompt (separate fields)
+2. Chat format: prompt_key points to a list of messages
+3. Plain text: prompt_key points to a single string
 """
 
 import logging
@@ -18,6 +23,9 @@ from transformers import PreTrainedTokenizer, ProcessorMixin
 from verl.utils.dataset.rl_dataset import RLHFDataset
 
 logger = logging.getLogger(__name__)
+
+# Flag to track if we've logged the first sample debug info
+_first_sample_logged = False
 
 
 class RLHFDatasetJSONL(RLHFDataset):
@@ -52,6 +60,11 @@ class RLHFDatasetJSONL(RLHFDataset):
         self.shuffle = config.get("shuffle", False)
         self.seed = config.get("seed", None)
         self.apply_chat_template_kwargs = config.get("apply_chat_template_kwargs", {})
+
+        # New format: support system_prompt and user_prompt as separate fields
+        self.system_prompt_key = config.get("system_prompt_key", "system_prompt")
+        self.user_prompt_key = config.get("user_prompt_key", "user_prompt")
+        self.use_new_format = config.get("use_new_format", False)  # Auto-detect if not specified
 
         # Call parent init (this will call _read_files_and_tokenize)
         super().__init__(
@@ -101,11 +114,14 @@ class RLHFDatasetJSONL(RLHFDataset):
         """
         Build chat messages from example.
 
-        Overrides parent method to handle plain text prompts by converting them
-        to chat message format: [{"role": "user", "content": "..."}]
-
-        VERL's RLHFDataset expects prompt_key to point to a list of messages,
-        but our data has plain text in the 'problem' field.
+        Supports three data formats:
+        1. New format: system_prompt + user_prompt (separate fields)
+           - Messages: [{"role": "system", "content": system_prompt},
+                       {"role": "user", "content": user_prompt}]
+        2. Chat format: prompt_key points to a list of messages
+           - Use parent's method to handle existing chat format
+        3. Plain text format: prompt_key points to a single string
+           - Convert to: [{"role": "user", "content": prompt_content}]
 
         Args:
             example: Row dictionary from dataframe.
@@ -113,18 +129,44 @@ class RLHFDatasetJSONL(RLHFDataset):
         Returns:
             messages: List of messages in chat format.
         """
-        prompt_content = example[self.prompt_key]
+        # === Format 1: New format with system_prompt + user_prompt ===
+        # Check if both fields exist and are non-empty
+        system_prompt = example.get(self.system_prompt_key, "")
+        user_prompt = example.get(self.user_prompt_key, "")
 
-        # If prompt is already a list (chat format), use parent's method
+        # Auto-detect new format: if both fields exist and are non-empty strings
+        is_new_format = (
+            self.use_new_format or
+            (isinstance(system_prompt, str) and system_prompt.strip() and
+             isinstance(user_prompt, str) and user_prompt.strip())
+        )
+
+        if is_new_format:
+            messages = []
+            # Add system message if present
+            if system_prompt and system_prompt.strip():
+                messages.append({"role": "system", "content": system_prompt.strip()})
+            # Add user message
+            messages.append({"role": "user", "content": user_prompt.strip()})
+            return messages
+
+        # === Format 2: Chat format (list of messages) ===
+        prompt_content = example.get(self.prompt_key)
         if isinstance(prompt_content, list):
             return super()._build_messages(example)
 
-        # If prompt is a plain string, convert to chat format
+        # === Format 3: Plain text format ===
         if isinstance(prompt_content, str):
             messages = [{"role": "user", "content": prompt_content}]
             return messages
 
-        raise ValueError(f"Unsupported prompt format: {type(prompt_content)}")
+        raise ValueError(
+            f"Unsupported prompt format: {type(prompt_content)}. "
+            f"Expected one of: "
+            f"1) system_prompt + user_prompt fields, "
+            f"2) list of messages (chat format), "
+            f"3) plain string (plain text format)"
+        )
 
     def __getitem__(self, item):
         """
@@ -172,6 +214,18 @@ class RLHFDatasetJSONL(RLHFDataset):
 
         # Set required tensor fields
         row_dict["input_ids"] = input_ids[0]
+
+        # Debug log: print first sample's decoded input_ids
+        global _first_sample_logged
+        if not _first_sample_logged:
+            decoded_text = self.tokenizer.decode(input_ids[0], skip_special_tokens=False)
+            logger.info(
+                f"[RLHFDatasetJSONL] First sample debug:\n"
+                f"  input_ids length: {len(input_ids[0])}\n"
+                f"  decoded text (full):\n{decoded_text}\n"
+                f"  messages format: {messages}"
+            )
+            _first_sample_logged = True
         row_dict["attention_mask"] = attention_mask[0]
         row_dict["position_ids"] = position_ids[0]
 
@@ -239,3 +293,19 @@ class RLHFDatasetJSONL(RLHFDataset):
             row_dict["data_source"] = "cot_rewrite"
 
         return row_dict
+
+    def maybe_filter_out_long_prompts(self, dataset: datasets.Dataset) -> datasets.Dataset:
+        """
+        No-op method: filtering disabled for performance.
+
+        Previously filtered out prompts that are too long, but this is too slow.
+        Now we rely on truncation instead.
+
+        Args:
+            dataset: HuggingFace dataset to filter
+
+        Returns:
+            The dataset unmodified (no filtering applied)
+        """
+        # Skip filtering for performance - let truncation handle long prompts
+        return dataset

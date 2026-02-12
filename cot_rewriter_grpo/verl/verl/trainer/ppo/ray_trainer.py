@@ -1503,6 +1503,7 @@ class RayPPOTrainer:
                                 "logic_rewards", "total_rewards", "original_fsfs", "rewrite_fsfs",
                                 "truncation_penalties", "format_penalties", "too_short_penalties",
                                 "truncated", "format_valid", "length_ratio",
+                                "reward_deltas",  # NEW: rewrite-original diff (auto computes max/mean/min)
                             ]
                             for field in reward_fields:
                                 if field in batch.non_tensor_batch and field not in reward_extra_infos_dict:

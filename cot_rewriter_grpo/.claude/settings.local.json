@@ -43,7 +43,9 @@
       "Bash(git -C /data/luoys/projects/cdad/cot_rewriter_grpo show 49152f4 -- verl/verl/workers/fsdp_workers.py)",
       "Bash(git -C /data/luoys/projects/cdad/cot_rewriter_grpo status verl/verl/workers/fsdp_workers.py)",
       "Bash(git -C /data/luoys/projects/cdad/cot_rewriter_grpo add verl/verl/workers/sharding_manager/fsdp_vllm.py)",
-      "Bash(git -C /data/luoys/projects/cdad/cot_rewriter_grpo commit -m \"$\\(cat <<''EOF''\ndebug: add more logging for vocab_size mismatch handling\n\n🤖 Generated with [Claude Code]\\(https://claude.com/claude-code\\)\n\nCo-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>\nEOF\n\\)\")"
+      "Bash(git -C /data/luoys/projects/cdad/cot_rewriter_grpo commit -m \"$\\(cat <<''EOF''\ndebug: add more logging for vocab_size mismatch handling\n\n🤖 Generated with [Claude Code]\\(https://claude.com/claude-code\\)\n\nCo-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>\nEOF\n\\)\")",
+      "Bash(git -C /data/luoys/projects/cdad/cot_rewriter_grpo log:*)",
+      "Bash(git -C /data/luoys/projects/cdad/cot_rewriter_grpo show:*)"
     ]
   }
 }

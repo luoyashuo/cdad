@@ -201,6 +201,7 @@ class CombinedRewardComputer:
         lambda_logic: float = 0.5,
         lambda_useful: float = 1.0,  # Weight for R_useful (default: 1.0)
         use_logic_reward: bool = True,
+        use_useful_reward: bool = True,  # Whether to use R_useful in reward calculation
         alpha_cog: float = 0.01,
         student_devices: Optional[List[str]] = None,
         reward_micro_batch_size: Optional[int] = None,
@@ -223,6 +224,7 @@ class CombinedRewardComputer:
         reward_mode: str = "ppl",  # "ppl" or "logprob": Reward calculation mode
                                    # - "ppl": R_cog = PPL(original) - PPL(rewrite)
                                    # - "logprob": R_cog = answer_log_prob(rewrite) - answer_log_prob(original)
+        reward_only_use_logprob: bool = False,  # If True, R_cog = answer_log_prob(rewrite) only (no delta)
         **kwargs,  # Ignore deprecated params
     ):
         """
@@ -235,6 +237,8 @@ class CombinedRewardComputer:
             lambda_logic: Weight for logic reward
             lambda_useful: Weight for R_useful (default: 1.0). Set to 0 to disable R_useful in training.
             use_logic_reward: Whether to use logic reward
+            use_useful_reward: Whether to use R_useful in reward calculation (default: True).
+                When False, R_useful is computed but not included in total reward.
             alpha_cog: Weight for min log prob term in cognitive reward (default: 0.01)
             student_devices: List of devices for Student (e.g., ["cuda:0", "cuda:1"])
             reward_micro_batch_size: If set, process reward computation in micro-batches to avoid OOM.
@@ -260,6 +264,9 @@ class CombinedRewardComputer:
                 - "ppl": R_cog = PPL(original) - PPL(rewrite), where PPL = exp(-mean_log_prob)
                 - "logprob": R_cog = answer_log_prob(rewrite) - answer_log_prob(original),
                   where answer_log_prob = mean(token_log_probs) + alpha_cog * min(token_log_probs)
+            reward_only_use_logprob: If True, R_cog = answer_log_prob(rewrite) only, without
+                computing the delta from original. This is useful for absolute reward calculation.
+                When False (default), R_cog = answer_log_prob(rewrite) - answer_log_prob(original).
 
         阶梯式奖励配置示例:
         - tier_step=0.05, tier_reward=0.1:
@@ -272,6 +279,7 @@ class CombinedRewardComputer:
         self.lambda_logic = lambda_logic
         self.lambda_useful = lambda_useful
         self.use_logic_reward = use_logic_reward
+        self.use_useful_reward = use_useful_reward
         self.alpha_cog = alpha_cog
         self.reward_micro_batch_size = reward_micro_batch_size
         self.gpu_batch_size = gpu_batch_size
@@ -285,6 +293,7 @@ class CombinedRewardComputer:
         self.tier_step = tier_step
         self.tier_reward = tier_reward
         self.reward_mode = reward_mode
+        self.reward_only_use_logprob = reward_only_use_logprob
 
         # Initialize Student Reward client based on backend
         if reward_backend == "sglang":
@@ -388,12 +397,18 @@ class CombinedRewardComputer:
             # R_cog = answer_log_prob(Q, Rewrite_CoT, A) - answer_log_prob(Q, Original_CoT, A)
             # 其中 answer_log_prob = mean(token_log_probs) + alpha_cog * min(token_log_probs)
             pass
+
+        # Pass reward_only_use_logprob to student client if supported
+        compute_kwargs = {"alpha_cog": self.alpha_cog}
+        if hasattr(self.student_client, 'reward_only_use_logprob'):
+            compute_kwargs["reward_only_use_logprob"] = self.reward_only_use_logprob
+
         cog_result = self.student_client.compute_cognitive_reward_batch(
             questions=questions,
             rewrite_cots=rewrite_cots,
             answers=answers,
             original_cots=original_cots,
-            alpha_cog=self.alpha_cog,
+            **compute_kwargs,
         )
 
         # 获取计算结果
@@ -404,6 +419,25 @@ class CombinedRewardComputer:
         no_cot_mean_log_probs = cog_result.get("no_cot_mean_log_probs", [0.0] * batch_size)  # Baseline (no CoT)
         token_log_probs = cog_result["rewrite_token_log_probs"]
         token_ids = cog_result["rewrite_token_ids"]
+
+        # Compute reward_deltas: rewrite_log_prob - original_log_prob (for logging)
+        # This shows the raw delta before tiered reward transformation
+        reward_deltas = []
+        for i in range(batch_size):
+            if self.reward_mode == "ppl":
+                # For PPL mode, delta = PPL(original) - PPL(rewrite)
+                import math
+                rewrite_ppl = math.exp(-rewrite_mean_log_probs[i]) if rewrite_mean_log_probs[i] > -100 else 100.0
+                original_ppl = math.exp(-original_mean_log_probs[i]) if original_mean_log_probs[i] > -100 else 100.0
+                delta = original_ppl - rewrite_ppl
+            else:
+                # For logprob mode, delta = rewrite_log_prob - original_log_prob
+                rewrite_lp = rewrite_mean_log_probs[i] + self.alpha_cog * min(
+                    [lp for lp in token_log_probs[i] if lp > -100] if token_log_probs[i] else [-100]
+                ) if token_log_probs[i] else rewrite_mean_log_probs[i]
+                original_lp = original_mean_log_probs[i] + self.alpha_cog * -100.0  # Approximate
+                delta = rewrite_lp - original_lp
+            reward_deltas.append(delta)
 
         # Apply tiered reward transformation if enabled
         if self.use_tiered_reward:
@@ -503,8 +537,13 @@ class CombinedRewardComputer:
             )
 
         # Compute base rewards: R_base = R_cog + lambda_useful * R_useful + lambda_logic * R_logic
-        base_rewards = [c + self.lambda_useful * u + self.lambda_logic * l
-                       for c, u, l in zip(r_cog, r_useful, r_logic)]
+        # Note: R_useful is only included if use_useful_reward is True
+        if self.use_useful_reward:
+            base_rewards = [c + self.lambda_useful * u + self.lambda_logic * l
+                           for c, u, l in zip(r_cog, r_useful, r_logic)]
+        else:
+            base_rewards = [c + self.lambda_logic * l
+                           for c, l in zip(r_cog, r_logic)]
 
         # Compute range of base_rewards (R_cog + R_useful) for relative penalty scaling
         # The range is max - min, representing the spread of rewards within the group
@@ -564,6 +603,7 @@ class CombinedRewardComputer:
             "total_rewards": total_rewards,
             "token_log_probs": token_log_probs,
             "token_ids": token_ids,
+            "reward_deltas": reward_deltas,  # NEW: Log raw rewrite-original deltas
             "extra_info": {
                 "original_fsfs": original_fsfs,
                 "rewrite_fsfs": rewrite_fsfs,
@@ -666,6 +706,7 @@ def compute_cot_rewriter_reward(
     device: str = "cuda:5",
     lambda_logic: float = 0.5,
     use_logic_reward: bool = True,
+    use_useful_reward: bool = True,  # Whether to use R_useful in reward calculation
     alpha_cog: float = 0.01,
     alpha: Optional[float] = None,  # Alias for alpha_cog (from config)
     field_mapping: Optional[Dict[str, str]] = None,
@@ -691,6 +732,7 @@ def compute_cot_rewriter_reward(
     tier_step: float = 0.05,  # 区间大小：每个阶梯的 R_cog 范围
     tier_reward: float = 0.1,  # 每阶梯奖励值：第一阶梯得 tier_reward，第二阶梯得 2*tier_reward
     reward_mode: str = "ppl",  # "ppl" or "logprob": Reward calculation mode
+    reward_only_use_logprob: bool = False,  # If True, R_cog = answer_log_prob(rewrite) only (no delta)
     **kwargs,
 ) -> Dict[str, Any]:
     # Use alpha if provided (from config), otherwise use alpha_cog
@@ -861,6 +903,7 @@ def compute_cot_rewriter_reward(
         device=device,
         lambda_logic=lambda_logic,
         use_logic_reward=use_logic_reward,
+        use_useful_reward=use_useful_reward,
         alpha_cog=alpha_cog,
         student_devices=student_devices,
         reward_micro_batch_size=reward_micro_batch_size,
@@ -881,6 +924,7 @@ def compute_cot_rewriter_reward(
         tier_step=tier_step,
         tier_reward=tier_reward,
         reward_mode=reward_mode,
+        reward_only_use_logprob=reward_only_use_logprob,
     )
 
     # Compute rewards for all samples
@@ -1005,6 +1049,8 @@ def compute_cot_rewriter_reward(
             "format_valid": format_valid_flags,
             # DAPO filter_groups support: "length_ratio" metric for length-based filtering
             "length_ratio": length_ratios,
+            # NEW: reward_deltas for logging rewrite-original improvement
+            "reward_deltas": result.get("reward_deltas", [0.0] * batch_size),
         },
     }
 
