@@ -13,5 +13,3 @@ source /data/luoys/projects/cdad/cot_rewriter_grpo/.venv/bin/activate
 ```
 logs/grpo/gemma3_4b_gspo_8x80g.log
 ```
-# 问题
-检查目前实现逻辑和上次commit的区别，上一次不会OOM，这次反而OOM，仔细检查OOM发生的时机，为什么这次就OOM了？是不是Reward模型没释放显存
