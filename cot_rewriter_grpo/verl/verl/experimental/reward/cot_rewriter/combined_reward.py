@@ -420,23 +420,11 @@ class CombinedRewardComputer:
         token_log_probs = cog_result["rewrite_token_log_probs"]
         token_ids = cog_result["rewrite_token_ids"]
 
-        # Compute reward_deltas: rewrite_log_prob - original_log_prob (for logging)
-        # This shows the raw delta before tiered reward transformation
+        # Compute reward_deltas: raw difference in mean log probs (without alpha_cog * min term)
+        # This tracks the pure log_prob improvement, excluding the worst-token penalty
         reward_deltas = []
         for i in range(batch_size):
-            if self.reward_mode == "ppl":
-                # For PPL mode, delta = PPL(original) - PPL(rewrite)
-                import math
-                rewrite_ppl = math.exp(-rewrite_mean_log_probs[i]) if rewrite_mean_log_probs[i] > -100 else 100.0
-                original_ppl = math.exp(-original_mean_log_probs[i]) if original_mean_log_probs[i] > -100 else 100.0
-                delta = original_ppl - rewrite_ppl
-            else:
-                # For logprob mode, delta = rewrite_log_prob - original_log_prob
-                rewrite_lp = rewrite_mean_log_probs[i] + self.alpha_cog * min(
-                    [lp for lp in token_log_probs[i] if lp > -100] if token_log_probs[i] else [-100]
-                ) if token_log_probs[i] else rewrite_mean_log_probs[i]
-                original_lp = original_mean_log_probs[i] + self.alpha_cog * -100.0  # Approximate
-                delta = rewrite_lp - original_lp
+            delta = rewrite_mean_log_probs[i] - original_mean_log_probs[i]  # Pure mean difference
             reward_deltas.append(delta)
 
         # Apply tiered reward transformation if enabled

@@ -9,7 +9,5 @@ source /data/luoys/projects/cdad/cot_rewriter_grpo/.venv/bin/activate
 3. 运行配置是8*A100-80G
 4. 你不能修改数据的长度， response长度
 5. 参考原版verl逻辑：/data/luoys/projects/verl-0.5.0
-# LOG
-```
-logs/grpo/gemma3_4b_gspo_8x80g.log
-```
+# 问题
+目前会把rewrite和rewrite的delta作为观测值，打印到swanlab中嘛

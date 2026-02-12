@@ -86,7 +86,7 @@ actor_rollout_ref:
 
     # ========== GRPO Policy Loss 配置 ==========
     policy_loss:
-      loss_mode: grpo
+      loss_mode: vanilla
 
     # ========== GRPO: 标准 Clip Ratio ==========
     clip_ratio: 0.2

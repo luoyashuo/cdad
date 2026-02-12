@@ -45,7 +45,11 @@
       "Bash(git -C /data/luoys/projects/cdad/cot_rewriter_grpo add verl/verl/workers/sharding_manager/fsdp_vllm.py)",
       "Bash(git -C /data/luoys/projects/cdad/cot_rewriter_grpo commit -m \"$\\(cat <<''EOF''\ndebug: add more logging for vocab_size mismatch handling\n\n🤖 Generated with [Claude Code]\\(https://claude.com/claude-code\\)\n\nCo-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>\nEOF\n\\)\")",
       "Bash(git -C /data/luoys/projects/cdad/cot_rewriter_grpo log:*)",
-      "Bash(git -C /data/luoys/projects/cdad/cot_rewriter_grpo show:*)"
+      "Bash(git -C /data/luoys/projects/cdad/cot_rewriter_grpo show:*)",
+      "Bash(git -C /data/luoys/projects/cdad/cot_rewriter_grpo verl/verl/experimental/reward/cot_rewriter/combined_reward.py:*)",
+      "Bash(git -C /data/luoys/projects/cdad/cot_rewriter_grpo HEAD verl/verl/experimental/reward/cot_rewriter/combined_reward.py:*)",
+      "Bash(git -C /data/luoys/projects/cdad/cot_rewriter_grpo HEAD~1 verl/verl/experimental/reward/cot_rewriter/combined_reward.py:*)",
+      "Bash(git log:*)"
     ]
   }
 }

@@ -487,6 +487,7 @@ def compute_reward_breakdown_metrics(reward_extra_infos_dict: dict[str, list[Any
         ("useful_rewards", "reward/useful"),  # R_useful: CoT有用程度
         ("logic_rewards", "reward/logic"),
         ("total_rewards", "reward/total"),
+        ("reward_deltas", "raw_logprob_delta"),  # Display name: raw_logprob_delta, Key: reward_deltas
         ("truncation_penalties", "penalty/truncation"),
         ("format_penalties", "penalty/format"),
         ("too_short_penalties", "penalty/too_short"),

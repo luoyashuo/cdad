@@ -719,6 +719,54 @@ def agg_loss(loss_mat: torch.Tensor, loss_mask: torch.Tensor, loss_agg_mode: str
     return loss
 
 
+@register_policy_loss("grpo")
+def compute_policy_loss_grpo(
+    old_log_prob,
+    log_prob,
+    advantages,
+    response_mask,
+    cliprange=None,
+    cliprange_low=None,
+    cliprange_high=None,
+    clip_ratio_c=3.0,
+    loss_agg_mode: str = "token-mean",
+    config=None,  # Required for compatibility with dp_actor.py call signature
+):
+    """
+    Compute policy loss for GRPO (Group Relative Policy Optimization).
+
+    GRPO uses the standard PPO clipped objective with group-based advantages.
+    The key difference from PPO is in the advantage computation (grpo advantage estimator),
+    not the policy loss itself.
+
+    Args:
+        old_log_prob: Log-probabilities under old policy
+        log_prob: Log-probabilities under current policy
+        advantages: Group-relative advantages
+        response_mask: Response mask
+        cliprange: Clipping parameter ε
+        cliprange_low: Lower clip range for dual-clip
+        cliprange_high: Upper clip range for dual-clip
+        clip_ratio_c: Lower bound for dual-clip
+        loss_agg_mode: Aggregation mode
+        config: Algorithm config (unused, for compatibility)
+
+    Returns:
+        Same as compute_policy_loss (PPO clipped objective)
+    """
+    return compute_policy_loss(
+        old_log_prob=old_log_prob,
+        log_prob=log_prob,
+        advantages=advantages,
+        response_mask=response_mask,
+        cliprange=cliprange,
+        cliprange_low=cliprange_low,
+        cliprange_high=cliprange_high,
+        clip_ratio_c=clip_ratio_c,
+        loss_agg_mode=loss_agg_mode,
+    )
+
+
 def compute_policy_loss(
     old_log_prob,
     log_prob,
