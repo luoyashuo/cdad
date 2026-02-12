@@ -1,0 +1,302 @@
+# CoT Rewriter GSPO Training Configuration (vLLM Rollout + SGLang Reward)
+# Hardware: 8 x 80GB A100/H100 GPUs
+# Model: Qwen3-4B Full Parameter Training (无 LoRA)
+#
+# 配置说明：
+#   - Rollout 使用 vLLM（更稳定）
+#   - Reward 计算使用 SGLang（节约 logprob 开销）
+#   - GSPO 算法：Sequence-level Importance Ratio + 极小 clip ratios
+#
+# GSPO vs DAPO/GRPO 关键差异：
+#   - loss_mode: gspo (使用序列级别 importance ratio)
+#   - clip_ratio_low: 0.0003 (GSPO 论文推荐，比 DAPO 的 0.2 小得多)
+#   - clip_ratio_high: 0.0004 (GSPO 论文推荐，比 DAPO 的 0.28 小得多)
+#
+# 路径配置说明：
+#   所有路径都通过环境变量配置，在 scripts/grpo/run_train.sh 中设置
+#   - MODEL_BASE_DIR: 模型根目录
+#   - DATA_BASE_DIR: 数据根目录
+#   - CHECKPOINT_BASE_DIR: 检查点根目录
+#   - PROJECT_BASE_DIR: 项目代码根目录（用于拼接代码路径）
+
+hydra:
+  searchpath:
+    - file://verl/verl/trainer/config
+
+defaults:
+  - ppo_trainer
+  - _self_
+
+# ============ Experiment Configuration ============
+trainer:
+  project_name: cot_rewriter_gspo
+  experiment_name: llama3_8b_gspo_8x80g
+  total_epochs: 1
+  total_training_steps: 2000
+  save_freq: 50
+  test_freq: 50
+  val_before_train: false
+  device: cuda
+  log_freq: 10
+  max_actor_ckpt_to_keep: 3
+  # 检查点保存路径（使用 CHECKPOINT_BASE_DIR 环境变量）
+  default_local_dir: ${oc.env:CHECKPOINT_BASE_DIR}/cot_rewriter_gspo/${trainer.experiment_name}
+  n_gpus_per_node: 8
+  nnodes: 1
+  logger: ["swanlab","console"]
+
+  # ========== Special Tokens ==========
+  # 使用原始模型，不添加特殊 token（在数据层面处理）
+
+  rollout_data_dir: ${oc.env:CHECKPOINT_BASE_DIR}/${trainer.experiment_name}/rollout_data
+  validation_data_dir: ${oc.env:CHECKPOINT_BASE_DIR}/${trainer.experiment_name}/validation_data
+
+data:
+  # 数据路径（使用 DATA_BASE_DIR 环境变量）
+  train_files: ${oc.env:DATA_BASE_DIR}/omnithought_rv_optimal_cot_rewrite_v2/train.jsonl
+  val_files: ${oc.env:DATA_BASE_DIR}/omnithought_rv_optimal_cot_rewrite_v2/val.jsonl
+  train_batch_size: 1
+  val_batch_size: 1
+  gen_batch_size: 1
+  max_prompt_length: 4600
+  max_response_length: 10000
+  return_raw_chat: true
+  dataloader_num_workers: 8
+  reward_fn_key: reward_model
+  prompt_key: problem
+  apply_chat_template_kwargs:
+    enable_thinking: false
+
+  # 使用相对路径（基于 PROJECT_BASE_DIR）
+  custom_cls:
+    path: ${oc.env:PROJECT_BASE_DIR}/verl/verl/utils/dataset/rl_dataset_jsonl.py
+    name: RLHFDatasetJSONL
+
+# ============ Actor/Rollout/Ref Configuration ============
+actor_rollout_ref:
+  hybrid_engine: true
+
+  model:
+    # Actor Model 路径（使用 MODEL_BASE_DIR 环境变量）
+    # 使用原始 Qwen3-4B 模型（不含 dummy token，避免模型"变傻"）
+    path: ${oc.env:MODEL_BASE_DIR}/LLM-Research/Meta-Llama-3-8B-Instruct
+    trust_remote_code: true
+    enable_gradient_checkpointing: true
+    use_remove_padding: false
+    lora_rank: 0  # 全参数训练
+
+  actor:
+    strategy: fsdp
+    ppo_epochs: 1
+
+    # ========== GSPO Policy Loss 配置 ==========
+    # GSPO 使用序列级别的重要性比率，需要极小的 clip ratios
+    policy_loss:
+      loss_mode: gspo  # GSPO 算法核心：sequence-level importance ratio
+
+    # ========== GSPO: 极小 Clip Ratios ==========
+    # GSPO 论文 (Sec. 5.1) 推荐的值
+    # 相比 DAPO 的 0.2/0.28，GSPO 使用更小的 clip ratios
+    clip_ratio: 0.0003
+    clip_ratio_low: 0.0003      # GSPO 论文推荐值
+    clip_ratio_high: 0.0004    # GSPO 论文推荐值
+
+    # ========== GSPO: 序列级别损失聚合 ==========
+    loss_agg_mode: "seq-mean-token-mean"  # GSPO 推荐配置
+
+    entropy_coeff: 0.1
+    grad_clip: 1.0
+    ppo_mini_batch_size: 1
+    ppo_micro_batch_size_per_gpu: 1
+    use_kl_in_reward: false
+    use_kl_loss: false
+    kl_loss_coef: 0.002
+    kl_loss_type: low_var_kl
+    entropy_from_logits_with_chunking: true
+
+    fsdp_config:
+      dtype: bfloat16
+      param_offload: true
+      optimizer_offload: true
+      mixed_precision:
+        param_dtype: bf16
+        reduce_dtype: fp32
+        buffer_dtype: bf16
+      # Llama3 模型的 _no_split_modules 是 None，需要显式配置 wrap_policy
+      wrap_policy:
+        # LlamaDecoderLayer 是 Llama3 的 transformer layer 类
+        transformer_layer_cls_to_wrap: ["LlamaDecoderLayer"]
+        min_num_params: 0
+    optim:
+      lr: 5e-6
+      weight_decay: 0.01
+      lr_scheduler_type: cosine
+      lr_warmup_steps_ratio: 0.1
+      min_lr_ratio: 0.1
+      total_training_steps: -1
+
+  # ========== vLLM Rollout 配置 ==========
+  rollout:
+    name: vllm
+    tensor_model_parallel_size: 4
+    gpu_memory_utilization: 0.65
+    dtype: bfloat16
+    load_format: auto
+    log_prob_micro_batch_size_per_gpu: 1
+    n: 8  # GRPO/GSPO 组大小
+    temperature: 0.6 # qwen3 推荐
+    top_k: 20
+    top_p: 0.95
+    presence_penalty: 1.0
+    prompt_length: 4600
+    response_length: 10000
+    max_num_batched_tokens: 62000
+    max_model_len: 14600
+    enforce_eager: true
+    free_cache_engine: true
+    sleep_level: 1
+    agent:
+      num_workers: 8
+
+  ref:
+    enable: true
+    log_prob_micro_batch_size_per_gpu: 1
+    strategy: fsdp
+    fsdp_config:
+      dtype: bfloat16
+      param_offload: true  # 开启参数 offload 以节省显存
+      mixed_precision:
+        param_dtype: bf16
+        reduce_dtype: fp32
+        buffer_dtype: bf16
+      # Llama3 模型的 _no_split_modules 是 None，需要显式配置 wrap_policy
+      wrap_policy:
+        transformer_layer_cls_to_wrap: ["LlamaDecoderLayer"]
+        min_num_params: 0
+
+# ============ Algorithm Configuration ============
+algorithm:
+  adv_estimator: grpo
+  norm_adv_by_std_in_grpo: true
+  gamma: 1.0
+  lam: 1.0
+  use_kl_in_reward: false
+  kl_penalty: kl
+  kl_ctrl:
+    type: fixed
+    kl_coef: 0.0
+
+  # ========== GSPO 不需要 filter_groups ==========
+  # GSPO 通过序列级别比率自然处理长度差异
+  filter_groups:
+    _target_: verl.trainer.config.FilterGroupsConfig
+    enable: true  # GSPO 不需要动态采样过滤
+    metric: "length_ratio"
+    max_num_gen_batches: -1
+
+# ============ Critic Configuration (GRPO/GSPO doesn't need) ============
+critic:
+  enable: false
+
+# ============ Reward Model Configuration ============
+reward_model:
+  enable: false
+  reward_manager: cot_rewriter
+  offload_rollout_for_reward: true
+  task_runner_num_gpus: 0
+
+  # ========== Reward kwargs (passed to reward manager) ==========
+  reward_kwargs:
+    # ========== Overlong Reward Shaping ==========
+    overlong_buffer_cfg:
+      enable: true
+      len: 3000
+      penalty_factor: 0.5
+      log: false
+    max_resp_len: 10000
+
+# ============ Custom Reward Function Configuration ============
+# 使用 SGLang 进行 reward 计算（节约 logprob 开销）
+custom_reward_function:
+  path: ${oc.env:PROJECT_BASE_DIR}/verl/verl/experimental/reward/cot_rewriter/combined_reward.py
+  name: compute_cot_rewriter_reward
+  reward_kwargs:
+    # ========== Student Model 配置（认知奖励必需）==========
+    student_model_path: /data/luoys/checkpoints/cdad/warmup/qwen3_1_7b_base_sft_rv_optimal_warmup/checkpoint-10974
+    student_tensor_parallel_size: 2
+    student_max_model_len: 12000
+    student_micro_batch_size: 1
+
+    # ========== 奖励计算配置 ==========
+    use_logic_reward: false
+    lambda_useful: 1.0  # R_useful 权重（默认 1.0），设为 0 禁用
+    alpha: 0.01
+    reward_backend: sglang
+    sglang_mem_fraction_static: 0.30
+    cleanup_after_compute: true
+    # ========== Reward 计算模式配置 ==========
+    reward_only_use_logprob: true  # If True, reward = answer_log_prob(rewrite) only (no diff with original)
+    use_useful_reward: false  # Whether to use R_useful in reward calculation (default: true)
+
+    # ========== 阶梯式奖励配置 ==========
+    use_tiered_reward: false
+    tier_step: 0.05
+    tier_reward: 0.1
+
+    # ========== Reward 计算模式配置 ==========
+    reward_mode: logprob  # "ppl" or "logprob": Reward calculation mode
+                            # - "ppl": R_cog = PPL(original) - PPL(rewrite)
+                            # - "logprob": R_cog = answer_log_prob(rewrite) - answer_log_prob(original)
+
+    # ========== 其他配置 ==========
+    print_samples: 2
+    truncation_penalty: 0.0
+    format_penalty: 0.5
+    too_short_threshold_low: 0.2
+    too_short_threshold_high: 0.5
+    too_short_max_penalty: 0.5
+    field_mapping:
+      prompt_key: problem
+      reward_model_key: reward_model
+      question_key: question
+      original_cot_key: original_cot
+      ground_truth_key: ground_truth
+
+# ============ Reward Manager Configuration ============
+reward_manager:
+  source: importlib
+  name: CoTRewriterRewardManager
+  module:
+    path: ${oc.env:PROJECT_BASE_DIR}/verl/verl/experimental/reward/cot_rewriter/reward_manager.py
+
+# ============ Ray Configuration ============
+ray_kwargs:
+  ray_init:
+    _temp_dir: null
+    include_dashboard: false
+    dashboard_host: ""
+    dashboard_port: null
+    ignore_reinit_error: true
+    logging_level: "warning"
+    local_mode: false
+    namespace: "cot_rewriter_gspo"
+    _system_config:
+      enable_metrics_collection: false
+      agent_register_timeout_ms: 120000
+    runtime_env:
+      env_vars:
+        # PYTHONPATH 使用 PROJECT_BASE_DIR
+        PYTHONPATH: "${oc.env:PROJECT_BASE_DIR}/.venv/lib/python3.12/site-packages:${oc.env:PROJECT_BASE_DIR}:${oc.env:PROJECT_BASE_DIR}/src:${oc.env:PROJECT_BASE_DIR}/verl"
+        TOKENIZERS_PARALLELISM: "false"
+        RAY_DEDUP_LOGS: "1"
+        RAY_DASHBOARD_HOST: ""
+        RAY_enable_dashboard: "0"
+        # CUDA_VISIBLE_DEVICES 会自动继承运行时的环境变量，无需显式配置
+        RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO: "0"
+        # 强制使用 vLLM V0 引擎（RUC 服务器兼容性）
+        VLLM_USE_V1: "0"
+        VLLM_ATTENTION_BACKEND: "FLASH_ATTN"
+        # SwanLab 云端同步配置
+        SWANLAB_MODE: "cloud"
+        SWANLAB_API_KEY: "xmtHYzg2Bw5uh1dprg81E"
+  timeline_json_file: null
