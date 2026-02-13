@@ -199,7 +199,7 @@ reward_model:
     overlong_buffer_cfg:
       enable: true
       len: 3000
-      penalty_factor: 0.5
+      penalty_factor: 1.0
       log: false
     max_resp_len: 10000
 
