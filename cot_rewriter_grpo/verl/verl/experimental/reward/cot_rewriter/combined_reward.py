@@ -42,6 +42,7 @@ def extract_rewrite_reasoning(text: str) -> Tuple[str, bool, str]:
     - The text must END with </rewrite_reasoning> (after stripping trailing whitespace)
     - Must have EXACTLY ONE opening tag and ONE closing tag
     - Tags must be properly paired
+    - Must NOT contain "## Problem" (indicates format error)
 
     FALLBACK extraction (when strict format fails):
     - Uses strip().lstrip("<rewrite_reasoning>").rstrip("</rewrite_reasoning>")
@@ -59,6 +60,10 @@ def extract_rewrite_reasoning(text: str) -> Tuple[str, bool, str]:
     """
     if not text:
         return "", False, "empty_text"
+
+    # Check for "## Problem" marker (format error)
+    if "## Problem" in text:
+        return "", False, "contains_problem_marker"
 
     # Define tags
     open_tag = '<rewrite_reasoning>'

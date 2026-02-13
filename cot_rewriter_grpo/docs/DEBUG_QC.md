@@ -10,4 +10,4 @@ source /data/luoys/projects/cdad/cot_rewriter_grpo/.venv/bin/activate
 4. 你不能修改数据的长度， response长度
 5. 参考原版verl逻辑：/data/luoys/projects/verl-0.5.0
 # 问题
-目前会把rewrite和rewrite的delta作为观测值，打印到swanlab中嘛
+/data/luoys/projects/cdad/cot_rewriter_grpo/logs/grpo/phi_4b_grpo_8x80g.log/data/luoys/projects/cdad/cot_rewriter_grpo/logs/grpo/phi_4b_grpo_8x80g.log

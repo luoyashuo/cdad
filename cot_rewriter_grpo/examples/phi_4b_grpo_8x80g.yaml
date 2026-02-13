@@ -111,7 +111,7 @@ actor_rollout_ref:
 
     fsdp_config:
       dtype: bfloat16
-      param_offload: false  # 8x80G 显存充足，关闭 offload 提升性能
+      param_offload: true  # 8x80G 显存充足，关闭 offload 提升性能
       optimizer_offload: false
       mixed_precision:
         param_dtype: bf16
@@ -135,6 +135,7 @@ actor_rollout_ref:
     name: vllm
     tensor_model_parallel_size: 4
     gpu_memory_utilization: 0.65
+    enable_prefix_caching: false  # Disable due to sliding window conflict
     dtype: bfloat16
     load_format: auto
     log_prob_micro_batch_size_per_gpu: 1
@@ -159,7 +160,7 @@ actor_rollout_ref:
     strategy: fsdp
     fsdp_config:
       dtype: bfloat16
-      param_offload: false  # 8x80G 显存充足，关闭 offload
+      param_offload: true  # 8x80G 显存充足，关闭 offload
       mixed_precision:
         param_dtype: bf16
         reduce_dtype: fp32

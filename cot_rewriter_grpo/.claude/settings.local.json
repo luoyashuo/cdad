@@ -50,7 +50,9 @@
       "Bash(git -C /data/luoys/projects/cdad/cot_rewriter_grpo HEAD verl/verl/experimental/reward/cot_rewriter/combined_reward.py:*)",
       "Bash(git -C /data/luoys/projects/cdad/cot_rewriter_grpo HEAD~1 verl/verl/experimental/reward/cot_rewriter/combined_reward.py:*)",
       "Bash(git log:*)",
-      "Bash(echo:*)"
+      "Bash(echo:*)",
+      "Bash(pip install:*)",
+      "Bash(pip index:*)"
     ]
   }
 }
