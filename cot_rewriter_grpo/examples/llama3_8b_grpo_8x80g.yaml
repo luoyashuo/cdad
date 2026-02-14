@@ -1,9 +1,10 @@
 hydra:
   searchpath:
     - file://verl/verl/trainer/config
-  defaults:
-    - ppo_trainer
-    - _self_
+
+defaults:
+  - ppo_trainer
+  - _self_
 
 # ========== 基础训练配置 ==========
 trainer:
@@ -18,11 +19,9 @@ trainer:
   log_freq: 10
   max_actor_ckpt_to_keep: 3
   default_local_dir: ${oc.env:CHECKPOINT_BASE_DIR}/cot_rewriter_grpo/${trainer.experiment_name}
-  n_gpus_per_node: 4
+  n_gpus_per_node: 8
   nnodes: 1
-  logger:
-    - swanlab
-    - console
+  logger: ["swanlab","console"]
   rollout_data_dir: ${oc.env:CHECKPOINT_BASE_DIR}/${trainer.experiment_name}/rollout_data
   validation_data_dir: ${oc.env:CHECKPOINT_BASE_DIR}/${trainer.experiment_name}/validation_data
 
@@ -57,6 +56,45 @@ actor_rollout_ref:
     use_remove_padding: false
     lora_rank: 0
   
+  # Actor 训练配置
+  actor:
+    strategy: fsdp
+    ppo_epochs: 1
+    policy_loss:
+      loss_mode: vanilla  # GRPO 算法
+    clip_ratio: 0.2
+    clip_ratio_low: 0.2
+    clip_ratio_high: 0.28
+    entropy_coeff: 0.001
+    entropy_coeff_lower_bound: 0.1
+    grad_clip: 1.0
+    ppo_mini_batch_size: 1
+    ppo_micro_batch_size_per_gpu: 1
+    use_kl_in_reward: false
+    use_kl_loss: true
+    kl_loss_coef: 0.01
+    kl_loss_type: low_var_kl
+    entropy_from_logits_with_chunking: true
+    fsdp_config:
+      dtype: bfloat16
+      param_offload: true
+      optimizer_offload: true
+      mixed_precision:
+        param_dtype: bf16
+        reduce_dtype: fp32
+        buffer_dtype: bf16
+      # Llama3 模型的 _no_split_modules 是 None，需要显式配置 wrap_policy
+      wrap_policy:
+        transformer_layer_cls_to_wrap: ["LlamaDecoderLayer"]
+        min_num_params: 0
+    optim:
+      lr: 2e-6
+      weight_decay: 0.01
+      lr_scheduler_type: cosine
+      lr_warmup_steps_ratio: 0.1
+      min_lr_ratio: 0.1
+      total_training_steps: -1
+  
   # Rollout (推理) 配置
   rollout:
     name: vllm
@@ -72,39 +110,74 @@ actor_rollout_ref:
     presence_penalty: 1.0
     prompt_length: 4600
     response_length: 10000
-    max_num_batched_tokens: 6200
-  
-  # 验证阶段 Rollout 配置
-  rollout_validation:
+    max_num_batched_tokens: 62000
     max_model_len: 14600
     enforce_eager: true
     free_cache_engine: true
     sleep_level: 1
     agent:
       num_workers: 8
-      ref:
-        enable: true
-        log_prob_micro_batch_size_per_gpu: 1
-        strategy: fsdp
-        fsdp_config:
-          dtype: bfloat16
-          param_offload: true
-          optimizer_offload: true
-  
-  # 验证采样配置
-  validation:
-    do_sample: true
-    n: 8
-    temperature: 0.6
+  # Ref 模型配置 (用于 KL 散度计算)
+  ref:
+    enable: true
+    log_prob_micro_batch_size_per_gpu: 1
+    strategy: fsdp
+    fsdp_config:
+      dtype: bfloat16
+      param_offload: true
+      mixed_precision:
+        param_dtype: bf16
+        reduce_dtype: fp32
+        buffer_dtype: bf16
+      # Llama3 模型的 _no_split_modules 是 None，需要显式配置 wrap_policy
+      wrap_policy:
+        transformer_layer_cls_to_wrap: ["LlamaDecoderLayer"]
+        min_num_params: 0
 
-# ========== 奖励管理器配置 ==========
-reward_manager:
-  cot_rewriter:
-    source: importlib
-    path: ${oc.env:PROJECT_BASE_DIR}/verl/verl/experimental/reward/cot_rewriter/reward_manager.py
-    name: CoTRewriterRewardManager
-    use_kl_in_reward: false
-    offload_rollout_for_reward: true
+# ========== 算法配置 ==========
+algorithm:
+  adv_estimator: grpo
+  norm_adv_by_std_in_group: true
+  gamma: 1.0
+  lam: 1.0
+  use_kl_in_reward: false
+  kl_penalty: kl
+  
+  kl_ctrl:
+    type: fixed
+    kl_coef: 0.0
+  
+  filter_groups:
+    _target_: verl.trainer.config.FilterGroupsConfig
+    enable: false
+    metric: length_ratio
+    max_num_gen_batches: -1
+
+# ========== Critic 配置 (GRPO 不需要) ==========
+critic:
+  enable: false
+
+# ========== Reward Model 配置 ==========
+reward_model:
+  enable: false
+  reward_manager: cot_rewriter
+  offload_rollout_for_reward: true
+  task_runner_num_gpus: 0
+
+  # Reward kwargs (传递给 reward manager)
+  reward_kwargs:
+    # 过长奖励塑形配置
+    overlong_buffer_cfg:
+      enable: true
+      len: 3000
+      penalty_factor: 0.5
+      log: false
+    max_resp_len: 10000
+
+# ========== Ray 分布式配置 ==========
+# Ray 初始化配置（代码直接访问 ray_init，而非 ray_kwargs.ray_init）
+  
+
 
 # ========== 自定义奖励函数配置 ==========
 custom_reward_function:
@@ -192,54 +265,44 @@ custom_reward_function:
     too_long_max_penalty: 0.5         # 最大过长惩罚
     
     penalty_mode: absolute            # 惩罚模式: absolute | relative
+# ============ Reward Manager Configuration ============
+reward_manager:
+  source: importlib
+  name: CoTRewriterRewardManager
+  module:
+    path: ${oc.env:PROJECT_BASE_DIR}/verl/verl/experimental/reward/cot_rewriter/reward_manager.py
 
-# ========== 算法配置 ==========
-algorithm:
-  adv_estimator: gae
-  norm_adv_by_std_in_group: true
-  gamma: 1.0
-  lam: 1.0
-  use_kl_in_reward: false
-  kl_penalty: kl
-  
-  kl_ctrl:
-    type: fixed
-    kl_coef: 0.0
-  
-  filter_groups:
-    _target_: verl.trainer.config.FilterGroupsConfig
-    enable: false
-    metric: length_ratio
-    max_num_gen_batches: -1
-  
-  critic:
-    enable: false
-  
-  reward_model:
-    enable: false
+# ============ Ray Configuration ============
+ray_init:
+  num_cpus: null
+  timeline_json_file: null
 
-# ========== Ray 分布式配置 ==========
 ray_kwargs:
   ray_init:
     _temp_dir: null
     include_dashboard: false
-    dashboard_host: ''
+    dashboard_host: ""
     dashboard_port: null
     ignore_reinit_error: true
-    logging_level: warning
+    logging_level: "warning"
     local_mode: false
-    namespace: cot_rewriter_grpo
+    namespace: "cot_rewriter_grpo"
     _system_config:
       enable_metrics_collection: false
       agent_register_timeout_ms: 120000
     runtime_env:
       env_vars:
-        PYTHONPATH: ${oc.env:PROJECT_BASE_DIR}/.venv/lib/python3.12/site-packages:${oc.env:PROJECT_BASE_DIR}:${oc.env:PROJECT_BASE_DIR}/verl
-        TOKENIZERS_PARALLELISM: 'false'
-        RAY_DEDUP_LOGS: '1'
-        RAY_DASHBOARD_HOST: ''
-        RAY_ENABLE_DASHBOARD: '0'
-        RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO: '0'
-        VLLM_USE_V1: '0'
-        SWANLAB_MODE: 'cloud'
-        SWANLAB_API_KEY: 'xmtHYzg2Bw5uh1dprg81E'
+        # PYTHONPATH 使用 PROJECT_BASE_DIR
+        PYTHONPATH: "${oc.env:PROJECT_BASE_DIR}/.venv/lib/python3.12/site-packages:${oc.env:PROJECT_BASE_DIR}:${oc.env:PROJECT_BASE_DIR}/src:${oc.env:PROJECT_BASE_DIR}/verl"
+        TOKENIZERS_PARALLELISM: "false"
+        RAY_DEDUP_LOGS: "1"
+        RAY_DASHBOARD_HOST: ""
+        RAY_enable_dashboard: "0"
+        # CUDA_VISIBLE_DEVICES 会自动继承运行时的环境变量，无需显式配置
+        RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO: "0"
+        # 强制使用 vLLM V0 引擎（RUC 服务器兼容性）
+        VLLM_USE_V1: "0"
+        VLLM_ATTENTION_BACKEND: "FLASH_ATTN"
+        # SwanLab 云端同步配置
+        SWANLAB_MODE: "cloud"
+        SWANLAB_API_KEY: "xmtHYzg2Bw5uh1dprg81E"

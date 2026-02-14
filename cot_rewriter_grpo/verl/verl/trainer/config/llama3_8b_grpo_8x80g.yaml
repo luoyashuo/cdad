@@ -2,7 +2,8 @@
 defaults:
   - ppo_trainer
   - _self_
-  trainer:
+
+trainer:
     project_name: cot_rewriter_grpo
     experiment_name: llama3_8b_grpo_8x80g_v6
     total_epochs: 1
@@ -80,10 +81,6 @@ defaults:
         do_sample: true
         n: 8
         temperature: 0.6
-    reward_manager:
-      cot_rewriter:
-        use_kl_in_reward: false
-        offload_rollout_for_reward: true
     custom_reward_function:
       path: ${oc.env:PROJECT_BASE_DIR}/verl/verl/experimental/reward/cot_rewriter/combined_reward.py
       name: compute_cot_rewriter_reward
@@ -158,11 +155,14 @@ defaults:
         enable: false
     reward_manager:
       cot_rewriter:
+        use_kl_in_reward: false
+        offload_rollout_for_reward: true
         source: importlib
         path: ${oc.env:PROJECT_BASE_DIR}/verl/verl/experimental/reward/cot_rewriter/reward_manager.py
         name: CoTRewriterRewardManager
     ray_kwargs:
       ray_init:
+        num_cpus: null
         _temp_dir: null
         include_dashboard: false
         dashboard_host: ''
