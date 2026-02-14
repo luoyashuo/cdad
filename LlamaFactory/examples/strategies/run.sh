@@ -62,3 +62,4 @@ echo "  4. /mnt/moonfs/luoyashuo-ksyun/research/cdad/ckpt/strategies/qwen3_1_7b_
 echo ""
 echo "日志位置: $LOG_DIR"
 # nohup bash examples/strategies/run.sh > ../logs/strategies/train_all.log 2>&1 &
+

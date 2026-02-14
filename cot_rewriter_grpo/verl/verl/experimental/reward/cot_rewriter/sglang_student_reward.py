@@ -346,21 +346,30 @@ class SGLangWorkerActor:
 
     def release_memory(self):
         """
-        释放 SGLang 占用的 GPU 显存（保留权重）。
-        使用 release_memory_occupation() 释放 KV Cache
+        完全销毁 SGLang Engine，释放所有 GPU 显存。
 
-        这样可以在 reward 计算完成后释放显存给训练使用，
-        同时保留 SGLang Engine 实例，避免端口冲突。
+        不使用 release_memory_occupation()（有 CUDA 错误 bug），
+        而是直接 shutdown 引擎，释放所有资源。
+        下次使用时通过 _init_engine() 重新创建引擎。
         """
+        # 完全 shutdown 引擎释放所有显存，而不是尝试释放 KV Cache
+        # 因为 release_memory_occupation() 有 bug：RuntimeError: CUDA error: invalid argument
+        # 下次使用时通过 _init_engine() 重新创建引擎
         try:
-            if hasattr(self.engine, "release_memory_occupation"):
-                self.engine.release_memory_occupation()
-                self._memory_released = True
-                logger.debug(f"[SGLangWorkerActor-{self.gpu_ids}] Released KV Cache memory")
-            else:
-                logger.warning(f"[SGLangWorkerActor-{self.gpu_ids}] Engine does not support release_memory_occupation")
+            if self.engine is not None:
+                if hasattr(self.engine, "shutdown"):
+                    self.engine.shutdown()
+                del self.engine
+                self.engine = None
+                self._engine_initialized = False
+                self._memory_released = False
+                logger.debug(f"[SGLangWorkerActor-{self.gpu_ids}] Engine destroyed, all GPU memory released")
         except Exception as e:
-            logger.warning(f"[SGLangWorkerActor-{self.gpu_ids}] Failed to release memory: {e}")
+            logger.warning(f"[SGLangWorkerActor-{self.gpu_ids}] Error during engine shutdown: {e}")
+            self.engine = None
+            self._engine_initialized = False
+            self._memory_released = False
+
 
     def resume_memory(self):
         """

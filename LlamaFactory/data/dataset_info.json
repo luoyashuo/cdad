@@ -844,7 +844,7 @@
     }
   },
   "omnithought_rv_optimal_train": {
-    "file_name": "/mnt/yeesuanAI08/lihaitao/luoys/data/cdad/omnithought_rv_optimal/train.jsonl",
+    "file_name": "/data/luoys/data/cdad/omnithought_rv_optimal/train.jsonl",
     "formatting": "sharegpt",
     "columns": {
       "messages": "conversations"
@@ -857,7 +857,7 @@
     }
   },
   "omnithought_rv_optimal_val": {
-    "file_name": "/mnt/yeesuanAI08/lihaitao/luoys/data/cdad/omnithought_rv_optimal/val.jsonl",
+    "file_name": "/data/luoys/data/cdad/omnithought_rv_optimal/val.jsonl",
     "formatting": "sharegpt",
     "columns": {
       "messages": "conversations"
@@ -965,6 +965,34 @@
       "prompt": "instruction",
       "chosen": "chosen",
       "rejected": "rejected"
+    }
+  },
+  "fsf_grm_train": {
+    "file_name": "/data/luoys/data/cdad/fsf_grm/train.jsonl",
+    "formatting": "sharegpt",
+    "columns": {
+      "messages": "conversations"
+    },
+    "tags": {
+      "role_tag": "role",
+      "content_tag": "content",
+      "user_tag": "user",
+      "assistant_tag": "assistant",
+      "system_tag": "system"
+    }
+  },
+  "fsf_grm_val": {
+    "file_name": "/data/luoys/data/cdad/fsf_grm/val.jsonl",
+    "formatting": "sharegpt",
+    "columns": {
+      "messages": "conversations"
+    },
+    "tags": {
+      "role_tag": "role",
+      "content_tag": "content",
+      "user_tag": "user",
+      "assistant_tag": "assistant",
+      "system_tag": "system"
     }
   }
 }

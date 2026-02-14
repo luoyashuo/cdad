@@ -62,6 +62,7 @@ import random
 from pathlib import Path
 from typing import List, Dict, Any, Tuple, Optional
 from tqdm import tqdm
+from datetime import datetime
 
 
 def parse_arguments():
@@ -121,6 +122,18 @@ Examples:
   max_fsf - 采样 FSF 最高的 thought
   min_fsf - 采样 FSF 最低的 thought
         """,
+    )
+    parser.add_argument(
+        "--tokenizer",
+        type=str,
+        default="/data/luoys/modelscope_cache/models/Qwen/Qwen3-4B",
+        help="Tokenizer 路径，用于计算 token 统计（默认: /data/luoys/modelscope_cache/models/Qwen/Qwen3-4B）",
+    )
+    parser.add_argument(
+        "--max-problem-tokens",
+        type=int,
+        default=4500,
+        help="Problem token 上界，超过此长度的样本将被丢弃（默认: 4500）",
     )
 
     return parser.parse_args()
@@ -193,18 +206,23 @@ def sample_thoughts(
         raise ValueError(f"Unknown sampling strategy: {strategy}")
 
 
-def process_single_file(input_path: str, strategy: str) -> List[Dict[str, Any]]:
+def process_single_file(
+    input_path: str, strategy: str, tokenizer=None, max_problem_tokens: Optional[int] = None
+) -> List[Dict[str, Any]]:
     """
     处理单个输入文件，生成 COT rewrite 训练数据
 
     Args:
         input_path: 输入 JSONL 文件路径
         strategy: 采样策略
+        tokenizer: 用于计算 token 长度的 tokenizer
+        max_problem_tokens: problem token 上界，超过此长度的样本将被丢弃
 
     Returns:
         数据条目列表，每个条目包含 question, thought, solution
     """
     entries = []
+    skipped_count = 0
 
     with open(input_path, "r", encoding="utf-8") as f:
         for line in tqdm(f, desc=f"Processing {Path(input_path).name}"):
@@ -240,28 +258,91 @@ def process_single_file(input_path: str, strategy: str) -> List[Dict[str, Any]]:
 # Reasoning Process: {entry["thought"]}
 # """
                 # v2版本 prompt,强制约束输出格式
-                problem = f"""\
-Task: Rewrite the reasoning process based on the question below.
+#                 problem = f"""\
+# Task: Rewrite the reasoning process based on the question below.
 
-### Question
+# ### Question
+# {entry["question"]}
+
+# ### Original Reasoning
+# {entry["thought"]}
+
+# ### Instructions
+# 1. Output **ONLY** the rewritten reasoning body text.
+# 2. **DO NOT** repeat the Question or the Original Reasoning.
+# 3. **DO NOT** use any headers, labels, or prefixes such as "**Rewritten Reasoning Process:**".
+# 4. The output must be the direct continuation of the header below.
+
+# ### Rewritten Reasoning
+# """ 
+                # v3本 prompt,增加answer
+#                 problem = f"""\
+# You are an expert reasoning assistant. Rewrite the reasoning process to logically lead from the Question to the Answer.
+
+# ## Question
+# {entry["question"]}
+
+# ## Answer
+# {entry["solution"]}
+
+# ## Original Reasoning Process
+# {entry["thought"]}
+
+# ## Instruction
+# Refine the reasoning. Ensure it is step-by-step and strictly valid.
+# output strictly in <rewrite_reasoning> tags.
+
+# For Example:
+# <rewrite_reasoning>
+# [Your Output]
+# </rewrite_reasoning>
+
+# ## Output
+# """
+#             #    v4 prompt,去掉answer，避免hack
+#                 problem = f"""\
+# Rewrite the reasoning process for the following problem based on the Original Reasoning provided.
+# The rewritten reasoning must be strictly enclosed within <rewrite_reasoning> </rewrite_reasoning> tags.
+
+# ## Problem
+# {entry["question"]}
+
+# ## Original Reasoning
+# {entry["thought"]}
+
+# ## Output
+# """
+
+            #    v5 prompt,让模型输出尽量比较长，让模型直接repeat
+                problem = f"""\
+The "Original Reasoning" below demonstrates the reasoning process for the "Problem".
+Restate this reasoning in your own words.
+Output strictly within <rewrite_reasoning> </rewrite_reasoning> tags.
+
+## Problem
 {entry["question"]}
 
-### Original Reasoning
+## Original Reasoning
 {entry["thought"]}
 
-### Instructions
-1. Output **ONLY** the rewritten reasoning body text.
-2. **DO NOT** repeat the Question or the Original Reasoning.
-3. **DO NOT** use any headers, labels, or prefixes such as "**Rewritten Reasoning Process:**".
-4. The output must be the direct continuation of the header below.
-
-### Rewritten Reasoning
-""" 
+## Output
+"""
                 entry["problem"] = problem
+
+                # 检查 problem token 长度
+                if tokenizer is not None and max_problem_tokens is not None:
+                    problem_token_count = len(tokenizer.encode(problem))
+                    if problem_token_count > max_problem_tokens:
+                        skipped_count += 1
+                        continue
+
                 # 如果使用了 FSF 相关策略，添加 fsf 字段用于参考
                 if strategy in ["max_fsf", "min_fsf"]:
                     entry["fsf"] = get_fsf(item)
                 entries.append(entry)
+
+    if skipped_count > 0:
+        print(f"  Skipped {skipped_count} entries with problem tokens > {max_problem_tokens}")
 
     return entries
 
@@ -315,6 +396,60 @@ def print_statistics(entries: List[Dict[str, Any]], name: str = "Dataset", strat
             print(f"  FSF - Avg: {avg_fsf:.4f}, Min: {min_fsf:.4f}, Max: {max_fsf:.4f}")
 
 
+def compute_token_statistics(
+    entries: List[Dict[str, Any]], tokenizer_path: str
+) -> Dict[str, Dict[str, float]]:
+    """
+    计算 problem 和 thought 的 token 统计（max, mean, min）
+
+    Args:
+        entries: 数据条目列表
+        tokenizer_path: tokenizer 路径
+
+    Returns:
+        包含 problem 和 thought token 统计的字典
+    """
+    try:
+        from transformers import AutoTokenizer
+
+        print(f"Loading tokenizer from: {tokenizer_path}")
+        tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
+    except Exception as e:
+        print(f"Warning: Failed to load tokenizer: {e}")
+        print("Skipping token statistics...")
+        return {}
+
+    problem_tokens = []
+    thought_tokens = []
+
+    for entry in tqdm(entries, desc="Computing token statistics"):
+        problem = entry.get("problem", "")
+        thought = entry.get("thought", "")
+
+        if problem:
+            problem_tokens.append(len(tokenizer.encode(problem)))
+        if thought:
+            thought_tokens.append(len(tokenizer.encode(thought)))
+
+    result = {}
+
+    if problem_tokens:
+        result["problem"] = {
+            "max": float(max(problem_tokens)),
+            "mean": float(sum(problem_tokens) / len(problem_tokens)),
+            "min": float(min(problem_tokens)),
+        }
+
+    if thought_tokens:
+        result["thought"] = {
+            "max": float(max(thought_tokens)),
+            "mean": float(sum(thought_tokens) / len(thought_tokens)),
+            "min": float(min(thought_tokens)),
+        }
+
+    return result
+
+
 def save_jsonl(entries: List[Dict[str, Any]], output_path: str):
     """保存数据到 JSONL 文件"""
     # 确保输出目录存在
@@ -331,7 +466,20 @@ def main():
     print(f"Sampling strategy: {args.sampling_strategy}")
     print(f"Train ratio: {args.train_ratio}")
     print(f"Random seed: {args.seed}")
+    print(f"Max problem tokens: {args.max_problem_tokens}")
     print("-" * 50)
+
+    # 加载 tokenizer（用于过滤超长样本）
+    tokenizer = None
+    try:
+        from transformers import AutoTokenizer
+        print(f"Loading tokenizer from: {args.tokenizer}")
+        tokenizer = AutoTokenizer.from_pretrained(args.tokenizer, trust_remote_code=True)
+    except Exception as e:
+        print(f"Warning: Failed to load tokenizer: {e}")
+        print("Will NOT filter by problem token length...")
+        if args.max_problem_tokens != 4500:
+            print(f"Warning: --max-problem-tokens is set to {args.max_problem_tokens}, but filtering is disabled due to missing tokenizer")
 
     # 处理所有输入文件
     all_entries = []
@@ -340,7 +488,9 @@ def main():
             print(f"Warning: Input file {input_path} does not exist, skipping...")
             continue
 
-        entries = process_single_file(input_path, args.sampling_strategy)
+        entries = process_single_file(
+            input_path, args.sampling_strategy, tokenizer, args.max_problem_tokens
+        )
         all_entries.extend(entries)
         print(f"Processed {input_path}: {len(entries)} entries")
 
@@ -375,21 +525,81 @@ def main():
     print(f"  Train: {train_path.name} ({len(train_entries)} entries)")
     print(f"  Val:   {val_path.name} ({len(val_entries)} entries)")
 
-    # 保存配置信息
-    config = {
-        "input_files": args.input,
-        "train_ratio": args.train_ratio,
-        "seed": args.seed,
-        "sampling_strategy": args.sampling_strategy,
-        "total_count": len(all_entries),
-        "train_count": len(train_entries),
-        "val_count": len(val_entries),
+    # 计算 token 统计
+    print(f"\nComputing token statistics...")
+    all_token_stats = compute_token_statistics(all_entries, args.tokenizer)
+    train_token_stats = compute_token_statistics(train_entries, args.tokenizer)
+    val_token_stats = compute_token_statistics(val_entries, args.tokenizer)
+
+    # 打印 token 统计
+    if all_token_stats:
+        print("\nToken Statistics (All Data):")
+        for field, stats in all_token_stats.items():
+            print(f"  {field}: max={stats['max']:.0f}, mean={stats['mean']:.0f}, min={stats['min']:.0f}")
+
+    # 保存配置和统计信息到日志文件
+    log_data = {
+        "timestamp": datetime.now().isoformat(),
+        "config": {
+            "input_files": args.input,
+            "output_dir": str(output_path.absolute()),
+            "train_ratio": args.train_ratio,
+            "seed": args.seed,
+            "sampling_strategy": args.sampling_strategy,
+            "tokenizer": args.tokenizer,
+            "max_problem_tokens": args.max_problem_tokens,
+        },
+        "counts": {
+            "total_count": len(all_entries),
+            "train_count": len(train_entries),
+            "val_count": len(val_entries),
+        },
+        "token_statistics": {
+            "all": all_token_stats,
+            "train": train_token_stats,
+            "val": val_token_stats,
+        },
     }
 
-    config_path = output_path / "config.json"
-    with open(config_path, "w", encoding="utf-8") as f:
-        json.dump(config, f, indent=2, ensure_ascii=False)
-    print(f"  Config: {config_path.name}")
+    # 保存为 JSON 格式
+    log_path = output_path / "build_log.json"
+    with open(log_path, "w", encoding="utf-8") as f:
+        json.dump(log_data, f, indent=2, ensure_ascii=False)
+    print(f"\nLog saved to: {log_path.name}")
+
+    # 保存为可读文本格式
+    text_log_path = output_path / "build_log.txt"
+    with open(text_log_path, "w", encoding="utf-8") as f:
+        f.write("=" * 60 + "\n")
+        f.write("COT Rewrite Dataset Build Log\n")
+        f.write("=" * 60 + "\n\n")
+        f.write(f"Timestamp: {log_data['timestamp']}\n\n")
+
+        f.write("Configuration:\n")
+        f.write("-" * 40 + "\n")
+        for key, value in log_data["config"].items():
+            f.write(f"  {key}: {value}\n")
+        f.write("\n")
+
+        f.write("Data Counts:\n")
+        f.write("-" * 40 + "\n")
+        for key, value in log_data["counts"].items():
+            f.write(f"  {key}: {value}\n")
+        f.write("\n")
+
+        f.write("Token Statistics:\n")
+        f.write("-" * 40 + "\n")
+        for dataset_name, stats in log_data["token_statistics"].items():
+            if stats:
+                f.write(f"\n  [{dataset_name.upper()}]\n")
+                for field, field_stats in stats.items():
+                    f.write(f"    {field}:\n")
+                    f.write(f"      max: {field_stats['max']:.0f}\n")
+                    f.write(f"      mean: {field_stats['mean']:.0f}\n")
+                    f.write(f"      min: {field_stats['min']:.0f}\n")
+        f.write("\n")
+
+    print(f"Text log saved to: {text_log_path.name}")
 
 
 if __name__ == "__main__":
@@ -437,6 +647,36 @@ python3 build_cot_rewrite_dataset.py \
     -o /home/u20240075/luoyashuo/data/cdad/cot_rewrite_max_fsf_v2 \
     --sampling-strategy max_fsf \
     --train-ratio 0.98 \
+    --seed 42
+
+# 采样 FSF 最高的 thought v3
+python3 build_cot_rewrite_dataset.py \
+    -i /data/luoys/data/cdad/omnithought_math_all/train_merge_level1.jsonl \
+       /data/luoys/data/cdad/omnithought_code_all/train_merge_level1.jsonl \
+    -o /data/luoys/data/cdad/cot_rewrite_max_fsf_v3\
+    --sampling-strategy max_fsf \
+    --train-ratio 0.999 \
+    --seed 42
+    
+
+# 采样 FSF 最高的 thought v4
+python3 build_cot_rewrite_dataset.py \
+    -i /data/luoys/data/cdad/omnithought_math_all/train_merge_level1.jsonl \
+       /data/luoys/data/cdad/omnithought_code_all/train_merge_level1.jsonl \
+    -o /data/luoys/data/cdad/cot_rewrite_max_fsf_v4 \
+    --sampling-strategy max_fsf \
+    --train-ratio 0.999 \
+    --seed 42
+    
+# 采样 FSF 最高的 thought v5
+python3 build_cot_rewrite_dataset.py \
+    -i /data/luoys/data/cdad/omnithought_math_all/train_merge_level1.jsonl \
+       /data/luoys/data/cdad/omnithought_code_all/train_merge_level1.jsonl \
+    -o /data/luoys/data/cdad/cot_rewrite_max_fsf_v5 \
+    --sampling-strategy max_fsf \
+    --tokenizer /data/luoys/modelscope_cache/models/Qwen/Qwen3-4B \
+    --max-problem-tokens 4500 \
+    --train-ratio 0.999 \
     --seed 42
 
 # 采样 FSF 最低的 thought

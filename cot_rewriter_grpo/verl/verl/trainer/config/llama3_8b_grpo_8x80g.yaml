@@ -90,7 +90,7 @@ trainer:
         penalty_factor: 1.0
         log: false
         max_resp_len: 10000
-      student_model_path: /data/luoys/checkpoints/cdad/warmup/qwen3_1_7b_base_sft_rv_optimal/checkpoint-10974
+      student_model_path: /data/luoys/checkpoints/cdad/warmup/qwen3_1_7b_base_sft_rv_optimal_warmup/checkpoint-10974
       student_tensor_parallel_size: 2
       student_max_model_len: 12000
       student_micro_batch_size: 1

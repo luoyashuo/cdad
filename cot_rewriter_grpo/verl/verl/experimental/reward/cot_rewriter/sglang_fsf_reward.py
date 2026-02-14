@@ -1,18 +1,15 @@
 """
-SGLang-based FSF Judge with graphviz DOT format parsing.
+FSF (Failure Step Fraction) Judge - SGLang Version
 
-Parses the FSF model's DOT format output to calculate FSF:
-- FSF = failed_nodes / total_nodes
-- failed_nodes are nodes with fillcolor=lightpink
-- R_logic = 1 if FSF(rewrite) < FSF(original) else 0
+Computes FSF = failed_nodes / total_nodes from DOT graph format.
+Failed nodes are those with fillcolor=lightpink.
 
-Supports:
-- Custom temperature, top_k, top_p
-- Auto-detects GPUs and creates multiple instances for data parallelism
-- On-demand creation and destruction
-- Skips samples with unparseable output (returns None)
+Uses Ray actors for multi-GPU parallelism. Supports two modes:
+1. TP=1: Each GPU runs a separate SGLang instance (Data Parallelism)
+2. TP>1: Multiple GPUs share one SGLang instance (Tensor Parallelism)
 """
 
+import asyncio
 import os
 import re
 import time
@@ -21,168 +18,189 @@ from typing import Any, Dict, List, Optional, Tuple
 import ray
 import torch
 
+from verl.experimental.reward.cot_rewriter.training_logger import get_logger
+from transformers import AutoTokenizer
 
-def get_nvidia_smi_memory_for_gpu(gpu_idx: int) -> str:
-    """Get GPU memory usage from nvidia-smi for a specific GPU."""
-    try:
-        result = subprocess.run(
-            ['nvidia-smi', '--query-gpu=index,memory.used,memory.total',
-             '--format=csv,noheader,nounits'],
-            capture_output=True, text=True, timeout=5
-        )
-        lines = result.stdout.strip().split('\n')
-        for line in lines:
-            parts = line.split(',')
-            if len(parts) >= 3 and int(parts[0].strip()) == gpu_idx:
-                used_mb = int(parts[1].strip())
-                total_mb = int(parts[2].strip())
-                used_gb = used_mb / 1024
-                total_gb = total_mb / 1024
-                return f"GPU {gpu_idx}: {used_gb:.1f}GB / {total_gb:.1f}GB ({used_mb}MB used)"
-        return f"GPU {gpu_idx}: not found"
-    except Exception as e:
-        return f"GPU {gpu_idx}: error - {e}"
+# Logger for SGLang FSF reward
+logger = get_logger("sglang_fsf_reward")
 
 
-@ray.remote(num_cpus=1)
+@ray.remote
 class SGLangFSFActor:
     """
-    Ray Actor for SGLang FSF Judge computation.
-
-    Each actor runs SGLang on a separate GPU (or group of GPUs for TP).
+    Ray actor that runs FSF Judge SGLang on one or more GPUs.
+    
+    Generates DOT format graph and parses FSF from it.
     """
 
     def __init__(
         self,
         model_path: str,
-        gpu_ids: List[int],
-        logical_gpu_ids: List[int],
-        tensor_parallel_size: int,
-        dtype: str,
-        gpu_memory_utilization: float,
-        max_model_len: int,
-        temperature: float,
-        top_k: int,
-        top_p: float,
-        max_new_tokens: int,
+        gpu_ids: List[int],           # Physical GPU IDs (e.g., [0, 1] for TP=2)
+        logical_gpu_ids: List[int],   # Logical GPU IDs within CUDA_VISIBLE_DEVICES
+        tensor_parallel_size: int = 1,
+        mem_fraction_static: float = 0.4,
+        dtype: str = "float16",
+        max_model_len: int = 8192,
+        temperature: float = 0.6,
+        top_k: int = 20,
+        top_p: float = 0.95,
+        max_new_tokens: int = 8000,
+        base_port: int = 40000,  # Base port for this worker
     ):
-        """
-        Initialize SGLang FSF Actor.
-
-        Args:
-            model_path: Path to FSF Judge Model
-            gpu_ids: Physical GPU IDs (e.g., [0, 1] for TP=2)
-            logical_gpu_ids: Logical GPU IDs within CUDA_VISIBLE_DEVICES
-            tensor_parallel_size: TP size (must equal len(gpu_ids))
-            dtype: Data type (float16 or bfloat16)
-            gpu_memory_utilization: GPU memory fraction for SGLang
-            max_model_len: Maximum context length
-            temperature: Sampling temperature
-            top_k: Sampling top-k
-            top_p: Sampling top-p (nucleus)
-            max_new_tokens: Maximum tokens to generate
-        """
-        import os
+        import subprocess
 
         self.model_path = model_path
         self.gpu_ids = gpu_ids
-        self.logical_gpu_ids = logical_gpu_ids
         self.tensor_parallel_size = tensor_parallel_size
+        self.mem_fraction_static = mem_fraction_static
         self.dtype = dtype
-        self.gpu_memory_utilization = gpu_memory_utilization
         self.max_model_len = max_model_len
         self.temperature = temperature
         self.top_k = top_k
         self.top_p = top_p
         self.max_new_tokens = max_new_tokens
-
+        self._base_port = base_port
         worker_name = f"SGLangFSFActor-{gpu_ids}"
 
-        # Set CUDA_VISIBLE_DEVICES for this actor
+        # Set CUDA_VISIBLE_DEVICES
         parent_cuda_devices = os.environ.get("CUDA_VISIBLE_DEVICES", "")
-
-        # e.g., logical_gpu_ids=[0, 1] -> "0,1" for TP=2
         cuda_devices_str = ",".join(map(str, logical_gpu_ids))
         os.environ["CUDA_VISIBLE_DEVICES"] = cuda_devices_str
 
-        # Log memory info before creating engine
+        # Log GPU memory status
+        def get_nvidia_smi_memory_for_gpu(gpu_idx):
+            try:
+                result = subprocess.run(
+                    ['nvidia-smi', '--query-gpu=index,memory.used,memory.total', '--format=csv,noheader,nounits'],
+                    capture_output=True, text=True, timeout=5
+                )
+                lines = result.stdout.strip().split('\n')
+                for line in lines:
+                    parts = line.split(',')
+                    if len(parts) >= 3 and int(parts[0].strip()) == gpu_idx:
+                        used_mb = int(parts[1].strip())
+                        total_mb = int(parts[2].strip())
+                        used_gb = used_mb / 1024
+                        total_gb = total_mb / 1024
+                        return f"GPU {gpu_idx}: {used_gb:.1f}GB / {total_gb:.1f}GB"
+                return f"GPU {gpu_idx}: not found"
+            except Exception as e:
+                return f"nvidia-smi error: {e}"
+
         memory_info = ", ".join([get_nvidia_smi_memory_for_gpu(gpu) for gpu in gpu_ids])
         logger.info(f"[{worker_name}] GPU Memory: {memory_info}")
 
-        logger.info(f"[{worker_name}] Initializing...")
-        logger.info(f"  Model Path: {model_path}")
-        logger.info(f"  GPUs: {gpu_ids} (logical: {logical_gpu_ids})")
-        logger.info(f"  TP Size: {tensor_parallel_size}")
-        logger.info(f"  GPU Memory Utilization: {gpu_memory_utilization}")
-        logger.info(f"  Sampling: temp={temperature}, top_k={top_k}, top_p={top_p}")
-        logger.info(f"  Max New Tokens: {max_new_tokens}")
+        # Create event loop for SGLang
+        try:
+            self._loop = asyncio.get_running_loop()
+        except RuntimeError:
+            self._loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(self._loop)
 
-        # Load tokenizer (always keep in memory)
-        from transformers import AutoTokenizer
-        logger.info(f"[{worker_name}] Loading tokenizer...")
+        # Load tokenizer
         self.tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
-
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
-        # Engine will be created on first use
+        # Engine will be created lazily
         self.engine = None
         self._engine_initialized = False
+        self._memory_released = False
 
-    def _create_engine(self):
-        """Create SGLang Engine."""
-        import os
+        logger.info(f"[{worker_name}] Actor created, engine will be initialized on first use")
 
-        # CUDA_VISIBLE_DEVICES already set in __init__
-        from sglang import Engine
+    def _init_engine(self):
+        """Initialize SGLang Engine on demand."""
+        if self._engine_initialized:
+            return
+
+        import sglang as sgl
 
         logger.info(f"[SGLangFSFActor-{self.gpu_ids}] Creating SGLang Engine...")
-
         start_time = time.time()
-        self.engine = Engine(
+
+        self.engine = sgl.Engine(
             model_path=self.model_path,
             tp_size=self.tensor_parallel_size,
-            mem_fraction_static=self.gpu_memory_utilization,
+            mem_fraction_static=self.mem_fraction_static,
             dtype=self.dtype,
-            context_length=self.max_model_len,
             trust_remote_code=True,
+            enable_memory_saver=True,
+            port=self._base_port,
         )
 
+        # Re-create event loop after Engine creation
+        self._loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self._loop)
+
         elapsed = time.time() - start_time
-        logger.info(f"[SGLangFSFActor-{self.gpu_ids}] Engine created in {elapsed:.2f}s")
         self._engine_initialized = True
+        logger.info(f"[SGLangFSFActor-{self.gpu_ids}] Engine created in {elapsed:.2f}s")
 
-    def _destroy_engine(self):
-        """Destroy SGLang Engine to release GPU memory."""
-        if self.engine is not None:
-            logger.info(f"[SGLangFSFActor-{self.gpu_ids}] Destroying SGLang Engine...")
-            try:
-                self.engine.shutdown()
-            except Exception as e:
-                logger.warning(f"[SGLangFSFActor-{self.gpu_ids}] Error during shutdown: {e}")
-            self.engine = None
-            self._engine_initialized = False
+    def _ensure_event_loop(self):
+        """Ensure an event loop exists for the current thread."""
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            if not hasattr(self, '_loop') or self._loop.is_closed():
+                self._loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(self._loop)
 
-            import gc
-            gc.collect()
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
+    def _build_fsf_prompt(self, reasoning: str) -> str:
+        """
+        Build FSF prompt with proper format.
+        
+        Prompt Template (from build_fsf_judge_graph.py):
+        - System: "You are a helpful assistant that converts reasoning traces into Graphviz diagrams."
+        - User: GRAPH_GENERATION_PROMPT + Reasoning trace
+        
+        The FSF model will generate a DOT format graph representing the reasoning process.
+        """
+        GRAPH_GENERATION_PROMPT = """Parse the reasoning trace into a Graphviz diagram. Focus on these essentials:
 
-            logger.info(f"[SGLangFSFActor-{self.gpu_ids}] Engine destroyed")
+Node Rules:
+- One node per distinct reasoning step
+- 'fillcolor=lightblue': Successful reasoning steps
+- 'fillcolor=lightpink': Failed attempts
+
+Edge Rules:
+- Connect node A → node B if the information or insight from A is actually used to construct the reasoning in B; branch new attempts from their starting ancestor, not from dead ends.
+
+Requirements:
+- Use 'rankdir=TB'
+- Include ALL attempts (including failures), do not miss any steps in the reasoning.
+- ALWAYS start with a "problem statement" node
+- ALWAYS end with a "final answer" node
+- Do NOT reorder or reorganize the reasoning flow
+
+Generate complete Graphviz DOT code in dot blocks."""
+
+        messages = [
+            {
+                "role": "system",
+                "content": "You are a helpful assistant that converts reasoning traces into Graphviz diagrams.",
+            },
+            {
+                "role": "user",
+                "content": f"{GRAPH_GENERATION_PROMPT}\n\nReasoning trace:\n{reasoning}",
+            },
+        ]
+        prompt = self.tokenizer.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True
+        )
+        return prompt
 
     def _parse_fsf_from_dot(self, dot_output: str) -> Optional[float]:
         """
         Parse FSF value from DOT graph format output.
-
-        Following the logic in analyze_rg_fsf.py:
-        1. Use pydot to parse DOT format
-        2. Extract nodes and edges from graph
-        3. Count failed nodes (nodes with fillcolor=lightpink)
-        4. Calculate FSF = failed_nodes / total_nodes
-
+        
+        FSF = failed_nodes / total_nodes
+        Failed nodes have fillcolor=lightpink
+        
         Args:
-            dot_output: Raw model output text (may contain DOT format)
-
+            dot_output: Raw model output text (DOT format)
+            
         Returns:
             FSF value between 0.0 and 1.0, or None if parsing fails
         """
@@ -190,19 +208,15 @@ class SGLangFSFActor:
             import pydot
 
             # Try to find DOT graph in output
-            # DOT format starts with "digraph" or "strict digraph"
             dot_match = re.search(r'(?:strict\s+)?digraph\s+.*?(?:\n|\r|\{)', dot_output, re.DOTALL)
             if not dot_match:
-                # Try to find any {...} block that might be DOT-like
                 dot_match = re.search(r'\{[^}]*\}', dot_output, re.DOTALL)
 
             if not dot_match:
-                logger.warning(f"[SGLangFSFActor-{self.gpu_ids}] No DOT format found in output")
+                logger.warning(f"[SGLangFSFActor-{self.gpu_ids}] No DOT format found")
                 return None
 
             dot_code = dot_match.group(0) if dot_match.lastindex else dot_output
-
-            # Parse DOT format
             graphs = pydot.graph_from_dot_data(dot_code)
 
             if not graphs or len(graphs) == 0:
@@ -211,17 +225,16 @@ class SGLangFSFActor:
 
             graph = graphs[0]
             nodes = graph.get_nodes() or []
-            edges = graph.get_edges() or []
-
+            
             node_count = len(nodes)
-            edge_count = len(edges)
+            if node_count == 0:
+                return 0.0
 
-            # Count failed nodes (nodes with fillcolor=lightpink)
+            # Count failed nodes (fillcolor=lightpink)
             failed_nodes = 0
             for node in nodes:
                 if node is None:
                     continue
-                # Get node's fillcolor attribute
                 try:
                     fillcolor = node.get('fillcolor')
                     if fillcolor is not None:
@@ -229,547 +242,510 @@ class SGLangFSFActor:
                         if fillcolor_str == 'lightpink':
                             failed_nodes += 1
                 except:
-                    # If get fails, node might not have fillcolor attribute
                     continue
 
-            # Compute FSF: failed_nodes / total_nodes
-            fsf = failed_nodes / max(node_count, 1) if node_count > 0 else 0.0
-
-            logger.debug(
-                f"[SGLangFSFActor-{self.gpu_ids}] Parsed DOT: nodes={node_count}, "
-                f"edges={edge_count}, failed_nodes={failed_nodes}, fsf={fsf:.4f}"
-            )
-
+            fsf = failed_nodes / node_count
+            logger.debug(f"[SGLangFSFActor-{self.gpu_ids}] FSF={fsf:.4f} ({failed_nodes}/{node_count})")
             return fsf
 
         except ImportError:
-            logger.warning(f"[SGLangFSFActor-{self.gpu_ids}] pydot not installed, using fallback parsing")
-            return self._parse_fsf_fallback(dot_output)
-        except Exception as e:
-            logger.warning(f"[SGLangFSFActor-{self.gpu_ids}] Error parsing DOT format: {e}")
-            return self._parse_fsf_fallback(dot_output)
-
-    def _parse_fsf_fallback(self, output: str) -> Optional[float]:
-        """
-        Fallback FSF parsing when DOT format is not available.
-
-        Tries to extract FSF from:
-        1. JSON format with "fsf" key
-        2. Plain text pattern matching "0.xx" format
-
-        Args:
-            output: Model output text
-
-        Returns:
-            FSF value between 0.0 and 1.0, or None if parsing fails
-        """
-        try:
-            # Try to find JSON with fsf field
-            json_match = re.search(r'\{[^{}]*"fsf"\s*:\s*([\d.]+)[^{}]*\}', output)
-            if json_match:
-                value = float(json_match.group(1))
-                if 0.0 <= value <= 1.0:
-                    return value
-
-            # Try to parse as complete JSON
-            import json
-            try:
-                data = json.loads(output.strip())
-                if "fsf" in data:
-                    value = float(data["fsf"])
-                    if 0.0 <= value <= 1.0:
-                        return value
-            except json.JSONDecodeError:
-                pass
-
-            # Try to extract any number that looks like FSF (0.00 - 1.00)
-            # Pattern: "0.xx" where xx are digits
-            fsf_match = re.search(r'\b0\.\d{2,2}\b', output)
-            if fsf_match:
-                value = float(fsf_match.group(0))
-                if 0.0 <= value <= 1.0:
-                    return value
-
-            logger.debug(f"[SGLangFSFActor-{self.gpu_ids}] Fallback parsing found no valid FSF")
+            logger.warning(f"[SGLangFSFActor-{self.gpu_ids}] pydot not installed")
             return None
-
         except Exception as e:
-            logger.warning(f"[SGLangFSFActor-{self.gpu_ids}] Fallback parsing error: {e}")
+            logger.warning(f"[SGLangFSFActor-{self.gpu_ids}] DOT parsing error: {e}")
             return None
-
-    def _build_fsf_prompt(self, question: str, reasoning: str) -> str:
-        """
-        Build FSF prompt with proper format.
-
-        Args:
-            question: Problem text
-            reasoning: CoT reasoning to evaluate
-
-        Returns:
-            Formatted prompt string
-        """
-        # Use build_cot_rewrite_from_sharegpt.py message format
-        messages = [
-            {"role": "user", "content": question},
-            {"role": "assistant", "content": "", "reasoning_content": reasoning}
-        ]
-        prompt = self.tokenizer.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True
-        )
-        return prompt
 
     def compute_fsf_batch(
         self,
-        questions: List[str],
         reasonings: List[str],
-    ) -> List[Optional[float]]:
+        micro_batch_size: int = 4,
+        return_dot_outputs: bool = False,  # Whether to return raw DOT outputs
+    ) -> List[Optional[float]] | Tuple[List[Optional[float]], List[Optional[str]]]:
         """
-        Batch computation of FSF values.
+        Batch computation of FSF values with micro-batching to avoid OOM.
 
         Args:
-            questions: List of problem texts
-            reasonings: List of reasoning texts
+            reasonings: List of reasoning texts to evaluate
+            micro_batch_size: Max number of prompts per SGLang call (to control memory)
+            return_dot_outputs: If True, return (fsf_values, dot_outputs) tuple
 
         Returns:
-            List of FSF values (None for unparseable outputs)
+            If return_dot_outputs=False: List of FSF values (None for unparseable outputs)
+            If return_dot_outputs=True: Tuple of (fsf_values, dot_outputs)
         """
-        from sglang.srt.sampling_params import SamplingParams
+        # Initialize engine on first use
+        self._init_engine()
+        self._ensure_event_loop()
 
-        # Build all prompts
+        # Build prompts
         prompts = []
-        for question, reasoning in zip(questions, reasonings):
+        for reasoning in reasonings:
+            # Truncate long reasoning to avoid OOM
             reasoning_truncated = reasoning[:3000] if len(reasoning) > 3000 else reasoning
-            prompt = self._build_fsf_prompt(question, reasoning_truncated)
+            prompt = self._build_fsf_prompt(reasoning_truncated)
             prompts.append(prompt)
 
-        # Batch generate
-        sampling_params = SamplingParams(
-            max_new_tokens=self.max_new_tokens,
-            temperature=self.temperature,
-            top_k=self.top_k,
-            top_p=self.top_p,
-        )
+        # Process in micro-batches to avoid OOM
+        fsf_values = []
+        dot_outputs = [] if return_dot_outputs else None
+        for i in range(0, len(prompts), micro_batch_size):
+            batch_prompts = prompts[i:i + micro_batch_size]
 
-        try:
-            outputs = self.engine.generate(prompts, sampling_params)
+            try:
+                outputs = self.engine.generate(
+                    prompt=batch_prompts,
+                    sampling_params={
+                        "max_new_tokens": self.max_new_tokens,
+                        "temperature": self.temperature,
+                        "top_k": self.top_k,
+                        "top_p": self.top_p,
+                    },
+                )
 
-            fsf_values = []
-            for output in outputs:
-                if isinstance(output, dict):
-                    generated_text = output.get("text", "")
-                else:
-                    generated_text = str(output)
-                fsf_values.append(self._parse_fsf_from_dot(generated_text))
+                # Parse FSF from each output
+                for output in outputs:
+                    if isinstance(output, dict):
+                        generated_text = output.get("text", "")
+                    else:
+                        generated_text = str(output)
+                    fsf_values.append(self._parse_fsf_from_dot(generated_text))
+                    if return_dot_outputs:
+                        dot_outputs.append(generated_text)
 
-            return fsf_values
+            except Exception as e:
+                logger.error(f"[SGLangFSFActor-{self.gpu_ids}] Micro-batch compute error at batch {i}: {e}")
+                # Fill remaining with None for this batch
+                remaining = len(batch_prompts)
+                fsf_values.extend([None] * remaining)
+                if return_dot_outputs:
+                    dot_outputs.extend([None] * remaining)
 
-        except Exception as e:
-            logger.error(f"[SGLangFSFActor-{self.gpu_ids}] Batch compute error: {e}")
-            return [None] * len(reasonings)
+        if return_dot_outputs:
+            return fsf_values, dot_outputs
+        return fsf_values
 
-    def cleanup(self):
-        """Release KV Cache memory, keep weights and engine instance."""
-        if self.engine is None:
+    def release_memory(self):
+        """
+        完全销毁 SGLang Engine，释放所有 GPU 显存。
+
+        不使用 release_memory_occupation()（有 CUDA 错误 bug），
+        而是直接 shutdown 引擎，释放所有资源。
+        下次使用时通过 _init_engine() 重新创建引擎。
+        """
+        if not self._engine_initialized:
             return
 
+        # 完全 shutdown 引擎释放所有显存，而不是尝试释放 KV Cache
+        # 因为 release_memory_occupation() 有 bug：RuntimeError: CUDA error: invalid argument
         try:
-            logger.info(f"[SGLangFSFActor-{self.gpu_ids}] Releasing KV Cache memory...")
-            # Check if release_memory_occupation method exists
-            if hasattr(self.engine, 'release_memory_occupation'):
-                self.engine.release_memory_occupation()
-                logger.info(f"[SGLangFSFActor-{self.gpu_ids}] KV Cache memory released")
-            else:
-                logger.warning(f"[SGLangFSFActor-{self.gpu_ids}] Engine does not support release_memory_occupation")
+            if self.engine is not None:
+                if hasattr(self.engine, "shutdown"):
+                    self.engine.shutdown()
+                del self.engine
+                self.engine = None
+                self._engine_initialized = False
+                self._memory_released = False
+                logger.debug(f"[SGLangFSFActor-{self.gpu_ids}] Engine destroyed, all GPU memory released")
         except Exception as e:
-            logger.warning(f"[SGLangFSFActor-{self.gpu_ids}] Failed to release memory: {e}")
+            logger.warning(f"[SGLangFSFActor-{self.gpu_ids}] Error during engine shutdown: {e}")
+            self.engine = None
+            self._engine_initialized = False
+            self._memory_released = False
 
-    def resume(self):
-        """Resume KV Cache memory after engine is created."""
-        if self.engine is None:
-            logger.debug(f"[SGLangFSFActor-{self.gpu_ids}] Memory not resumed, skipping")
+
+    def resume_memory(self):
+        """Resume KV Cache memory."""
+        if not self._memory_released or not self._engine_initialized:
             return
-
+        
         try:
-            if hasattr(self.engine, 'resume_memory_occupation'):
+            if hasattr(self.engine, "resume_memory_occupation"):
                 self.engine.resume_memory_occupation()
-                logger.debug(f"[SGLangFSFActor-{self.gpu_ids}] Resumed KV Cache memory")
-            else:
-                logger.warning(f"[SGLangFSFActor-{self.gpu_ids}] Engine does not support resume_memory_occupation")
+                self._memory_released = False
+                logger.debug(f"[SGLangFSFActor-{self.gpu_ids}] Resumed KV Cache")
         except Exception as e:
             logger.warning(f"[SGLangFSFActor-{self.gpu_ids}] Failed to resume memory: {e}")
 
     def shutdown(self):
-        """Shutdown the engine and release resources."""
-        logger.info(f"[SGLangFSFActor-{self.gpu_ids}] Starting shutdown...")
-
+        """Shutdown the engine and release all resources."""
         try:
-            if self.engine is not None:
+            if hasattr(self.engine, "shutdown"):
                 self.engine.shutdown()
-        except Exception as e:
-            logger.warning(f"[SGLangFSFActor-{self.gpu_ids}] Error during shutdown: {e}")
-
-        import gc
-        gc.collect()
-        if torch.cuda.is_available():
+            del self.engine
+            self._engine_initialized = False
+            import gc
+            gc.collect()
             torch.cuda.empty_cache()
+            logger.info(f"[SGLangFSFActor-{self.gpu_ids}] Shutdown complete")
+        except Exception as e:
+            logger.warning(f"[SGLangFSFActor-{self.gpu_ids}] Shutdown error: {e}")
 
-        logger.info(f"[SGLangFSFActor-{self.gpu_ids}] Shutdown complete")
 
-
-class SGLangFSFJudge:
+class SGLangFSFClient:
     """
-    SGLang-based FSF Judge with multi-instance data parallelism.
-
-    This class manages multiple Ray actors for parallel FSF computation.
+    Multi-GPU SGLang-based FSF Judge Client using Ray actors.
+    
     Similar to SGLangStudentRewardClient architecture.
+    Computes FSF (Failure Step Fraction) from DOT graph format.
+    
+    FSF = failed_nodes / total_nodes
+    R_logic = 1 if FSF(rewrite) < FSF(original) else 0
     """
 
     def __init__(
         self,
-        model_path: str = "./models/Qwen3-4B",
-        dtype: str = "float16",
-        gpu_memory_utilization: float = 0.4,
-        max_model_len: int = 8192,
+        model_path: str,
         tensor_parallel_size: int = 1,
+        mem_fraction_static: float = 0.4,
+        dtype: str = "float16",
+        max_model_len: int = 8192,
+        devices: Optional[List[str]] = None,
         temperature: float = 0.6,
         top_k: int = 20,
         top_p: float = 0.95,
         max_new_tokens: int = 8000,
+        micro_batch_size: int = 4,  # Micro batch size to avoid OOM
     ):
         """
-        Initialize Multi-GPU SGLang FSF Judge with Ray actors.
-
+        Initialize Multi-GPU SGLang FSF Judge Client.
+        
         Args:
             model_path: Path to FSF Judge Model
+            tensor_parallel_size: TP size per SGLang instance
+            mem_fraction_static: GPU memory fraction
             dtype: Data type (float16 or bfloat16)
-            gpu_memory_utilization: GPU memory fraction for SGLang
             max_model_len: Maximum context length
-            tensor_parallel_size: TP size per SGLang instance.
-                - TP=1: Each GPU runs independent SGLang (Data Parallelism)
-                - TP=2: Every 2 GPUs share one SGLang (model sharded)
-                - TP=4: Every 4 GPUs share one SGLang
+            devices: List of CUDA devices (auto-detected if None)
             temperature: Sampling temperature
             top_k: Sampling top-k
-            top_p: Sampling top-p (nucleus)
-            max_new_tokens: Maximum tokens to generate
+            top_p: Sampling top-p
+            max_new_tokens: Max tokens to generate
+            micro_batch_size: Micro batch size per worker to avoid OOM (default: 4)
         """
         self.model_path = model_path
-        self.dtype = dtype
-        self.gpu_memory_utilization = gpu_memory_utilization
-        self.max_model_len = max_model_len
         self.tensor_parallel_size = tensor_parallel_size
+        self.mem_fraction_static = mem_fraction_static
+        self.dtype = dtype
+        self.max_model_len = max_model_len
         self.temperature = temperature
         self.top_k = top_k
         self.top_p = top_p
         self.max_new_tokens = max_new_tokens
+        self.micro_batch_size = micro_batch_size
 
         # Auto-detect devices
-        num_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 0
-        if num_gpus == 0:
-            raise RuntimeError("No CUDA devices available")
+        if devices is None:
+            num_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 0
+            devices = [f"cuda:{i}" for i in range(num_gpus)] if num_gpus > 0 else []
+        self.devices = devices
+        self.num_gpus = len(devices)
+        self.gpu_ids = [int(d.split(":")[-1]) for d in devices]
 
-        # Calculate number of actors based on TP size
-        # num_actors = num_gpus / tensor_parallel_size
-        assert num_gpus >= tensor_parallel_size, \
-            f"num_gpus ({num_gpus}) must be >= tensor_parallel_size ({tensor_parallel_size})"
-        assert num_gpus % tensor_parallel_size == 0, \
-            f"num_gpus ({num_gpus}) must be divisible by tensor_parallel_size ({tensor_parallel_size})"
-        self.num_actors = num_gpus // tensor_parallel_size
+        # Calculate number of actors
+        assert self.num_gpus >= tensor_parallel_size, \
+            f"num_gpus ({self.num_gpus}) must be >= tensor_parallel_size ({tensor_parallel_size})"
+        assert self.num_gpus % tensor_parallel_size == 0, \
+            f"num_gpus ({self.num_gpus}) must be divisible by tensor_parallel_size ({tensor_parallel_size})"
+        self.num_actors = self.num_gpus // tensor_parallel_size
 
-        # Assign GPUs to actors
-        # e.g., gpu_ids=[0,1,2,3], TP=2 -> [[0,1], [2,3]]
-        self.gpu_ids = [int(d.split(":")[-1]) for d in [f"cuda:{i}" for i in range(num_gpus)]]
-
-        # Group GPUs for each actor
-        gpu_groups = []
-        for i in range(self.num_actors):
-            group = self.gpu_ids[i * self.tensor_parallel_size : (i + 1) * self.tensor_parallel_size]
-            gpu_groups.append(group)
-        self.gpu_groups = gpu_groups
-
-        logger.info(f"[SGLangFSFJudge] Initializing Multi-Instance FSF Judge (DOT parser)")
-        logger.info(f"  Model Path: {model_path}")
-        logger.info(f"  Total GPUs: {num_gpus}, Actors: {self.num_actors}, TP per actor: {tensor_parallel_size}")
-        logger.info(f"  GPU groups: {self.gpu_groups}")
-        logger.info(f"  GPU Memory Utilization: {gpu_memory_utilization}")
-        logger.info(f"  Sampling: temp={temperature}, top_k={top_k}, top_p={top_p}")
-
-        # Load tokenizer once (shared by all actors)
-        from transformers import AutoTokenizer
-        logger.info(f"[SGLangFSFJudge] Loading tokenizer from {model_path}...")
-        self.tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
-
-        if self.tokenizer.pad_token is None:
-            self.tokenizer.pad_token = self.tokenizer.eos_token
-
-        # Create Ray actors
         self.workers: List[ray.actor.ActorHandle] = []
+        self.tokenizer = None
         self._initialized = False
 
-    def _build_fsf_prompt(self, question: str, reasoning: str) -> str:
-        """
-        Build FSF prompt with proper format.
-
-        Args:
-            question: Problem text
-            reasoning: CoT reasoning to evaluate
-
-        Returns:
-            Formatted prompt string
-        """
-        messages = [
-            {"role": "user", "content": question},
-            {"role": "assistant", "content": "", "reasoning_content": reasoning}
-        ]
-        prompt = self.tokenizer.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True
-        )
-        return prompt
-
-    def _split_into_chunks(self, items: List, num_chunks: int) -> List[List]:
-        """Split items into roughly equal chunks."""
-        if num_chunks <= 0:
-            num_chunks = 1
-
-        chunk_size = max(1, len(items) // num_chunks)
-        chunks = []
-        for i in range(num_chunks):
-            start = i * chunk_size
-            if i == num_chunks - 1:
-                end = min(start + chunk_size, len(items))
-            else:
-                end = start + chunk_size
-            chunks.append(items[start:end])
-        return chunks
-
-    def initialize_workers(self):
-        """Initialize all Ray actors in parallel."""
+    def initialize(self):
+        """Lazy initialization of Ray SGLang actors."""
         if self._initialized:
             return
 
-        import subprocess
+        # Load tokenizer
+        self.tokenizer = AutoTokenizer.from_pretrained(self.model_path, trust_remote_code=True)
 
-        # Assign ports for each actor to avoid conflicts
-        # SGLang uses ports 8000-8999 for TP communication
-        # Each actor needs unique ports
-        base_port = 8000
-        port_per_actor = 100  # Reserve 100 ports per actor
-        assigned_ports = [base_port + i * port_per_actor for i in range(self.num_actors)]
+        # Compute logical GPU IDs
+        cuda_visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES", "")
+        if cuda_visible_devices:
+            available_gpus = [int(x.strip()) for x in cuda_visible_devices.split(",") if x.strip()]
+            physical_to_logical = {gpu: idx for idx, gpu in enumerate(available_gpus)}
+        else:
+            physical_to_logical = {gpu: gpu for gpu in self.gpu_ids}
 
-        logger.info(f"[SGLangFSFJudge] Initializing {self.num_actors} workers IN PARALLEL with unique ports...")
+        # Group GPUs by tensor_parallel_size
+        gpu_groups = []
+        for i in range(0, self.num_gpus, self.tensor_parallel_size):
+            group = self.gpu_ids[i : i + self.tensor_parallel_size]
+            gpu_groups.append(group)
+
+        # Assign unique base ports
+        base_port_start = 40000
+        port_spacing = 1000
+
+        def is_port_available(port: int) -> bool:
+            import socket
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                    s.bind(("127.0.0.1", port))
+                    return True
+            except OSError:
+                return False
+
+        assigned_ports = []
+        for group_idx in range(len(gpu_groups)):
+            preferred_port = base_port_start + group_idx * port_spacing
+            port = preferred_port
+            attempts = 0
+            max_attempts = 100
+            
+            while not is_port_available(port) and attempts < max_attempts:
+                attempts += 1
+                port = base_port_start + (group_idx + attempts * len(gpu_groups)) * port_spacing
+            
+            if not is_port_available(port):
+                raise RuntimeError(f"Cannot find available port for worker {group_idx}")
+            
+            assigned_ports.append(port)
+
+        # Create Ray actors
+        for group_idx, gpu_group in enumerate(gpu_groups):
+            logical_gpu_ids = [physical_to_logical.get(gpu, 0) for gpu in gpu_group]
+            base_port = assigned_ports[group_idx]
+            
+            worker = SGLangFSFActor.options(num_gpus=0, num_cpus=1).remote(
+                model_path=self.model_path,
+                gpu_ids=gpu_group,
+                logical_gpu_ids=logical_gpu_ids,
+                tensor_parallel_size=self.tensor_parallel_size,
+                mem_fraction_static=self.mem_fraction_static,
+                dtype=self.dtype,
+                max_model_len=self.max_model_len,
+                temperature=self.temperature,
+                top_k=self.top_k,
+                top_p=self.top_p,
+                max_new_tokens=self.max_new_tokens,
+                base_port=base_port,
+            )
+            self.workers.append(worker)
+            logger.info(f"[SGLangFSFClient] Created worker {group_idx} on GPUs {gpu_group} with port={base_port}")
+
+        # Initialize workers in parallel
+        logger.info(f"[SGLangFSFClient] Initializing {len(self.workers)} workers in parallel...")
         init_futures = []
         for i, worker in enumerate(self.workers):
-            logger.info(f"[SGLangFSFJudge] Submitting init for worker {i}/{self.num_actors} on GPUs {self.gpu_groups[i]} (base_port={assigned_ports[i]})...")
-            init_futures.append(worker.initialize.remote(
-                [assigned_ports[i]],
-                [8000 + i * port_per_actor]  # additional ports
-            ))
+            # Trigger lazy engine initialization
+            init_futures.append(worker.compute_fsf_batch.remote(["test reasoning"], self.micro_batch_size))
 
-        # Wait for all workers to complete initialization in parallel
         try:
             results = ray.get(init_futures, timeout=180)
-            logger.info(f"[SGLangFSFJudge] All {self.num_actors} workers initialized successfully in parallel")
+            logger.info(f"[SGLangFSFClient] All {len(self.workers)} workers initialized")
         except Exception as e:
-            logger.error(f"[SGLangFSFJudge] Parallel init FAILED: {e}")
+            logger.error(f"[SGLangFSFClient] Parallel init failed: {e}")
             raise
 
         self._initialized = True
-        logger.info(f"[SGLangFSFJudge] All {self.num_actors} workers initialized")
-
-    def compute_logic_reward(
-        self,
-        questions: List[str],
-        original_cots: List[str],
-        rewrite_cots: List[str],
-    ) -> Dict[str, Any]:
-        """
-        Compute logic reward based on FSF comparison using multiple workers.
-
-        R_logic = 1 if FSF(Rewrite_CoT) < FSF(Original_CoT) else 0
-
-        For samples where FSF parsing fails, R_logic = None (caller should skip these).
-
-        Args:
-            questions: List of problem texts
-            original_cots: List of original CoT reasonings
-            rewrite_cots: List of rewritten CoT reasonings
-
-        Returns:
-            Dictionary with:
-                - original_fsfs: FSF values for original CoTs (None if unparseable)
-                - rewrite_fsfs: FSF values for rewritten CoTs (None if unparseable)
-                - logic_rewards: Binary rewards (1 if improved and parseable, 0 otherwise, None if unparseable)
-        """
-        # Ensure workers are initialized
-        if not self._initialized:
-            # Create actors
-            for i, gpu_group in enumerate(self.gpu_groups):
-                logical_gpu_ids = list(range(len(gpu_group)))
-                actor = ray.remote(
-                    num_cpus=len(gpu_group) * 4,  # Allocate CPU per GPU
-                    num_gpus=0,
-                )(SGLangFSFActor).remote(
-                    model_path=self.model_path,
-                    gpu_ids=gpu_group,
-                    logical_gpu_ids=logical_gpu_ids,
-                    tensor_parallel_size=self.tensor_parallel_size,
-                    dtype=self.dtype,
-                    gpu_memory_utilization=self.gpu_memory_utilization,
-                    max_model_len=self.max_model_len,
-                    temperature=self.temperature,
-                    top_k=self.top_k,
-                    top_p=self.top_p,
-                    max_new_tokens=self.max_new_tokens,
-                )
-                self.workers.append(actor)
-
-            # Initialize all workers
-            self.initialize_workers()
-
-        # Build prompts
-        original_prompts = []
-        for question, cot in zip(questions, original_cots):
-            cot_truncated = cot[:3000] if len(cot) > 3000 else cot
-            prompt = self._build_fsf_prompt(question, cot_truncated)
-            original_prompts.append(prompt)
-
-        rewrite_prompts = []
-        for question, cot in zip(questions, rewrite_cots):
-            cot_truncated = cot[:3000] if len(cot) > 3000 else cot
-            prompt = self._build_fsf_prompt(question, cot_truncated)
-            rewrite_prompts.append(prompt)
-
-        # Split data across workers
-        original_chunks = self._split_into_chunks(original_prompts, self.num_actors)
-        rewrite_chunks = self._split_into_chunks(rewrite_prompts, self.num_actors)
-
-        # Compute original FSFs
-        logger.info(f"[SGLangFSFJudge] Computing FSF for {len(original_cots)} original CoTs...")
-        original_futures = []
-        for worker_idx, prompts_chunk in enumerate(original_chunks):
-            if prompts_chunk:
-                future = self.workers[worker_idx].compute_fsf_batch.remote(
-                    questions[len(original_chunks[0]):][:len(prompts_chunk)],
-                    prompts_chunk,
-                )
-                original_futures.append((worker_idx, len(prompts_chunk), future))
-
-        # Aggregate original results
-        original_fsfs = [None] * len(original_cots)
-        for worker_idx, chunk_size, future in original_futures:
-            chunk_results = ray.get(future)
-            start_idx = sum(len(original_chunks[i]) for i in range(worker_idx))
-            for i, result in enumerate(chunk_results):
-                original_fsfs[start_idx + i] = result
-
-        # Compute rewrite FSFs
-        logger.info(f"[SGLangFSFJudge] Computing FSF for {len(rewrite_cots)} rewrite CoTs...")
-        rewrite_futures = []
-        for worker_idx, prompts_chunk in enumerate(rewrite_chunks):
-            if prompts_chunk:
-                future = self.workers[worker_idx].compute_fsf_batch.remote(
-                    questions[len(rewrite_chunks[0]):][:len(prompts_chunk)],
-                    prompts_chunk,
-                )
-                rewrite_futures.append((worker_idx, len(prompts_chunk), future))
-
-        # Aggregate rewrite results
-        rewrite_fsfs = [None] * len(rewrite_cots)
-        for worker_idx, chunk_size, future in rewrite_futures:
-            chunk_results = ray.get(future)
-            start_idx = sum(len(rewrite_chunks[i]) for i in range(worker_idx))
-            for i, result in enumerate(chunk_results):
-                rewrite_fsfs[start_idx + i] = result
-
-        # Compute logic rewards
-        logic_rewards = []
-        for o_fsf, r_fsf in zip(original_fsfs, rewrite_fsfs):
-            if o_fsf is None or r_fsf is None:
-                # Unparseable output, skip this sample
-                logic_rewards.append(None)
-            elif r_fsf < o_fsf:
-                logic_rewards.append(1.0)
-            else:
-                logic_rewards.append(0.0)
-
-        return {
-            "original_fsfs": original_fsfs,
-            "rewrite_fsfs": rewrite_fsfs,
-            "logic_rewards": logic_rewards,
-        }
 
     def cleanup(self):
         """Release KV Cache for all workers."""
         if not self._initialized:
             return
 
-        logger.info("[SGLangFSFJudge] Cleaning up all workers...")
-        for worker in self.workers:
-            try:
-                worker.cleanup.remote()
-            except Exception as e:
-                logger.warning(f"[SGLangFSFJudge] Error during worker cleanup: {e}")
+        try:
+            futures = [w.release_memory.remote() for w in self.workers]
+            ray.get(futures, timeout=60)
+            logger.info("[SGLangFSFClient] Released KV Cache for all workers")
+        except Exception as e:
+            logger.warning(f"[SGLangFSFClient] Failed to release memory: {e}")
+
+        torch.cuda.empty_cache()
+        import gc
+        gc.collect()
+
+    def resume_memory(self):
+        """Resume KV Cache for all workers."""
+        if not self._initialized:
+            return
+
+        try:
+            futures = [w.resume_memory.remote() for w in self.workers]
+            ray.get(futures, timeout=60)
+            logger.info("[SGLangFSFClient] Resumed KV Cache for all workers")
+        except Exception as e:
+            logger.warning(f"[SGLangFSFClient] Failed to resume memory: {e}")
 
     def shutdown(self):
-        """Shutdown all workers and release resources."""
-        logger.info("[SGLangFSFJudge] Starting shutdown...")
+        """Shutdown all workers."""
+        if not self._initialized:
+            return
 
-        for worker in self.workers:
-            try:
-                worker.shutdown.remote()
-            except Exception as e:
-                logger.warning(f"[SGLangFSFJudge] Error during worker shutdown: {e}")
+        try:
+            futures = [w.shutdown.remote() for w in self.workers]
+            ray.get(futures, timeout=60)
+            self.workers = []
+            self._initialized = False
+            logger.info("[SGLangFSFClient] All workers shutdown")
+        except Exception as e:
+            logger.warning(f"[SGLangFSFClient] Shutdown error: {e}")
 
-        import gc
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+    def compute_logic_reward_batch(
+        self,
+        questions: List[str],
+        original_cots: List[str],
+        rewrite_cots: List[str],
+        return_dot_outputs: bool = False,  # Whether to return raw DOT outputs
+    ) -> Dict[str, Any]:
+        """
+        Compute logic reward based on FSF comparison.
 
-        logger.info("[SGLangFSFJudge] Shutdown complete")
+        R_logic = 1 if FSF(rewrite) < FSF(original) else 0
+
+        Args:
+            questions: List of problem texts
+            original_cots: List of original CoT reasonings
+            rewrite_cots: List of rewritten CoT reasonings
+            return_dot_outputs: If True, include raw DOT outputs in return
+
+        Returns:
+            Dict with:
+                - original_fsfs: FSF values for original CoTs
+                - rewrite_fsfs: FSF values for rewrite CoTs
+                - logic_rewards: Binary rewards (1 if improved, 0 otherwise, None if unparseable)
+                - original_dot_outputs: (optional) Raw DOT outputs for original CoTs
+                - rewrite_dot_outputs: (optional) Raw DOT outputs for rewrite CoTs
+        """
+        self.initialize()
+        self.resume_memory()
+
+        batch_size = len(questions)
+
+        # Split data across workers
+        original_chunks = self._split_into_chunks(original_cots, self.num_actors)
+        rewrite_chunks = self._split_into_chunks(rewrite_cots, self.num_actors)
+
+        # Compute original FSFs
+        logger.info(f"[SGLangFSFClient] Computing FSF for {len(original_cots)} original CoTs "
+                    f"(micro_batch_size={self.micro_batch_size}, return_dot_outputs={return_dot_outputs})...")
+        original_futures = []
+        for worker_idx, chunk_cots in enumerate(original_chunks):
+            if chunk_cots:
+                future = self.workers[worker_idx].compute_fsf_batch.remote(
+                    chunk_cots, self.micro_batch_size, return_dot_outputs
+                )
+                original_futures.append((worker_idx, len(chunk_cots), future))
+
+        # Aggregate original results
+        original_fsfs = [None] * batch_size
+        original_dot_outputs = [None] * batch_size if return_dot_outputs else None
+        for worker_idx, chunk_size, future in original_futures:
+            chunk_results = ray.get(future)
+            if return_dot_outputs:
+                chunk_fsfs, chunk_dots = chunk_results
+            else:
+                chunk_fsfs = chunk_results
+                chunk_dots = None
+            start_idx = sum(len(original_chunks[i]) for i in range(worker_idx))
+            for i, result in enumerate(chunk_fsfs):
+                original_fsfs[start_idx + i] = result
+            if return_dot_outputs and chunk_dots is not None:
+                for i, dot in enumerate(chunk_dots):
+                    original_dot_outputs[start_idx + i] = dot
+
+        # Compute rewrite FSFs
+        logger.info(f"[SGLangFSFClient] Computing FSF for {len(rewrite_cots)} rewrite CoTs "
+                    f"(micro_batch_size={self.micro_batch_size}, return_dot_outputs={return_dot_outputs})...")
+        rewrite_futures = []
+        for worker_idx, chunk_cots in enumerate(rewrite_chunks):
+            if chunk_cots:
+                future = self.workers[worker_idx].compute_fsf_batch.remote(
+                    chunk_cots, self.micro_batch_size, return_dot_outputs
+                )
+                rewrite_futures.append((worker_idx, len(chunk_cots), future))
+
+        # Aggregate rewrite results
+        rewrite_fsfs = [None] * batch_size
+        rewrite_dot_outputs = [None] * batch_size if return_dot_outputs else None
+        for worker_idx, chunk_size, future in rewrite_futures:
+            chunk_results = ray.get(future)
+            if return_dot_outputs:
+                chunk_fsfs, chunk_dots = chunk_results
+            else:
+                chunk_fsfs = chunk_results
+                chunk_dots = None
+            start_idx = sum(len(rewrite_chunks[i]) for i in range(worker_idx))
+            for i, result in enumerate(chunk_fsfs):
+                rewrite_fsfs[start_idx + i] = result
+            if return_dot_outputs and chunk_dots is not None:
+                for i, dot in enumerate(chunk_dots):
+                    rewrite_dot_outputs[start_idx + i] = dot
+
+        # Compute logic rewards as FSF difference
+        # R_logic = FSF(original) - FSF(rewrite)
+        # Positive means rewrite has lower FSF (fewer failed steps) -> better
+        # This will be scaled by fsf_reward_scale in combined_reward.py
+        logic_rewards = []
+        for o_fsf, r_fsf in zip(original_fsfs, rewrite_fsfs):
+            if o_fsf is None or r_fsf is None:
+                # Unparseable, return 0 so it doesn't affect reward
+                logic_rewards.append(0.0)
+            else:
+                # FSF difference: positive means improvement
+                logic_rewards.append(o_fsf - r_fsf)
+
+        result = {
+            "original_fsfs": original_fsfs,
+            "rewrite_fsfs": rewrite_fsfs,
+            "logic_rewards": logic_rewards,
+        }
+        if return_dot_outputs:
+            result["original_dot_outputs"] = original_dot_outputs
+            result["rewrite_dot_outputs"] = rewrite_dot_outputs
+        return result
+
+    def _split_into_chunks(self, items: List, num_chunks: int) -> List[List]:
+        """Split items into roughly equal chunks."""
+        if num_chunks <= 0:
+            return [items]
+        chunk_size = max(1, len(items) // num_chunks)
+        chunks = []
+        for i in range(num_chunks):
+            start = i * chunk_size
+            if i == num_chunks - 1:
+                end = len(items)
+            else:
+                end = min(start + chunk_size, len(items))
+            chunks.append(items[start:end])
+        return chunks
 
 
-# Global singleton
-_fsf_judge: Optional[SGLangFSFJudge] = None
-_fsf_judge_kwargs: Optional[dict] = None
+# Backward compatibility: keep SGLangFSFJudge as alias
+SGLangFSFJudge = SGLangFSFClient
+
+# Global singleton for backward compatibility
+_fsf_client: Optional[SGLangFSFClient] = None
+_fsf_client_kwargs: Optional[dict] = None
 
 
-def get_fsf_judge(
+def get_fsf_client(
     model_path: str = "./models/Qwen3-4B",
     **kwargs,
-) -> SGLangFSFJudge:
-    """Get or create SGLang FSF Judge singleton."""
-    global _fsf_judge, _fsf_judge_kwargs
-    if _fsf_judge is None:
-        _fsf_judge_kwargs = kwargs.copy()
-        _fsf_judge = SGLangFSFJudge(model_path=model_path, **kwargs)
-    else:
-        # Log if kwargs differ from initial creation
-        # (For now, we just reuse the existing instance)
-        pass
-    return _fsf_judge
+) -> SGLangFSFClient:
+    """Get or create SGLang FSF Client singleton."""
+    global _fsf_client, _fsf_client_kwargs
+    if _fsf_client is None:
+        _fsf_client_kwargs = kwargs.copy()
+        _fsf_client = SGLangFSFClient(model_path=model_path, **kwargs)
+    return _fsf_client
 
 
-def cleanup_fsf_judge():
-    """Cleanup the global FSF judge to release GPU memory."""
-    global _fsf_judge, _fsf_judge_kwargs
-    if _fsf_judge is not None:
-        logger.info("[FSF] Cleaning up FSF judge...")
-        _fsf_judge.shutdown()
-        _fsf_judge = None
-        _fsf_judge_kwargs = None
-
-        # Force garbage collection
+def cleanup_fsf_client():
+    """Cleanup the global FSF client."""
+    global _fsf_client, _fsf_client_kwargs
+    if _fsf_client is not None:
+        _fsf_client.shutdown()
+        _fsf_client = None
+        _fsf_client_kwargs = None
+        
         import gc
-        import torch
         import time
         gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-
-        # Wait for GPU memory to be released
-        logger.info("[FSF] Waiting for GPU memory to be released...")
-        time.sleep(3)
-        gc.collect()
         torch.cuda.empty_cache()
-
-        logger.info("[FSF] FSF judge cleanup completed")
+        time.sleep(1)
+        
+        logger.info("[FSF] Client cleanup completed")

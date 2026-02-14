@@ -170,6 +170,11 @@ class CoTRewriterRewardManager:
         cognitive_rewards = extra_info.get("cognitive_rewards", [])
         rewrite_mean_log_probs = extra_info.get("rewrite_mean_log_probs", [])
         original_mean_log_probs = extra_info.get("original_mean_log_probs", [])
+        
+        # Get FSF-related info
+        original_fsfs = extra_info.get("original_fsfs", [])
+        rewrite_fsfs = extra_info.get("rewrite_fsfs", [])
+        logic_rewards = extra_info.get("logic_rewards", [])
 
         for i in range(num_to_print):
             # Decode prompt and response
@@ -195,6 +200,11 @@ class CoTRewriterRewardManager:
                 logger.info(f"[Sample {i}] total_reward={total_rewards[i]}")
             if i < len(cognitive_rewards):
                 logger.info(f"[Sample {i}] cognitive_reward={cognitive_rewards[i]}")
+            
+            # Print FSF info
+            if i < len(original_fsfs) and i < len(rewrite_fsfs):
+                logger.info(f"[Sample {i}] FSF: original={original_fsfs[i]:.4f}, rewrite={rewrite_fsfs[i]:.4f}, "
+                           f"logic_reward={logic_rewards[i] if i < len(logic_rewards) else 'N/A'}")
 
     def _apply_overlong_penalty(
         self,

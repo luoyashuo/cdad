@@ -253,6 +253,9 @@ class CombinedRewardComputer:
         fsf_max_model_len: int = 12000,  # Max model len for FSF
         fsf_tensor_parallel_size: int = 1,  # TP size for FSF
         fsf_reward_scale: float = 1.0,  # Scale factor for FSF reward (replaces lambda_logic)
+        fsf_micro_batch_size: int = 4,  # Micro batch size for FSF inference (to avoid OOM)
+        fsf_skip_group_on_parse_error: bool = True,  # Skip entire group if any FSF parsing fails
+        save_fsf_dot_outputs: bool = False,  # Whether to save raw FSF DOT outputs to rollout_data
         **kwargs,  # Ignore deprecated params
     ):
         """
@@ -318,6 +321,10 @@ class CombinedRewardComputer:
             fsf_max_model_len: Max model len for FSF (default: 12000)
             fsf_tensor_parallel_size: TP size for FSF, GPUs are auto-detected (default: 1)
             fsf_reward_scale: Scale factor for FSF reward (replaces lambda_logic, default: 1.0)
+            fsf_micro_batch_size: Micro batch size for FSF inference to avoid OOM (default: 4).
+                Lower values reduce memory but increase computation time.
+            fsf_skip_group_on_parse_error: If True (default), skip FSF reward for entire group
+                when any sample fails to parse. If False, use 0.0 for failed samples.
 
         阶梯式奖励配置示例:
         - tier_step=0.05, tier_reward=0.1:
@@ -405,6 +412,9 @@ class CombinedRewardComputer:
         self.fsf_max_model_len = fsf_max_model_len
         self.fsf_tensor_parallel_size = fsf_tensor_parallel_size
         self.fsf_reward_scale = fsf_reward_scale  # Scale factor for FSF reward (replaces lambda_logic)
+        self.fsf_micro_batch_size = fsf_micro_batch_size  # Micro batch size for FSF inference
+        self.fsf_skip_group_on_parse_error = fsf_skip_group_on_parse_error  # Skip group on parse error
+        self.save_fsf_dot_outputs = save_fsf_dot_outputs  # Whether to save raw DOT outputs
         self.fsf_judge = None  # Created on-demand in compute_reward
 
     def compute_reward(
@@ -517,10 +527,32 @@ class CombinedRewardComputer:
         # FSF is computed on-demand with proper memory management
         # Memory management: student is cleaned up before FSF computation
         r_logic = [0.0] * batch_size
+
+        # === DEBUG: Extract and save pre-computed FSF from training data ===
+        # Training data has 'fsf' field with pre-computed FSF values
+        # We need to save these to rollout_data for debugging
+        pre_computed_original_fsfs = []
+        for i in range(batch_size):
+            data_item = data[i]
+            if 'fsf' in data_item.non_tensor_batch:
+                fsf_val = data_item.non_tensor_batch['fsf']
+                if hasattr(fsf_val, 'item'):
+                    fsf_val = fsf_val.item()
+                pre_computed_original_fsfs.append(fsf_val if fsf_val is not None else 0.0)
+            else:
+                pre_computed_original_fsfs.append(0.0)
+
+        # Log pre-computed FSF for debugging
+        for i, fsf_val in enumerate(pre_computed_original_fsfs):
+            if fsf_val != 0.0:
+                logger.info(f"[DEBUG] Sample {i}: pre_computed_original_fsf={fsf_val}")
+
         original_fsfs = [0.0] * batch_size
         rewrite_fsfs = [0.0] * batch_size
-        fsf_parse_failed = False
-        fsf_group_skipped = False
+        original_dot_outputs = [None] * batch_size  # Raw DOT outputs for original CoTs
+        rewrite_dot_outputs = [None] * batch_size  # Raw DOT outputs for rewrite CoTs
+        fsf_parse_failed_count = 0  # Count of samples with parse failures
+        fsf_group_skipped = False  # Whether the entire group's FSF reward was skipped
 
         # Try FSF if enabled
         if self.use_logic_reward:
@@ -532,50 +564,75 @@ class CombinedRewardComputer:
             if hasattr(self.student_client, 'cleanup'):
                 self.student_client.cleanup()
 
-            # Create FSF Judge on-demand
-            from verl.experimental.reward.cot_rewriter.sglang_fsf_reward import get_fsf_judge
-            self.fsf_judge = SGLangFSFJudge(
+            # Create FSF Client on-demand
+            from verl.experimental.reward.cot_rewriter.sglang_fsf_reward import SGLangFSFClient
+            self.fsf_judge = SGLangFSFClient(
                 model_path=self.fsf_model_path,
-                gpu_memory_utilization=self.fsf_gpu_memory_utilization,
+                mem_fraction_static=self.fsf_gpu_memory_utilization,
                 max_model_len=self.fsf_max_model_len,
                 tensor_parallel_size=self.fsf_tensor_parallel_size,
                 temperature=self.fsf_temperature,
                 top_k=self.fsf_top_k,
                 top_p=self.fsf_top_p,
                 max_new_tokens=self.fsf_max_new_tokens,
+                micro_batch_size=self.fsf_micro_batch_size,
             )
 
             try:
-                logger.info(f"[FSF] Computing FSF for {len(questions)} samples...")
-                logic_result = self.fsf_judge.compute_logic_reward(
+                logger.info(f"[FSF] Computing FSF for {len(questions)} samples (save_dot_outputs={self.save_fsf_dot_outputs})...")
+                logic_result = self.fsf_judge.compute_logic_reward_batch(
                     questions=questions,
                     original_cots=original_cots,
                     rewrite_cots=rewrite_cots,
+                    return_dot_outputs=self.save_fsf_dot_outputs,
                 )
 
-                # Check if any sample has unparseable FSF
-                # If any sample fails, skip FSF reward for entire group
-                fsf_parse_failed = any(r is None for r in logic_result["logic_rewards"])
+                # Count samples with unparseable FSF
+                original_failed = sum(1 for f in logic_result["original_fsfs"] if f is None)
+                rewrite_failed = sum(1 for f in logic_result["rewrite_fsfs"] if f is None)
+                fsf_parse_failed_count = original_failed + rewrite_failed
 
-                if fsf_parse_failed:
+                has_any_parse_failure = fsf_parse_failed_count > 0
+
+                if has_any_parse_failure and self.fsf_skip_group_on_parse_error:
+                    # Skip entire group when any parsing fails (conservative approach)
+                    # This means R_logic = 0 for all samples, but other rewards (R_cog, R_useful) are still applied
                     logger.warning(
-                        f"[FSF] FSF parsing failed for at least one sample in group. "
-                        f"Skipping FSF reward for entire group."
+                        f"[FSF] FSF parsing failed for {fsf_parse_failed_count} samples "
+                        f"(original_failed={original_failed}, rewrite_failed={rewrite_failed}). "
+                        f"Skipping FSF reward for entire group (fsf_skip_group_on_parse_error=True). "
+                        f"R_logic will be 0 for all samples, but R_cog and R_useful are still applied."
                     )
                     # Set all FSF rewards to 0 for the group
                     r_logic = [0.0] * batch_size
                     original_fsfs = [0.0] * batch_size
                     rewrite_fsfs = [0.0] * batch_size
+                    # DOT outputs are still saved if enabled
+                    if self.save_fsf_dot_outputs:
+                        original_dot_outputs = logic_result.get("original_dot_outputs", [None] * batch_size)
+                        rewrite_dot_outputs = logic_result.get("rewrite_dot_outputs", [None] * batch_size)
                     fsf_group_skipped = True
                 else:
+                    # Use FSF results (failed samples get 0.0 logic reward if not skipping group)
                     r_logic = logic_result["logic_rewards"]
                     original_fsfs = logic_result["original_fsfs"]
                     rewrite_fsfs = logic_result["rewrite_fsfs"]
+                    # Save DOT outputs if enabled
+                    if self.save_fsf_dot_outputs:
+                        original_dot_outputs = logic_result.get("original_dot_outputs", [None] * batch_size)
+                        rewrite_dot_outputs = logic_result.get("rewrite_dot_outputs", [None] * batch_size)
                     fsf_group_skipped = False
+                    if has_any_parse_failure:
+                        logger.warning(
+                            f"[FSF] FSF parsing failed for {fsf_parse_failed_count} samples "
+                            f"(original_failed={original_failed}, rewrite_failed={rewrite_failed}). "
+                            f"Using partial results (fsf_skip_group_on_parse_error=False). "
+                            f"Failed samples have R_logic=0."
+                        )
             finally:
-                # FSF Judge cleanup - destroy engine after compute_logic_reward
+                # FSF Judge cleanup - shutdown workers after compute_logic_reward
                 if self.fsf_judge is not None:
-                    self.fsf_judge._destroy_engine()
+                    self.fsf_judge.shutdown()
                     self.fsf_judge = None
 
         # Compute too_short_penalty and too_long_penalty based on length ratio
@@ -740,7 +797,7 @@ class CombinedRewardComputer:
             "too_short_penalty_coeffs": too_short_penalty_coeffs,
             "too_long_penalty_coeffs": too_long_penalty_coeffs,
         }
-        
+
         # Log per-sample prompts with computed rewards
         logger.log_per_sample_rewards(
             questions=questions,
@@ -771,6 +828,10 @@ class CombinedRewardComputer:
             "extra_info": {
                 "original_fsfs": original_fsfs,
                 "rewrite_fsfs": rewrite_fsfs,
+                "original_dot_outputs": original_dot_outputs,  # Raw FSF DOT outputs for original CoTs (if save_fsf_dot_outputs=True)
+                "rewrite_dot_outputs": rewrite_dot_outputs,  # Raw FSF DOT outputs for rewrite CoTs (if save_fsf_dot_outputs=True)
+                "fsf_parse_failed_count": fsf_parse_failed_count,  # Number of samples with FSF parse failures
+                "fsf_group_skipped": fsf_group_skipped,  # Whether FSF reward was skipped for entire group
                 "lambda_logic": self.lambda_logic,
                 "lambda_useful": self.lambda_useful,
                 "too_short_penalties": too_short_penalties,
@@ -782,6 +843,8 @@ class CombinedRewardComputer:
                 "penalty_mode": self.penalty_mode,  # NEW: "relative" or "absolute"
                 "base_rewards": base_rewards,
                 "base_reward_range": base_reward_range,
+                # === DEBUG: Pre-computed FSF from training data ===
+                "pre_computed_original_fsfs": pre_computed_original_fsfs,  # Pre-computed FSF for original CoTs (from training data)
             },
         }
 
@@ -822,8 +885,9 @@ def cleanup_reward_computer():
         if hasattr(_reward_computer, 'student_client') and _reward_computer.student_client is not None:
             _reward_computer.student_client.cleanup()
         if hasattr(_reward_computer, 'fsf_judge') and _reward_computer.fsf_judge is not None:
-            # FSF Judge cleanup if needed
-            del _reward_computer.fsf_judge
+            # FSF Judge cleanup - properly shutdown to release GPU memory
+            _reward_computer.fsf_judge.shutdown()
+            _reward_computer.fsf_judge = None
         _reward_computer = None
         _reward_computer_kwargs = None  # Reset kwargs for next creation
 
@@ -917,6 +981,9 @@ def compute_cot_rewriter_reward(
     fsf_max_model_len: int = 12000,  # Max model len for FSF
     fsf_tensor_parallel_size: int = 1,  # TP size for FSF (GPUs auto-detected)
     fsf_reward_scale: float = 1.0,  # Scale factor for FSF reward (replaces lambda_logic)
+    fsf_micro_batch_size: int = 4,  # Micro batch size for FSF inference (avoid OOM)
+    fsf_skip_group_on_parse_error: bool = True,  # Skip entire group on parse error
+    save_fsf_dot_outputs: bool = False,  # Whether to save raw FSF DOT outputs to rollout_data
     **kwargs,
 ) -> Dict[str, Any]:
     # Use alpha if provided (from config), otherwise use alpha_cog
@@ -952,7 +1019,9 @@ def compute_cot_rewriter_reward(
         student_max_num_seqs: Maximum concurrent sequences in vLLM (vLLM only)
         student_tensor_parallel_size: Tensor parallelism size for Student Model
         student_logprob_last_n_tokens: SGLang only - only compute last N tokens' logprobs
-            fsf_reward_scale: Scale factor for FSF reward (replaces lambda_logic, default: 1.0)
+        fsf_reward_scale: Scale factor for FSF reward (replaces lambda_logic, default: 1.0)
+        fsf_micro_batch_size: Micro batch size for FSF inference to avoid OOM (default: 4)
+        fsf_skip_group_on_parse_error: If True (default), skip entire group when any FSF parse fails
 
     Returns:
         Dictionary with:
@@ -1039,6 +1108,18 @@ def compute_cot_rewriter_reward(
             orig_cot = reward_info.get("original_cot", "")
         original_cots.append(orig_cot if orig_cot else "")
 
+        # NEW: Extract pre-computed FSF from training data (for debugging)
+        original_fsf = None
+        if "fsf" in reward_info:
+            original_fsf = reward_info.get("fsf", None)
+        elif "fsf" in data_item.non_tensor_batch:
+            fsf_data = data_item.non_tensor_batch["fsf"]
+            if fsf_data is not None:
+                if hasattr(fsf_data, 'item'):
+                    original_fsf = fsf_data.item()
+                else:
+                    original_fsf = fsf_data
+
         # Extract question (like VERL's naive.py/prime.py)
         question = reward_info.get(question_key, "")
         if not question:
@@ -1124,6 +1205,9 @@ def compute_cot_rewriter_reward(
         fsf_max_model_len=fsf_max_model_len,
         fsf_tensor_parallel_size=fsf_tensor_parallel_size,
         fsf_reward_scale=fsf_reward_scale,
+        fsf_micro_batch_size=fsf_micro_batch_size,
+        fsf_skip_group_on_parse_error=fsf_skip_group_on_parse_error,
+        save_fsf_dot_outputs=save_fsf_dot_outputs,
     )
 
     # Compute rewards for all samples
@@ -1146,6 +1230,12 @@ def compute_cot_rewriter_reward(
     token_ids = result["token_ids"]
     original_fsfs = result["extra_info"]["original_fsfs"]
     rewrite_fsfs = result["extra_info"]["rewrite_fsfs"]
+    # Extract DOT outputs if available (when save_fsf_dot_outputs=True)
+    original_dot_outputs = result["extra_info"].get("original_dot_outputs", [None] * batch_size)
+    rewrite_dot_outputs = result["extra_info"].get("rewrite_dot_outputs", [None] * batch_size)
+    # FSF parse success status: True if FSF value is not None, False otherwise
+    original_fsf_parse_success = [1 if f is not None else 0 for f in original_fsfs]
+    rewrite_fsf_parse_success = [1 if f is not None else 0 for f in rewrite_fsfs]
     too_short_penalties = result["extra_info"].get("too_short_penalties", [0.0] * batch_size)
     too_short_penalty_coeffs = result["extra_info"].get("too_short_penalty_coeffs", [0.0] * batch_size)
     too_long_penalties = result["extra_info"].get("too_long_penalties", [0.0] * batch_size)
@@ -1249,6 +1339,12 @@ def compute_cot_rewriter_reward(
             "total_rewards": total_rewards,
             "original_fsfs": original_fsfs,
             "rewrite_fsfs": rewrite_fsfs,
+            # FSF parse success status: 1 if FSF value is not None, 0 otherwise
+            "original_fsf_parse_success": original_fsf_parse_success,  # FSF 解析是否成功 (original)
+            "rewrite_fsf_parse_success": rewrite_fsf_parse_success,  # FSF 解析是否成功 (rewrite)
+            # FSF DOT outputs (if save_fsf_dot_outputs=True)
+            "original_dot_outputs": original_dot_outputs,  # Raw DOT outputs for original CoTs
+            "rewrite_dot_outputs": rewrite_dot_outputs,  # Raw DOT outputs for rewrite CoTs
             # Penalties for SwanLab logging
             "truncation_penalties": truncation_penalties,
             "format_penalties": format_penalties,
@@ -1269,9 +1365,11 @@ def compute_cot_rewriter_reward(
             "original_ppls": result.get("original_ppls", [float('nan')] * batch_size),
             # Relative improvement rates (formula 1 observation value)
             "relative_improvement_rates": result.get("relative_improvement_rates", [float('nan')] * batch_size),
-            # FSF: Parse failure and group skip flags
-            "fsf_parse_failed": result.get("fsf_parse_failed", False),
-            "fsf_group_skipped": result.get("fsf_group_skipped", False),
+            # FSF: Parse failure count and group skip flag
+            "fsf_parse_failed_count": result.get("fsf_parse_failed_count", 0),  # Number of samples with parse failures
+            "fsf_group_skipped": result.get("fsf_group_skipped", False),  # Whether FSF reward was skipped for entire group
+            "original_fsf_parse_success": original_fsf_parse_success,  # FSF parse success status for original CoTs (1=success, 0=failed)
+            "rewrite_fsf_parse_success": rewrite_fsf_parse_success,  # FSF parse success status for rewrite CoTs (1=success, 0=failed)
         },
     }
 

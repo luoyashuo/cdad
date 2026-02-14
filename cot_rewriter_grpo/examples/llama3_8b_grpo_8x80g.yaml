@@ -1,10 +1,10 @@
 hydra:
   searchpath:
-    - file://verl/verl/trainer/config
+  - file://verl/verl/trainer/config
 
 defaults:
-  - ppo_trainer
-  - _self_
+- ppo_trainer
+- _self_
 
 # ========== 基础训练配置 ==========
 trainer:
@@ -21,7 +21,7 @@ trainer:
   default_local_dir: ${oc.env:CHECKPOINT_BASE_DIR}/cot_rewriter_grpo/${trainer.experiment_name}
   n_gpus_per_node: 8
   nnodes: 1
-  logger: ["swanlab","console"]
+  logger: [swanlab, console]
   rollout_data_dir: ${oc.env:CHECKPOINT_BASE_DIR}/${trainer.experiment_name}/rollout_data
   validation_data_dir: ${oc.env:CHECKPOINT_BASE_DIR}/${trainer.experiment_name}/validation_data
 
@@ -47,7 +47,7 @@ data:
 # ========== Actor & Rollout 配置 ==========
 actor_rollout_ref:
   hybrid_engine: true
-  
+
   # 模型配置
   model:
     path: ${oc.env:MODEL_BASE_DIR}/LLM-Research/Meta-Llama-3.1-8B-Instruct
@@ -55,7 +55,7 @@ actor_rollout_ref:
     enable_gradient_checkpointing: true
     use_remove_padding: false
     lora_rank: 0
-  
+
   # Actor 训练配置
   actor:
     strategy: fsdp
@@ -85,7 +85,7 @@ actor_rollout_ref:
         buffer_dtype: bf16
       # Llama3 模型的 _no_split_modules 是 None，需要显式配置 wrap_policy
       wrap_policy:
-        transformer_layer_cls_to_wrap: ["LlamaDecoderLayer"]
+        transformer_layer_cls_to_wrap: [LlamaDecoderLayer]
         min_num_params: 0
     optim:
       lr: 2e-6
@@ -94,7 +94,7 @@ actor_rollout_ref:
       lr_warmup_steps_ratio: 0.1
       min_lr_ratio: 0.1
       total_training_steps: -1
-  
+
   # Rollout (推理) 配置
   rollout:
     name: vllm
@@ -131,7 +131,7 @@ actor_rollout_ref:
         buffer_dtype: bf16
       # Llama3 模型的 _no_split_modules 是 None，需要显式配置 wrap_policy
       wrap_policy:
-        transformer_layer_cls_to_wrap: ["LlamaDecoderLayer"]
+        transformer_layer_cls_to_wrap: [LlamaDecoderLayer]
         min_num_params: 0
 
 # ========== 算法配置 ==========
@@ -142,11 +142,11 @@ algorithm:
   lam: 1.0
   use_kl_in_reward: false
   kl_penalty: kl
-  
+
   kl_ctrl:
     type: fixed
     kl_coef: 0.0
-  
+
   filter_groups:
     _target_: verl.trainer.config.FilterGroupsConfig
     enable: false
@@ -176,14 +176,13 @@ reward_model:
 
 # ========== Ray 分布式配置 ==========
 # Ray 初始化配置（代码直接访问 ray_init，而非 ray_kwargs.ray_init）
-  
 
 
 # ========== 自定义奖励函数配置 ==========
 custom_reward_function:
   path: ${oc.env:PROJECT_BASE_DIR}/verl/verl/experimental/reward/cot_rewriter/combined_reward.py
   name: compute_cot_rewriter_reward
-  
+
   reward_kwargs:
     # ==================== 全局配置 ====================
     overworld_buffer_cfg:
@@ -192,40 +191,35 @@ custom_reward_function:
       penalty_factor: 1.0             # 惩罚因子
       log: false                      # 是否记录日志
       max_resp_len: 10000             # 最大响应长度
-    
     # ==================== Student Model 配置 (认知奖励 R_cog) ====================
     # 使用 student model 计算回答困惑度作为认知奖励
-    student_model_path: /data/luoys/checkpoints/cdad/warmup/qwen3_1_7b_base_sft_rv_optimal/checkpoint-10974
+    student_model_path: /data/luoys/checkpoints/cdad/warmup/qwen3_1_7b_base_sft_rv_optimal_warmup/checkpoint-10974
     student_tensor_parallel_size: 2
     student_max_model_len: 12000
     student_micro_batch_size: 1
     student_max_num_seqs: 1
-    
+
     # Student Model 推理后端配置
     reward_backend: sglang            # 可选: sglang | vllm
     sglang_mem_fraction_static: 0.5   # SGLang 显存占比
     vllm_gpu_memory_utilization: 0.3  # vLLM 显存利用率
     cleanup_after_compute: true       # 计算后清理缓存
-    
     # 认知奖励模式
     reward_mode: ppl                  # 奖励模式: ppl (困惑度)
     print_samples: 2                  # 打印样本数
-    
     # ==================== 认知奖励公式配置 ====================
     # R_cog = answer_log_prob(rewrite) - answer_log_prob(original)
     # answer_log_prob = mean(token_log_probs) + alpha * min(token_log_probs)
     alpha: 0.01                       # min-log-prob 的权重系数
     use_reward_delta: true            # 是否使用奖励差值 (rewrite - original)
-    
     # ==================== 阶梯式奖励配置 (Tiered Reward) ====================
     # 当 rewrite 使困惑度降低达到一定阈值时给予额外奖励
-    use_tiered_reward: true           # 是否启用阶梯奖励
+    use_tiered_reward: false           # 是否启用阶梯奖励
     tier_step: 0.05                   # 阶梯步长 (5% 改善)
     tier_reward: 0.1                  # 每阶梯奖励值
-    
     # ==================== 逻辑奖励 FSF 配置 (R_logic) ====================
     # 使用 FSF (Free-Form Solver Feedback) 模型评估逻辑质量
-    use_logic_reward: true            # 是否启用逻辑奖励
+    use_logic_reward: true             # 是否启用逻辑奖励
     fsf_model_path: /data/luoys/checkpoints/cdad/fsf_reward/qwen3_4b_fsf_grm
     fsf_tensor_parallel_size: 4
     fsf_temperature: 0.6
@@ -235,12 +229,12 @@ custom_reward_function:
     fsf_gpu_memory_utilization: 0.4
     fsf_max_model_len: 12000
     fsf_reward_scale: 1.0             # FSF 奖励缩放因子
-    
+    fsf_micro_batch_size: 1           # FSF 推理微批次大小 (控制显存，默认4)
+    fsf_skip_group_on_parse_error: true  # DOT解析失败时跳过整个group (默认true)
     # ==================== Useful 奖励配置 (R_useful) ====================
     # 评估 rewrite 相对于 original 的有用性
     use_useful_reward: false          # 是否启用 useful 奖励
     lambda_useful: 1.0                # useful 奖励权重 λ_useful
-    
     # ==================== 数据字段映射配置 ====================
     field_mapping:
       prompt_key: problem             # 问题字段名
@@ -248,24 +242,21 @@ custom_reward_function:
       question_key: question          # 问题文本字段名
       original_cot_key: original_cot  # 原始 CoT 字段名
       ground_truth_key: ground_truth  # 正确答案字段名
-    
     # ==================== 长度惩罚配置 ====================
     # 对过长或过短的 rewrite 进行惩罚
     truncation_penalty: 0.5           # 截断惩罚值
     format_penalty: 0.5               # 格式错误惩罚值
-    
     # 过短惩罚阈值
     too_short_threshold_low: 0.4      # 过短下限阈值 (相比 original)
     too_short_threshold_high: 0.8     # 过短上限阈值
     too_short_max_penalty: 0.5        # 最大过短惩罚
-    
     # 过长惩罚阈值
     too_long_threshold_low: 1.5       # 过长下限阈值 (相比 original)
     too_long_threshold_high: 2.5      # 过长上限阈值
     too_long_max_penalty: 0.5         # 最大过长惩罚
-    
     penalty_mode: absolute            # 惩罚模式: absolute | relative
 # ============ Reward Manager Configuration ============
+    save_fsf_dot_outputs: true
 reward_manager:
   source: importlib
   name: CoTRewriterRewardManager
@@ -274,35 +265,35 @@ reward_manager:
 
 # ============ Ray Configuration ============
 ray_init:
-  num_cpus: null
-  timeline_json_file: null
+  num_cpus:
+  timeline_json_file:
 
 ray_kwargs:
   ray_init:
-    _temp_dir: null
+    _temp_dir:
     include_dashboard: false
-    dashboard_host: ""
-    dashboard_port: null
+    dashboard_host: ''
+    dashboard_port:
     ignore_reinit_error: true
-    logging_level: "warning"
+    logging_level: warning
     local_mode: false
-    namespace: "cot_rewriter_grpo"
+    namespace: cot_rewriter_grpo
     _system_config:
       enable_metrics_collection: false
       agent_register_timeout_ms: 120000
     runtime_env:
       env_vars:
         # PYTHONPATH 使用 PROJECT_BASE_DIR
-        PYTHONPATH: "${oc.env:PROJECT_BASE_DIR}/.venv/lib/python3.12/site-packages:${oc.env:PROJECT_BASE_DIR}:${oc.env:PROJECT_BASE_DIR}/src:${oc.env:PROJECT_BASE_DIR}/verl"
-        TOKENIZERS_PARALLELISM: "false"
-        RAY_DEDUP_LOGS: "1"
-        RAY_DASHBOARD_HOST: ""
-        RAY_enable_dashboard: "0"
+        PYTHONPATH: ${oc.env:PROJECT_BASE_DIR}/.venv/lib/python3.12/site-packages:${oc.env:PROJECT_BASE_DIR}:${oc.env:PROJECT_BASE_DIR}/src:${oc.env:PROJECT_BASE_DIR}/verl
+        TOKENIZERS_PARALLELISM: 'false'
+        RAY_DEDUP_LOGS: '1'
+        RAY_DASHBOARD_HOST: ''
+        RAY_enable_dashboard: '0'
         # CUDA_VISIBLE_DEVICES 会自动继承运行时的环境变量，无需显式配置
-        RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO: "0"
+        RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO: '0'
         # 强制使用 vLLM V0 引擎（RUC 服务器兼容性）
-        VLLM_USE_V1: "0"
-        VLLM_ATTENTION_BACKEND: "FLASH_ATTN"
+        VLLM_USE_V1: '0'
+        VLLM_ATTENTION_BACKEND: FLASH_ATTN
         # SwanLab 云端同步配置
-        SWANLAB_MODE: "cloud"
-        SWANLAB_API_KEY: "xmtHYzg2Bw5uh1dprg81E"
+        SWANLAB_MODE: cloud
+        SWANLAB_API_KEY: xmtHYzg2Bw5uh1dprg81E

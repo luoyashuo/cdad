@@ -568,11 +568,7 @@ def convert_to_sharegpt_with_strategy(
         return None
 
     # 提取 thought 和 full_response
-    thought = selected_thought.get("thought", "")
-    solution = selected_thought.get("full_response", "")
-
-    # 构建 assistant 的内容：thought + solution
-    assistant_content = f"{thought}\n\n{solution}".strip()
+    full_response = selected_thought.get("full_response", "").strip()
 
     # 构建 sharegpt 格式
     sharegpt_item = {
@@ -583,7 +579,7 @@ def convert_to_sharegpt_with_strategy(
             },
             {
                 "role": "assistant",
-                "content": assistant_content
+                "content": full_response
             }
         ]
     }
@@ -866,11 +862,11 @@ python build_sharegpt_dataset.py \
 # 2. RV Optimal 策略（7B 模型配置：RV 范围 3-5）
 """
 python build_sharegpt_dataset.py \
-    -i /data-share/yeesuanAI08/lihaitao/luoys/data/cdad/omnithought_math_all/train_merge_level1.jsonl \
-       /data-share/yeesuanAI08/lihaitao/luoys/data/cdad/omnithought_code_all/train_merge_level1.jsonl \
+    -i /data/luoys/data/cdad/omnithought_math_all/train_merge_level1.jsonl \
+       /data/luoys/data/cdad/omnithought_code_all/train_merge_level1.jsonl \
     -s rv_optimal \
     --rv_min 3 --rv_max 5 \
-    -o /data-share/yeesuanAI08/lihaitao/luoys/data/cdad/omnithought_rv_optimal \
+    -o /data/luoys/data/cdad/omnithought_rv_optimal \
     --train-ratio 0.99 \
     -r ../LlamaFactory/data/dataset_info.json
 """

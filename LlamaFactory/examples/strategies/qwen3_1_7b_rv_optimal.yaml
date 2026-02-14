@@ -1,12 +1,12 @@
 ### model
-model_name_or_path: /mnt/moonfs/public-models-ksyun/Qwen/Qwen3-1.7B-Base
+model_name_or_path: /data/luoys/modelscope_cache/models/Qwen/Qwen3-1.7B-Base
 trust_remote_code: true
 
 ### method
 stage: sft
 do_train: true
 finetuning_type: full
-deepspeed: /mnt/moonfs/luoyashuo-ksyun/code/graphkd/cdad/LlamaFactory/examples/deepspeed/ds_z0_config.json  # choices: [ds_z0_config.json, ds_z2_config.json, ds_z3_config.json]
+deepspeed: /data/luoys/projects/cdad/LlamaFactory/examples/deepspeed/ds_z0_config.json  # choices: [ds_z0_config.json, ds_z2_config.json, ds_z3_config.json]
 
 ### dataset
 dataset: omnithought_rv_optimal_train
@@ -17,7 +17,7 @@ preprocessing_num_workers: 16
 dataloader_num_workers: 4
 
 ### output
-output_dir: /mnt/moonfs/luoyashuo-ksyun/research/cdad/ckpt/strategies/qwen3_1_7b_base_sft_rv_optimal
+output_dir: /data/luoys/checkpoints/cdad/warmup/qwen3_1_7b_base_sft_rv_optimal_warmup
 logging_steps: 10
 save_strategy: epoch
 plot_loss: true
@@ -27,7 +27,7 @@ report_to: swanlab  # choices: [none, wandb, tensorboard, swanlab, mlflow]
 
 ### train
 per_device_train_batch_size: 1
-gradient_accumulation_steps: 2
+gradient_accumulation_steps: 1
 learning_rate: 1.0e-5
 num_train_epochs: 2.0
 lr_scheduler_type: cosine

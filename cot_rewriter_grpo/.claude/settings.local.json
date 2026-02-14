@@ -52,7 +52,8 @@
       "Bash(git log:*)",
       "Bash(echo:*)",
       "Bash(pip install:*)",
-      "Bash(pip index:*)"
+      "Bash(pip index:*)",
+      "Bash(/data/luoys/projects/cdad/cot_rewriter_grpo/.venv/bin/python3:*)"
     ]
   }
 }

@@ -466,6 +466,15 @@ def compute_reward_breakdown_metrics(reward_extra_infos_dict: dict[str, list[Any
             - length_ratio: List of length ratio values
             - format_valid: List of format validity flags (0/1)
             - truncated: List of truncation flags (0/1)
+            - original_fsfs: List of original CoT FSF values (Failure Step Fraction)
+            - rewrite_fsfs: List of rewrite CoT FSF values
+            - original_fsf_parse_success: List of FSF parse success flags for original CoTs (1=success, 0=failed)
+            - rewrite_fsf_parse_success: List of FSF parse success flags for rewrite CoTs (1=success, 0=failed)
+            - original_dot_outputs: List of raw FSF DOT outputs for original CoTs (if save_fsf_dot_outputs=True)
+            - rewrite_dot_outputs: List of raw FSF DOT outputs for rewrite CoTs (if save_fsf_dot_outputs=True)
+            - fsf_parse_failed_count: Count of samples with FSF parsing failed
+            - fsf_group_skipped: Boolean flag indicating if FSF group was skipped
+                (True = entire group's R_logic=0 due to parse failures, False = normal FSF reward applied)
 
     Returns:
         A dictionary with metrics in the format:
@@ -497,6 +506,11 @@ def compute_reward_breakdown_metrics(reward_extra_infos_dict: dict[str, list[Any
         ("rewrite_ppls", "ppl/rewrite"),
         ("original_ppls", "ppl/original"),
         ("relative_improvement_rates", "ppl/relative_improvement"),  # Formula 1: relative improvement rate
+        # FSF (Failure Step Fraction) values - under fsf group
+        ("original_fsfs", "fsf/original"),
+        ("rewrite_fsfs", "fsf/rewrite"),
+        ("original_fsf_parse_success", "fsf/original_parse_success"),  # FSF parse success for original CoTs
+        ("rewrite_fsf_parse_success", "fsf/rewrite_parse_success"),  # FSF parse success for rewrite CoTs
     ]
 
     for dict_key, metric_prefix in reward_components:
@@ -543,5 +557,14 @@ def compute_reward_breakdown_metrics(reward_extra_infos_dict: dict[str, list[Any
             metrics["stats/length_ratio_below_low"] = below_low
             metrics["stats/length_ratio_above_high"] = above_high
             metrics["stats/length_ratio_in_range"] = len(ratios_array) - below_low - above_high
+
+    # FSF parse failure statistics (count of samples with parse failures)
+    if "fsf_parse_failed_count" in reward_extra_infos_dict:
+        fsf_parse_failed_count = reward_extra_infos_dict["fsf_parse_failed_count"]
+        metrics["fsf/parse_failed"] = float(fsf_parse_failed_count)
+
+    if "fsf_group_skipped" in reward_extra_infos_dict:
+        fsf_group_skipped = reward_extra_infos_dict["fsf_group_skipped"]
+        metrics["fsf/group_skipped"] = 1.0 if fsf_group_skipped else 0.0
 
     return metrics

@@ -94,6 +94,8 @@ uv pip install https://github.com/Dao-AILab/flash-attention/releases/download/v2
 uv pip install opentelemetry-api==1.34.1 opentelemetry-sdk==1.34.1 opentelemetry-exporter-otlp==1.34.1
 uv pip install cachetools==5.3.3 # 修复LRUCache报错
 uv pip install torch-memory-saver
+uv pip install pydot>=2.0.0
+uv pip install graphviz>=0.20.0
 ```
 
 

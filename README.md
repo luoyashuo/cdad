@@ -56,20 +56,10 @@ uv pip install llamafactory[metrics]
 uv pip install -r requirements.txt
 ```
 
-### VERL
-```bash
-cd ../verl
-uv pip install -r requirements.txt
-```
-
 ### Evalscope
 ```bash
 uv pip install evalscope
 uv pip install evalscope[sandbox]
-```
-### Verl
-```bash
-uv pip install -e verl
 ```
 
 # Evaluation 临时文件配置
@@ -77,5 +67,7 @@ uv pip install -e verl
 评测时的沙箱临时文件存储在 `/mnt/moonfs/luoyashuo-ksyun/tmp/evalscope_sandbox`，
 通过 `eval_configs/eval_cg.yaml` 中的 `sandbox.work_dir` 配置。
 
+
+# 更正关键package
 uv pip install trl==0.24.0
 uv pip install transformers==4.55.0

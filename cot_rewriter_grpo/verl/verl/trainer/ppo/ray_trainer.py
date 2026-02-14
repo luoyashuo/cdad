@@ -1441,7 +1441,29 @@ class RayPPOTrainer:
                         batch.batch["token_level_scores"] = reward_tensor
 
                         if reward_extra_infos_dict:
-                            batch.non_tensor_batch.update({k: np.array(v) for k, v in reward_extra_infos_dict.items()})
+                            # Ensure all values are arrays (handle scalars from reward functions)
+                            # Scalar values (e.g., avg_length, avg_reward) cause np.array_split to fail
+                            # Skip global config values that should not be per-sample (e.g., penalty_mode, base_reward_range)
+                            global_config_keys = {"penalty_mode", "base_reward_range", "lambda_logic", "lambda_useful",
+                                              "too_short_threshold_low", "too_short_threshold_high",
+                                              "too_long_threshold_low", "too_long_threshold_high",
+                                              "fsf_reward_scale", "fsf_temperature", "fsf_top_k", "fsf_top_p",
+                                              "use_logic_reward", "use_useful_reward", "alpha_cog",
+                                              "use_tiered_reward", "tier_step", "tier_reward",
+                                              "reward_mode", "use_reward_delta", "truncation_penalty",
+                                              "format_penalty", "too_short_max_penalty", "too_long_max_penalty",
+                                              "fsf_parse_failed_count", "fsf_group_skipped"}  # Scalar counts, not per-sample
+                            for k, v in reward_extra_infos_dict.items():
+                                # Skip global config values that are the same for all samples
+                                if k in global_config_keys:
+                                    continue
+                                if isinstance(v, (int, float, str, bool)):
+                                    # Wrap scalar in a single-element list
+                                    batch.non_tensor_batch[k] = np.array([v], dtype=object)
+                                elif isinstance(v, list):
+                                    batch.non_tensor_batch[k] = np.array(v, dtype=object)
+                                else:
+                                    batch.non_tensor_batch[k] = np.array(v)
 
                         # compute rewards. apply_kl_penalty if available
                         if self.config.algorithm.use_kl_in_reward:

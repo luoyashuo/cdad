@@ -69,7 +69,7 @@ from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple
 from tqdm import tqdm
 from loguru import logger
-
+import sys
 
 GRAPH_GENERATION_PROMPT = """
 Parse the reasoning trace into a Graphviz diagram. Focus on these essentials:
@@ -139,6 +139,12 @@ Examples:
         "--train-ratio", "-t", type=float, default=0.98, help="训练集比例（默认: 0.98）"
     )
     parser.add_argument("--seed", type=int, default=42, help="随机种子（默认: 42）")
+    parser.add_argument(
+        "--max-samples",
+        type=int,
+        default=None,
+        help="最大样本量限制，如果设置则从全部样本中随机采样（默认: 不限制）",
+    )
 
     return parser.parse_args()
 
@@ -335,6 +341,7 @@ def register_to_dataset_info(
                 "content_tag": "content",
                 "user_tag": "user",
                 "assistant_tag": "assistant",
+                "system_tag": "system",
             },
         }
 
@@ -376,6 +383,8 @@ def main():
     logger.info(f"📝 dataset_info: {args.dataset_info}")
     logger.info(f"📊 训练集比例: {args.train_ratio}")
     logger.info(f"🎲 随机种子: {args.seed}")
+    if args.max_samples is not None:
+        logger.info(f"✂️ 最大样本量: {args.max_samples}")
     logger.info("=" * 70)
 
     # 检查输入文件
@@ -394,6 +403,12 @@ def main():
     if not all_entries:
         logger.error("没有找到有效的数据条目！")
         return 1
+
+    # 应用最大样本量限制（如果设置了）
+    if args.max_samples is not None and len(all_entries) > args.max_samples:
+        logger.info(f"📊 样本量限制: {len(all_entries)} -> {args.max_samples}")
+        random.seed(args.seed)
+        all_entries = random.sample(all_entries, args.max_samples)
 
     print_statistics(all_entries, "Total Data")
 
@@ -427,6 +442,7 @@ def main():
         "input_files": args.input,
         "train_ratio": args.train_ratio,
         "seed": args.seed,
+        "max_samples": args.max_samples,
         "total_count": len(all_entries),
         "train_count": len(train_entries),
         "val_count": len(val_entries),
@@ -472,41 +488,15 @@ def main():
 if __name__ == "__main__":
     sys.exit(main())
 
-# ============================================================================
-# 使用示例
-# ============================================================================
-
-# 1. 基本使用（单个文件）
-"""
-python build_fsf_judge_graph.py \
-    -i /data-share/yeesuanAI08/lihaitao/luoys/data/cdad/omnithought_math_all/train_merge_level1.jsonl \
-    -o /data-share/yeesuanAI08/lihaitao/luoys/data/cdad/graph_generator \
-    -r ../LlamaFactory/data/dataset_info.json
-"""
 
 # 2. 多个输入文件
 """
 python build_fsf_judge_graph.py \
-    -i /data-share/yeesuanAI08/lihaitao/luoys/data/cdad/omnithought_math_all/train_merge_level1.jsonl \
-       /data-share/yeesuanAI08/lihaitao/luoys/data/cdad/omnithought_code_all/train_merge_level1.jsonl \
-    -o /data-share/yeesuanAI08/lihaitao/luoys/data/cdad/graph_generator \
+    -i /data/luoys/data/cdad/omnithought_math_all/train_merge_level1.jsonl \
+       /data/luoys/data/cdad/omnithought_code_all/train_merge_level1.jsonl \
+    -o /data/luoys/data/cdad/fsf_grm \
     --train-ratio 0.98 \
     --seed 42 \
-    -r ../LlamaFactory/data/dataset_info.json
-"""
-python build_fsf_judge_graph.py \
-    -i /data-share/yeesuanAI08/lihaitao/luoys/data/cdad/omnithought_math_all/train_merge_level1.jsonl \
-    -o /data-share/yeesuanAI08/lihaitao/luoys/data/cdad/graph_generator \
-    -r ../LlamaFactory/data/dataset_info.json
-"""
-
-# 2. 多个输入文件
-"""
-python build_fsf_judge_graph.py \
-    -i /data-share/yeesuanAI08/lihaitao/luoys/data/cdad/omnithought_math_all/train_merge_level1.jsonl \
-       /data-share/yeesuanAI08/lihaitao/luoys/data/cdad/omnithought_code_all/train_merge_level1.jsonl \
-    -o /data-share/yeesuanAI08/lihaitao/luoys/data/cdad/graph_generator \
-    --train-ratio 0.98 \
-    --seed 42 \
+    --max-samples 50000 \
     -r ../LlamaFactory/data/dataset_info.json
 """
