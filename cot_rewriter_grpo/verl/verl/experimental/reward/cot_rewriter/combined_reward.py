@@ -615,9 +615,9 @@ class CombinedRewardComputer:
                         f"R_logic will be 0 for all samples, but R_cog and R_useful are still applied."
                     )
                     # Set all FSF rewards to 0 for group
-                    r_logic = [0.0] * batch_size
-                    rewrite_fsfs = [0.0] * batch_size
-                    rewrite_dot_outputs = [None] * batch_size
+                    r_logic = [0.0 for _ in range(batch_size)]
+                    rewrite_fsfs = [0.0 for _ in range(batch_size)]
+                    rewrite_dot_outputs = [None for _ in range(batch_size)]
                     fsf_group_skipped = True
                 else:
                     fsf_group_skipped = False
@@ -834,13 +834,13 @@ class CombinedRewardComputer:
             "token_log_probs": token_log_probs,
             "token_ids": token_ids,
             "reward_deltas": reward_deltas,  # NEW: Log raw rewrite-original deltas
+            "original_fsfs": original_fsfs,  # FSF values for original CoTs (pre-computed from dataset)
+            "rewrite_fsfs": rewrite_fsfs,  # FSF values for rewrite CoTs (computed by FSF model)
+            "original_dot_outputs": original_dot_outputs,  # Raw FSF DOT outputs for original CoTs (if save_fsf_dot_outputs=True)
+            "rewrite_dot_outputs": rewrite_dot_outputs,  # Raw FSF DOT outputs for rewrite CoTs (if save_fsf_dot_outputs=True)
+            "fsf_parse_failed_count": fsf_parse_failed_count,  # Number of samples with FSF parse failures
+            "fsf_group_skipped": fsf_group_skipped,  # Whether FSF reward was skipped for entire group
             "extra_info": {
-                "original_fsfs": original_fsfs,
-                "rewrite_fsfs": rewrite_fsfs,
-                "original_dot_outputs": original_dot_outputs,  # Raw FSF DOT outputs for original CoTs (if save_fsf_dot_outputs=True)
-                "rewrite_dot_outputs": rewrite_dot_outputs,  # Raw FSF DOT outputs for rewrite CoTs (if save_fsf_dot_outputs=True)
-                "fsf_parse_failed_count": fsf_parse_failed_count,  # Number of samples with FSF parse failures
-                "fsf_group_skipped": fsf_group_skipped,  # Whether FSF reward was skipped for entire group
                 "lambda_logic": self.lambda_logic,
                 "lambda_useful": self.lambda_useful,
                 "too_short_penalties": too_short_penalties,
@@ -849,12 +849,11 @@ class CombinedRewardComputer:
                 "too_long_penalty_coeffs": too_long_penalty_coeffs,  # NEW: too_long_penalty coefficients
                 "length_ratios": length_ratios,  # For DAPO filter_groups
                 # Penalty info for external use (format/truncation penalties)
-                "penalty_mode": self.penalty_mode,  # NEW: "relative" or "absolute"
-                "base_rewards": base_rewards,
-                "base_reward_range": base_reward_range,
-                # === DEBUG: Pre-computed FSF from training data ===
-                "pre_computed_original_fsfs": pre_computed_original_fsfs,  # Pre-computed FSF for original CoTs (from training data)
-            },
+            "penalty_mode": self.penalty_mode,  # NEW: "relative" or "absolute"
+            "base_rewards": base_rewards,
+            "base_reward_range": base_reward_range,
+            # === DEBUG: Pre-computed FSF from training data ===
+            "pre_computed_original_fsfs": pre_computed_original_fsfs,  # Pre-computed FSF for original CoTs (from training data)
         }
 
 
@@ -1237,15 +1236,16 @@ def compute_cot_rewriter_reward(
     total_rewards = result["total_rewards"]
     token_log_probs = result["token_log_probs"]
     token_ids = result["token_ids"]
-    original_fsfs = result["extra_info"]["original_fsfs"]
-    rewrite_fsfs = result["extra_info"]["rewrite_fsfs"]
+    original_fsfs = result.get("original_fsfs", [0.0] * batch_size)
+    rewrite_fsfs = result.get("rewrite_fsfs", [0.0] * batch_size)
     # Extract DOT outputs if available (when save_fsf_dot_outputs=True)
     original_dot_outputs = result["extra_info"].get("original_dot_outputs", [None] * batch_size)
     rewrite_dot_outputs = result["extra_info"].get("rewrite_dot_outputs", [None] * batch_size)
     # FSF parse success status: True if FSF value is not None, False otherwise
     original_fsf_parse_success = [1 if f is not None else 0 for f in original_fsfs]
     rewrite_fsf_parse_success = [1 if f is not None else 0 for f in rewrite_fsfs]
-    too_short_penalties = result["extra_info"].get("too_short_penalties", [0.0] * batch_size)
+    rewrite_fsf_parse_success = [1 if f is not None else 0 for f in rewrite_fsfs]
+    too_short_penalties = result.get("too_short_penalties", [0.0] * batch_size)
     too_short_penalty_coeffs = result["extra_info"].get("too_short_penalty_coeffs", [0.0] * batch_size)
     too_long_penalties = result["extra_info"].get("too_long_penalties", [0.0] * batch_size)
     too_long_penalty_coeffs = result["extra_info"].get("too_long_penalty_coeffs", [0.0] * batch_size)
