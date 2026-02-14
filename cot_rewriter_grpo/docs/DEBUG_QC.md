@@ -10,4 +10,5 @@ source /data/luoys/projects/cdad/cot_rewriter_grpo/.venv/bin/activate
 4. 你不能修改数据的长度， response长度
 5. 参考原版verl逻辑：/data/luoys/projects/verl-0.5.0
 # 问题
-/data/luoys/projects/cdad/cot_rewriter_grpo/logs/grpo/phi_4b_grpo_8x80g.log/data/luoys/projects/cdad/cot_rewriter_grpo/logs/grpo/phi_4b_grpo_8x80g.log
+我希望ppl模式下的奖励是：(avgprob(student(answer|question,rewrite_cot)) - avgprob(student(answer|question,original_cot))) / avgprob(student(answer|question,original_cot)) 
+你帮我更新，并且给我以ppl为基本元素的公式

@@ -1500,6 +1500,8 @@ class RayPPOTrainer:
                             reward_fields = [
                                 "original_cot", "ground_truth",
                                 "cognitive_rewards", "useful_rewards", "rewrite_mean_log_probs", "original_mean_log_probs", "no_cot_mean_log_probs",
+                                "rewrite_ppls", "original_ppls",  # PPL values (ppl mode only)
+                                "relative_improvement_rates",  # Formula 1: avg_prob(rewrite)/avg_prob(original) - 1 (observation)
                                 "logic_rewards", "total_rewards", "original_fsfs", "rewrite_fsfs",
                                 "truncation_penalties", "format_penalties", "too_short_penalties",
                                 "truncated", "format_valid", "length_ratio",
@@ -2064,6 +2066,8 @@ class RayDAPOTrainer(RayPPOTrainer):
                                 "request_id", "original_cot", "ground_truth",
                                 # Reward breakdown fields
                                 "cognitive_rewards", "useful_rewards", "rewrite_mean_log_probs", "original_mean_log_probs", "no_cot_mean_log_probs",
+                                "rewrite_ppls", "original_ppls",  # PPL values (ppl mode only)
+                                "relative_improvement_rates",  # Formula 1: avg_prob(rewrite)/avg_prob(original) - 1 (observation)
                                 "logic_rewards", "total_rewards", "original_fsfs", "rewrite_fsfs",
                                 # Penalty fields
                                 "truncation_penalties", "format_penalties", "too_short_penalties",

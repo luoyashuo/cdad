@@ -226,7 +226,7 @@ custom_reward_function:
     sglang_mem_fraction_static: 0.30
     cleanup_after_compute: true
     # ========== Reward 计算模式配置 ==========
-    reward_only_use_logprob: true  # If True, reward = answer_log_prob(rewrite) only (no diff with original)
+    use_reward_delta: true  # If True, reward = answer_log_prob(rewrite) only (no diff with original)
     use_useful_reward: false  # Whether to use R_useful in reward calculation (default: true)
 
     # ========== 阶梯式奖励配置 ==========

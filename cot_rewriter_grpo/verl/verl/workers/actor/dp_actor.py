@@ -445,8 +445,23 @@ class DataParallelPPOActor(BasePPOActor):
                     if entropy_coeff != 0:
                         entropy_loss = agg_loss(loss_mat=entropy, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
 
+                        # Apply entropy regularization only when entropy is below lower_bound threshold
+                        # This prevents over-exploration when policy is already uncertain (high entropy)
+                        entropy_coeff_lower_bound = self.config.get("entropy_coeff_lower_bound", None)
+                        if entropy_coeff_lower_bound is not None:
+                            if entropy_loss >= entropy_coeff_lower_bound:
+                                # Entropy is already high enough, no need to encourage exploration
+                                effective_entropy_coeff = 0.0
+                            else:
+                                # Entropy is low, apply full entropy coefficient for exploration
+                                effective_entropy_coeff = entropy_coeff
+                            micro_batch_metrics["actor/effective_entropy_coeff"] = effective_entropy_coeff
+                        else:
+                            # No lower bound specified, always apply entropy coefficient
+                            effective_entropy_coeff = entropy_coeff
+
                         # compute policy loss
-                        policy_loss = pg_loss - entropy_loss * entropy_coeff
+                        policy_loss = pg_loss - entropy_loss * effective_entropy_coeff
                     else:
                         policy_loss = pg_loss
 

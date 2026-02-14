@@ -25,7 +25,7 @@ defaults:
 # ============ Experiment Configuration ============
 trainer:
   project_name: cot_rewriter_grpo
-  experiment_name: llama3_8b_grpo_8x80g
+  experiment_name: llama3_8b_grpo_8x80g_v5
   total_epochs: 1
   total_training_steps: 500
   save_freq: 50
@@ -36,7 +36,7 @@ trainer:
   max_actor_ckpt_to_keep: 3
   # 检查点保存路径（使用 CHECKPOINT_BASE_DIR 环境变量）
   default_local_dir: ${oc.env:CHECKPOINT_BASE_DIR}/cot_rewriter_grpo/${trainer.experiment_name}
-  n_gpus_per_node: 8
+  n_gpus_per_node: 4
   nnodes: 1
   logger: ["swanlab","console"]
 
@@ -92,13 +92,15 @@ actor_rollout_ref:
     clip_ratio: 0.2
     clip_ratio_low: 0.2
     clip_ratio_high: 0.28
-    entropy_coeff: 0.0
+    entropy_coeff: 0.001  # 尝试增加一些探索
+    entropy_coeff_lower_bound: 0.1  # 只有当 entropy < 0.1 时才应用 entropy_coeff
+                                       # 设为 null 则始终应用 entropy_coeff
     grad_clip: 1.0
     ppo_mini_batch_size: 1
     ppo_micro_batch_size_per_gpu: 1
     use_kl_in_reward: false
     use_kl_loss: true
-    kl_loss_coef: 0.01
+    kl_loss_coef: 0.0
     kl_loss_type: low_var_kl
     entropy_from_logits_with_chunking: true
 
@@ -116,7 +118,7 @@ actor_rollout_ref:
         transformer_layer_cls_to_wrap: ["LlamaDecoderLayer"]
         min_num_params: 0
     optim:
-      lr: 1e-6
+      lr: 2e-6
       weight_decay: 0.01
       lr_scheduler_type: cosine
       lr_warmup_steps_ratio: 0.1
@@ -178,7 +180,7 @@ algorithm:
   # GRPO 需要动态采样过滤来处理组内样本差异
   filter_groups:
     _target_: verl.trainer.config.FilterGroupsConfig
-    enable: true
+    enable: false
     metric: "length_ratio"
     max_num_gen_batches: -1
 
@@ -223,7 +225,7 @@ custom_reward_function:
     sglang_mem_fraction_static: 0.30
     cleanup_after_compute: true
     # ========== Reward 计算模式配置 ==========
-    reward_only_use_logprob: true  # If True, reward = answer_log_prob(rewrite) only (no diff with original)
+    use_reward_delta: false  # If True, reward = answer_log_prob(rewrite) only (no diff with original)
     use_useful_reward: false  # Whether to use R_useful in reward calculation (default: true)
 
     # ========== 阶梯式奖励配置 ==========
@@ -232,7 +234,7 @@ custom_reward_function:
     tier_reward: 0.1
 
     # ========== Reward 计算模式配置 ==========
-    reward_mode: logprob  # "ppl" or "logprob": Reward calculation mode
+    reward_mode: ppl  # "ppl" or "logprob": Reward calculation mode
                             # - "ppl": R_cog = PPL(original) - PPL(rewrite)
                             # - "logprob": R_cog = answer_log_prob(rewrite) - answer_log_prob(original)
 
@@ -242,7 +244,13 @@ custom_reward_function:
     format_penalty: 0.5
     too_short_threshold_low: 0.2
     too_short_threshold_high: 0.5
-    too_short_max_penalty: 0.5
+    too_short_max_penalty: 0.4
+    too_long_threshold_low: 1.8  # Lower threshold for too_long_penalty
+    too_long_threshold_high: 2.5  # Upper threshold for too_long_penalty
+    too_long_max_penalty: 0.4  # Maximum penalty for too long outputs
+    penalty_mode: absolute  # "relative" or "absolute": How to apply penalties
+                                # - "relative": penalty = coefficient * base_reward_range
+                                # - "absolute": penalty = coefficient (fixed value)
     field_mapping:
       prompt_key: problem
       reward_model_key: reward_model

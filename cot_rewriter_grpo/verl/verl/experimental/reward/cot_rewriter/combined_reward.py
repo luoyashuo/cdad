@@ -61,8 +61,8 @@ def extract_rewrite_reasoning(text: str) -> Tuple[str, bool, str]:
     if not text:
         return "", False, "empty_text"
 
-    # Check for "## Problem" marker (format error)
-    if "## Problem" in text:
+    # Check for "## " marker (format error)
+    if "## " in text: 
         return "", False, "contains_problem_marker"
 
     # Define tags
@@ -223,13 +223,25 @@ class CombinedRewardComputer:
         too_short_threshold_low: float = 0.4,  # Lower threshold for too_short_penalty
         too_short_threshold_high: float = 0.8,  # Upper threshold for too_short_penalty
         too_short_max_penalty: float = 0.5,  # Maximum penalty for too short outputs
+        too_long_threshold_low: float = 1.5,  # Lower threshold for too_long_penalty
+        too_long_threshold_high: float = 2.0,  # Upper threshold for too_long_penalty
+        too_long_max_penalty: float = 0.5,  # Maximum penalty for too long outputs
+        penalty_mode: str = "relative",  # "relative" or "absolute": How to apply penalties
+                                        # - "relative": penalty = coefficient * base_reward_range
+                                        # - "absolute": penalty = coefficient (fixed value)
         use_tiered_reward: bool = True,  # Whether to use tiered reward for R_cog
         tier_step: float = 0.05,  # 区间大小：每个阶梯的 R_cog 范围
         tier_reward: float = 0.1,  # 每阶梯奖励值：第一阶梯得 tier_reward，第二阶梯得 2*tier_reward
         reward_mode: str = "ppl",  # "ppl" or "logprob": Reward calculation mode
-                                   # - "ppl": R_cog = PPL(original) - PPL(rewrite)
+                                   # - "ppl": R_cog = avg_prob(rewrite) = 1 / PPL(rewrite) [formula 2: absolute quality]
+                                   #           Also logs formula 1: avg_prob(rewrite)/avg_prob(original) - 1 as observation
+                                   #           where avg_prob = exp(mean_log_prob), PPL = 1/avg_prob
                                    # - "logprob": R_cog = answer_log_prob(rewrite) - answer_log_prob(original)
-        reward_only_use_logprob: bool = False,  # If True, R_cog = answer_log_prob(rewrite) only (no delta)
+        use_reward_delta: bool = True,  # If True (default), R_cog = rewrite - original (delta).
+                                      # If False, R_cog = rewrite only (absolute value).
+                                      # Deprecated alias: reward_only_use_logprob (inverted logic!)
+        reward_only_use_logprob: bool = None,  # Deprecated: use use_reward_delta instead
+                                                # True = use absolute value (no delta), False = use delta
         **kwargs,  # Ignore deprecated params
     ):
         """
@@ -262,16 +274,30 @@ class CombinedRewardComputer:
             too_short_threshold_high: Upper threshold for too_short_penalty (default: 0.8). When
                 rewrite_ratio >= high, no penalty is applied.
             too_short_max_penalty: Maximum penalty for too short outputs (default: 0.5).
+            too_long_threshold_low: Lower threshold for too_long_penalty (default: 1.5). When
+                rewrite_ratio >= high, penalty is at maximum. Between low and high, penalty scales linearly.
+            too_long_threshold_high: Upper threshold for too_long_penalty (default: 2.0). When
+                rewrite_ratio < low, no penalty is applied.
+            too_long_max_penalty: Maximum penalty for too long outputs (default: 0.5).
+            penalty_mode: How to apply penalty values (default: "relative").
+                - "relative": penalty = coefficient * base_reward_range (scales with reward spread)
+                - "absolute": penalty = coefficient (fixed value, independent of rewards)
             use_tiered_reward: Whether to use tiered (step-wise) reward for R_cog (default: True).
             tier_step: 区间大小，每个阶梯的 R_cog 区间 (default: 0.05).
             tier_reward: 每阶梯奖励值，第一阶梯得 tier_reward，第二阶梯得 2*tier_reward (default: 0.1).
             reward_mode: Reward calculation mode (default: "ppl").
-                - "ppl": R_cog = PPL(original) - PPL(rewrite), where PPL = exp(-mean_log_prob)
+                - "ppl": R_cog = (avg_prob(rewrite) - avg_prob(original)) / avg_prob(original)
+                  where avg_prob = exp(mean_log_prob), PPL = 1/avg_prob = exp(-mean_log_prob)
+                  Equivalent: R_cog = (PPL(original) - PPL(rewrite)) / PPL(original)
+                            = 1 - PPL(rewrite) / PPL(original)
                 - "logprob": R_cog = answer_log_prob(rewrite) - answer_log_prob(original),
                   where answer_log_prob = mean(token_log_probs) + alpha_cog * min(token_log_probs)
-            reward_only_use_logprob: If True, R_cog = answer_log_prob(rewrite) only, without
-                computing the delta from original. This is useful for absolute reward calculation.
-                When False (default), R_cog = answer_log_prob(rewrite) - answer_log_prob(original).
+            use_reward_delta: If True (default), R_cog = value(rewrite) - value(original), computing
+                the improvement delta. If False, R_cog = value(rewrite) only (absolute value).
+                For "ppl" mode: delta = (avg_prob(rewrite) - avg_prob(original)) / avg_prob(original)
+                For "logprob" mode: delta = logprob(rewrite) - logprob(original) (higher is better)
+            reward_only_use_logprob: (Deprecated) Use use_reward_delta instead. This parameter has
+                inverted logic: True means absolute value (no delta), False means use delta.
 
         阶梯式奖励配置示例:
         - tier_step=0.05, tier_reward=0.1:
@@ -294,11 +320,32 @@ class CombinedRewardComputer:
         self.too_short_threshold_low = too_short_threshold_low
         self.too_short_threshold_high = too_short_threshold_high
         self.too_short_max_penalty = too_short_max_penalty
+        self.too_long_threshold_low = too_long_threshold_low
+        self.too_long_threshold_high = too_long_threshold_high
+        self.too_long_max_penalty = too_long_max_penalty
+        self.penalty_mode = penalty_mode
         self.use_tiered_reward = use_tiered_reward
         self.tier_step = tier_step
         self.tier_reward = tier_reward
         self.reward_mode = reward_mode
-        self.reward_only_use_logprob = reward_only_use_logprob
+
+        # Handle reward_only_use_logprob deprecation and map to use_reward_delta
+        # reward_only_use_logprob has INVERTED logic compared to use_reward_delta
+        # - reward_only_use_logprob=True means absolute value (use_reward_delta=False)
+        # - reward_only_use_logprob=False means delta (use_reward_delta=True)
+        if reward_only_use_logprob is not None:
+            import warnings
+            warnings.warn(
+                "[DEPRECATION] reward_only_use_logprob is deprecated. Use use_reward_delta instead. "
+                "Note: reward_only_use_logprob has inverted logic (True=absolute, False=delta). "
+                "Setting use_reward_delta accordingly.",
+                DeprecationWarning,
+                stacklevel=2
+            )
+            self.use_reward_delta = not reward_only_use_logprob  # Invert the logic!
+        else:
+            self.use_reward_delta = use_reward_delta
+        self.reward_only_use_logprob = reward_only_use_logprob  # Keep for logging
 
         # Initialize Student Reward client based on backend
         if reward_backend == "sglang":
@@ -394,19 +441,22 @@ class CombinedRewardComputer:
 
         # Compute cognitive reward (mode depends on self.reward_mode)
         if self.reward_mode == "ppl":
-            # R_cog = -PPL(Q, Rewrite_CoT, A) - (-PPL(Q, Original_CoT, A))
-            #      = PPL(original) - PPL(rewrite)
-            # 其中 PPL = exp(-mean_log_prob)
+            # R_cog (formula 2) = avg_prob(rewrite) = 1 / PPL(rewrite) [absolute quality]
+            # Also computes formula 1 = avg_prob(rewrite)/avg_prob(original) - 1 for logging
+            # where avg_prob = exp(mean_log_prob), PPL = 1/avg_prob
             pass
         else:  # "logprob" mode
             # R_cog = answer_log_prob(Q, Rewrite_CoT, A) - answer_log_prob(Q, Original_CoT, A)
-            # 其中 answer_log_prob = mean(token_log_probs) + alpha_cog * min(token_log_probs)
+            # where answer_log_prob = mean(token_log_probs) + alpha_cog * min(token_log_probs)
             pass
 
-        # Pass reward_only_use_logprob to student client if supported
+        # Pass use_reward_delta to student client if supported (negated because old param has inverted logic)
         compute_kwargs = {"alpha_cog": self.alpha_cog}
+        if hasattr(self.student_client, 'use_reward_delta'):
+            compute_kwargs["use_reward_delta"] = self.use_reward_delta
+        # Backward compatibility: also pass old param name if client expects it
         if hasattr(self.student_client, 'reward_only_use_logprob'):
-            compute_kwargs["reward_only_use_logprob"] = self.reward_only_use_logprob
+            compute_kwargs["reward_only_use_logprob"] = not self.use_reward_delta  # Invert for old API
 
         cog_result = self.student_client.compute_cognitive_reward_batch(
             questions=questions,
@@ -424,6 +474,11 @@ class CombinedRewardComputer:
         no_cot_mean_log_probs = cog_result.get("no_cot_mean_log_probs", [0.0] * batch_size)  # Baseline (no CoT)
         token_log_probs = cog_result["rewrite_token_log_probs"]
         token_ids = cog_result["rewrite_token_ids"]
+        # PPL values (ppl mode only)
+        rewrite_ppls = cog_result.get("rewrite_ppls", [float('nan')] * batch_size)
+        original_ppls = cog_result.get("original_ppls", [float('nan')] * batch_size)
+        # Relative improvement rates (formula 1 observation value)
+        relative_improvement_rates = cog_result.get("relative_improvement_rates", [float('nan')] * batch_size)
 
         # Compute reward_deltas: raw difference in mean log probs (without alpha_cog * min term)
         # This tracks the pure log_prob improvement, excluding the worst-token penalty
@@ -464,21 +519,27 @@ class CombinedRewardComputer:
             original_fsfs = [0.0] * batch_size
             rewrite_fsfs = [0.0] * batch_size
 
-        # Compute too_short_penalty: penalize rewrites that are too short compared to original_cot
-        # Uses RELATIVE penalty: penalty = coefficient * range(R_cog + R_useful)
+        # Compute too_short_penalty and too_long_penalty based on length ratio
         # Penalty formula with low/high thresholds:
         #   ratio = rewrite_token_len / original_token_len
-        #   - If ratio >= high: penalty_coefficient = 0
-        #   - If low <= ratio < high: penalty_coefficient = max_penalty * (high - ratio) / (high - low)
-        #   - If ratio < low: penalty_coefficient = max_penalty
+        # too_short_penalty (ratio < too_short_threshold_high):
+        #   - If ratio >= too_short_threshold_high: penalty_coefficient = 0
+        #   - If too_short_threshold_low <= ratio < too_short_threshold_high: penalty_coefficient = max_penalty * (high - ratio) / (high - low)
+        #   - If ratio < too_short_threshold_low: penalty_coefficient = max_penalty
+        # too_long_penalty (ratio > too_long_threshold_low):
+        #   - If ratio <= too_long_threshold_low: penalty_coefficient = 0
+        #   - If too_long_threshold_low < ratio <= too_long_threshold_high: penalty_coefficient = max_penalty * (ratio - low) / (high - low)
+        #   - If ratio > too_long_threshold_high: penalty_coefficient = max_penalty
         too_short_penalties = [0.0] * batch_size
-        too_short_penalty_coeffs = [0.0] * batch_size  # Coefficients before multiplying by range
+        too_short_penalty_coeffs = [0.0] * batch_size  # Coefficients before applying penalty_mode
+        too_long_penalties = [0.0] * batch_size
+        too_long_penalty_coeffs = [0.0] * batch_size  # Coefficients before applying penalty_mode
         length_ratios = [0.0] * batch_size  # Track length ratios for DAPO filter_groups
 
         # Get tokenizer from student_client for token length calculation
         tokenizer = getattr(self.student_client, 'tokenizer', None)
         if tokenizer is None:
-            logger.warning("[TOO_SHORT_PENALTY] Tokenizer not available, skipping too_short_penalty")
+            logger.warning("[LENGTH_PENALTY] Tokenizer not available, skipping length penalties")
         else:
             for i in range(batch_size):
                 original_text = original_cots[i] if original_cots[i] else ""
@@ -492,41 +553,68 @@ class CombinedRewardComputer:
                     if original_token_len > 0:
                         ratio = rewrite_token_len / original_token_len
                         length_ratios[i] = ratio  # Store for DAPO filter_groups
-                        low = self.too_short_threshold_low
-                        high = self.too_short_threshold_high
 
-                        if ratio >= high:
+                        # Compute too_short_penalty coefficient
+                        low_short = self.too_short_threshold_low
+                        high_short = self.too_short_threshold_high
+
+                        if ratio >= high_short:
                             # No penalty when ratio is above high threshold
-                            penalty_coeff = 0.0
-                        elif ratio < low:
+                            short_penalty_coeff = 0.0
+                        elif ratio < low_short:
                             # Maximum penalty coefficient when ratio is below low threshold
-                            penalty_coeff = self.too_short_max_penalty
+                            short_penalty_coeff = self.too_short_max_penalty
                         else:
                             # Linear penalty between low and high: 0 at high, max_coeff at low
-                            penalty_coeff = self.too_short_max_penalty * (high - ratio) / (high - low)
+                            short_penalty_coeff = self.too_short_max_penalty * (high_short - ratio) / (high_short - low_short)
 
-                        too_short_penalty_coeffs[i] = penalty_coeff
-                        if penalty_coeff != 0 and i < 3:  # Log first few samples
+                        too_short_penalty_coeffs[i] = short_penalty_coeff
+                        if short_penalty_coeff != 0 and i < 3:  # Log first few samples
                             logger.info(
                                 f"[TOO_SHORT_PENALTY] Sample {i}: "
                                 f"original_token_len={original_token_len}, rewrite_token_len={rewrite_token_len}, "
-                                f"ratio={ratio:.3f} (low={low}, high={high}), penalty_coeff={penalty_coeff:.4f}"
+                                f"ratio={ratio:.3f} (low={low_short}, high={high_short}), penalty_coeff={short_penalty_coeff:.4f}"
+                            )
+
+                        # Compute too_long_penalty coefficient
+                        low_long = self.too_long_threshold_low
+                        high_long = self.too_long_threshold_high
+
+                        if ratio <= low_long:
+                            # No penalty when ratio is below or equal to low threshold
+                            long_penalty_coeff = 0.0
+                        elif ratio > high_long:
+                            # Maximum penalty coefficient when ratio is above high threshold
+                            long_penalty_coeff = self.too_long_max_penalty
+                        else:
+                            # Linear penalty between low and high: 0 at low, max_coeff at high
+                            long_penalty_coeff = self.too_long_max_penalty * (ratio - low_long) / (high_long - low_long)
+
+                        too_long_penalty_coeffs[i] = long_penalty_coeff
+                        if long_penalty_coeff != 0 and i < 3:  # Log first few samples
+                            logger.info(
+                                f"[TOO_LONG_PENALTY] Sample {i}: "
+                                f"original_token_len={original_token_len}, rewrite_token_len={rewrite_token_len}, "
+                                f"ratio={ratio:.3f} (low={low_long}, high={high_long}), penalty_coeff={long_penalty_coeff:.4f}"
                             )
 
         # Log length_ratio statistics for DAPO filter_groups
         valid_ratios = [r for r in length_ratios if r > 0]
         if valid_ratios:
-            low = self.too_short_threshold_low
-            high = self.too_short_threshold_high
-            num_above_low = sum(1 for r in valid_ratios if r >= low)
-            num_above_high = sum(1 for r in valid_ratios if r >= high)
+            low_short = self.too_short_threshold_low
+            high_short = self.too_short_threshold_high
+            low_long = self.too_long_threshold_low
+            high_long = self.too_long_threshold_high
+            num_above_low_short = sum(1 for r in valid_ratios if r >= low_short)
+            num_above_high_short = sum(1 for r in valid_ratios if r >= high_short)
+            num_above_low_long = sum(1 for r in valid_ratios if r > low_long)
+            num_above_high_long = sum(1 for r in valid_ratios if r > high_long)
             logger.info(
                 f"[LENGTH_RATIO] batch_size={batch_size}, "
                 f"mean={sum(valid_ratios)/len(valid_ratios):.3f}, "
                 f"min={min(valid_ratios):.3f}, max={max(valid_ratios):.3f}, "
-                f"low={low}, high={high}, "
-                f"num_above_low={num_above_low}/{len(valid_ratios)}, "
-                f"num_above_high={num_above_high}/{len(valid_ratios)}"
+                f"too_short: low={low_short}, high={high_short} (num_above_low={num_above_low_short}/{len(valid_ratios)}, num_above_high={num_above_high_short}/{len(valid_ratios)}), "
+                f"too_long: low={low_long}, high={high_long} (num_above_low={num_above_low_long}/{len(valid_ratios)}, num_above_high={num_above_high_long}/{len(valid_ratios)})"
             )
 
         # Compute base rewards: R_base = R_cog + lambda_useful * R_useful + lambda_logic * R_logic
@@ -538,39 +626,60 @@ class CombinedRewardComputer:
             base_rewards = [c + self.lambda_logic * l
                            for c, l in zip(r_cog, r_logic)]
 
-        # Compute range of base_rewards (R_cog + R_useful) for relative penalty scaling
-        # The range is max - min, representing the spread of rewards within the group
-        base_reward_range = max(base_rewards) - min(base_rewards) if len(base_rewards) > 1 else 1.0
-        # Avoid zero or extremely small ranges
-        base_reward_range = max(base_reward_range, 1e-6)
+        # Determine penalty scaling factor based on penalty_mode
+        if self.penalty_mode == "relative":
+            # Compute range of base_rewards for relative penalty scaling
+            # The range is max - min, representing the spread of rewards within the group
+            base_reward_range = max(base_rewards) - min(base_rewards) if len(base_rewards) > 1 else 1.0
+            # Avoid zero or extremely small ranges
+            base_reward_range = max(base_reward_range, 1e-6)
 
-        logger.info(
-            f"[RELATIVE_PENALTY] batch_size={batch_size}, "
-            f"base_reward_range={base_reward_range:.4f} (min={min(base_rewards):.4f}, max={max(base_rewards):.4f})"
-        )
+            logger.info(
+                f"[PENALTY_MODE] relative, batch_size={batch_size}, "
+                f"base_reward_range={base_reward_range:.4f} (min={min(base_rewards):.4f}, max={max(base_rewards):.4f})"
+            )
+        else:  # penalty_mode == "absolute"
+            # Use absolute penalties (coefficient is the actual penalty value)
+            base_reward_range = 1.0  # No scaling
 
-        # Apply relative penalties: penalty = penalty_coeff * base_reward_range
-        # too_short_penalties stores coefficients for logging
-        # too_short_penalties_actual stores actual penalty values for reward calculation
+            logger.info(
+                f"[PENALTY_MODE] absolute, batch_size={batch_size}, "
+                f"penalties applied as fixed values (no scaling)"
+            )
+
+        # Apply penalties based on penalty_mode
+        # too_short_penalties/too_long_penalties store coefficients for logging
+        # too_short_penalties_actual/too_long_penalties_actual store actual penalty values
         too_short_penalties_actual = [0.0] * batch_size
+        too_long_penalties_actual = [0.0] * batch_size
         for i in range(batch_size):
             too_short_penalties_actual[i] = -too_short_penalty_coeffs[i] * base_reward_range
             too_short_penalties[i] = too_short_penalty_coeffs[i]  # Log coefficient
             if too_short_penalty_coeffs[i] != 0:
                 logger.info(
-                    f"[RELATIVE_PENALTY] Sample {i}: "
-                    f"too_short_penalty={too_short_penalty_coeffs[i]:.4f} * {base_reward_range:.4f} = {too_short_penalties_actual[i]:.4f}"
+                    f"[TOO_SHORT_PENALTY] Sample {i}: "
+                    f"penalty_coeff={too_short_penalty_coeffs[i]:.4f} * {base_reward_range:.4f} = {too_short_penalties_actual[i]:.4f} ({self.penalty_mode})"
                 )
 
-        # Combine rewards: R = R_base + too_short_penalty (relative)
-        total_rewards = [b + p for b, p in zip(base_rewards, too_short_penalties_actual)]
+            too_long_penalties_actual[i] = -too_long_penalty_coeffs[i] * base_reward_range
+            too_long_penalties[i] = too_long_penalty_coeffs[i]  # Log coefficient
+            if too_long_penalty_coeffs[i] != 0:
+                logger.info(
+                    f"[TOO_LONG_PENALTY] Sample {i}: "
+                    f"penalty_coeff={too_long_penalty_coeffs[i]:.4f} * {base_reward_range:.4f} = {too_long_penalties_actual[i]:.4f} ({self.penalty_mode})"
+                )
+
+        # Combine rewards: R = R_base + too_short_penalty + too_long_penalty
+        total_rewards = [b + s + l for b, s, l in zip(base_rewards, too_short_penalties_actual, too_long_penalties_actual)]
 
         # Return penalty coefficients for use in format/truncation penalty calculation
         # Store in extra_info for external use
         extra_info_penalty_coeffs = {
             "base_rewards": base_rewards,
             "base_reward_range": base_reward_range,
+            "penalty_mode": self.penalty_mode,
             "too_short_penalty_coeffs": too_short_penalty_coeffs,
+            "too_long_penalty_coeffs": too_long_penalty_coeffs,
         }
         
         # Log per-sample prompts with computed rewards
@@ -592,6 +701,9 @@ class CombinedRewardComputer:
             "rewrite_mean_log_probs": rewrite_mean_log_probs,
             "original_mean_log_probs": original_mean_log_probs,
             "no_cot_mean_log_probs": no_cot_mean_log_probs,  # Baseline (no CoT)
+            "rewrite_ppls": rewrite_ppls,  # PPL values for rewrite (ppl mode only)
+            "original_ppls": original_ppls,  # PPL values for original (ppl mode only)
+            "relative_improvement_rates": relative_improvement_rates,  # Formula 1: avg_prob(rewrite)/avg_prob(original) - 1
             "logic_rewards": r_logic,
             "total_rewards": total_rewards,
             "token_log_probs": token_log_probs,
@@ -604,8 +716,11 @@ class CombinedRewardComputer:
                 "lambda_useful": self.lambda_useful,
                 "too_short_penalties": too_short_penalties,
                 "too_short_penalty_coeffs": too_short_penalty_coeffs,  # Coefficients for logging
+                "too_long_penalties": too_long_penalties,  # NEW: too_long_penalty coefficients
+                "too_long_penalty_coeffs": too_long_penalty_coeffs,  # NEW: too_long_penalty coefficients
                 "length_ratios": length_ratios,  # For DAPO filter_groups
-                # Relative penalty info for external use (format/truncation penalties)
+                # Penalty info for external use (format/truncation penalties)
+                "penalty_mode": self.penalty_mode,  # NEW: "relative" or "absolute"
                 "base_rewards": base_rewards,
                 "base_reward_range": base_reward_range,
             },
@@ -721,11 +836,18 @@ def compute_cot_rewriter_reward(
     too_short_threshold_low: float = 0.4,  # Lower threshold for too_short_penalty
     too_short_threshold_high: float = 0.8,  # Upper threshold for too_short_penalty
     too_short_max_penalty: float = 0.5,  # Maximum penalty for too short outputs
+    too_long_threshold_low: float = 1.5,  # Lower threshold for too_long_penalty
+    too_long_threshold_high: float = 2.0,  # Upper threshold for too_long_penalty
+    too_long_max_penalty: float = 0.5,  # Maximum penalty for too long outputs
+    penalty_mode: str = "relative",  # "relative" or "absolute": How to apply penalties
     use_tiered_reward: bool = True,  # Whether to use tiered (step-wise) reward for R_cog
     tier_step: float = 0.05,  # 区间大小：每个阶梯的 R_cog 范围
     tier_reward: float = 0.1,  # 每阶梯奖励值：第一阶梯得 tier_reward，第二阶梯得 2*tier_reward
     reward_mode: str = "ppl",  # "ppl" or "logprob": Reward calculation mode
-    reward_only_use_logprob: bool = False,  # If True, R_cog = answer_log_prob(rewrite) only (no delta)
+    use_reward_delta: bool = True,  # If True (default), compute delta (rewrite - original).
+                                       # If False, use absolute value.
+                                       # Deprecated alias: reward_only_use_logprob (inverted logic!)
+    reward_only_use_logprob: bool = None,  # Deprecated: use use_reward_delta instead
     **kwargs,
 ) -> Dict[str, Any]:
     # Use alpha if provided (from config), otherwise use alpha_cog
@@ -913,11 +1035,16 @@ def compute_cot_rewriter_reward(
         too_short_threshold_low=too_short_threshold_low,
         too_short_threshold_high=too_short_threshold_high,
         too_short_max_penalty=too_short_max_penalty,
+        too_long_threshold_low=too_long_threshold_low,
+        too_long_threshold_high=too_long_threshold_high,
+        too_long_max_penalty=too_long_max_penalty,
+        penalty_mode=penalty_mode,
         use_tiered_reward=use_tiered_reward,
         tier_step=tier_step,
         tier_reward=tier_reward,
         reward_mode=reward_mode,
-        reward_only_use_logprob=reward_only_use_logprob,
+        use_reward_delta=use_reward_delta,
+        reward_only_use_logprob=reward_only_use_logprob,  # For backward compatibility
     )
 
     # Compute rewards for all samples
@@ -942,14 +1069,17 @@ def compute_cot_rewriter_reward(
     rewrite_fsfs = result["extra_info"]["rewrite_fsfs"]
     too_short_penalties = result["extra_info"].get("too_short_penalties", [0.0] * batch_size)
     too_short_penalty_coeffs = result["extra_info"].get("too_short_penalty_coeffs", [0.0] * batch_size)
+    too_long_penalties = result["extra_info"].get("too_long_penalties", [0.0] * batch_size)
+    too_long_penalty_coeffs = result["extra_info"].get("too_long_penalty_coeffs", [0.0] * batch_size)
     length_ratios = result["extra_info"].get("length_ratios", [0.0] * batch_size)
     base_rewards = result["extra_info"].get("base_rewards", [0.0] * batch_size)
     base_reward_range = result["extra_info"].get("base_reward_range", 1.0)
 
-    # Apply RELATIVE penalties: penalty = penalty_coefficient * base_reward_range
+    # Apply penalties based on penalty_mode
     # 1. Truncation penalty: if rollout result was truncated (finish_reason == "length")
     # 2. Format penalty: if response does not contain valid <rewrite_reasoning> tags
     finish_reasons = data.non_tensor_batch.get("finish_reasons", [])
+    penalty_mode_from_result = result["extra_info"].get("penalty_mode", "relative")
 
     penalties = [0.0] * batch_size
     truncation_penalties = [0.0] * batch_size  # Track truncation penalties separately for logging
@@ -957,27 +1087,36 @@ def compute_cot_rewriter_reward(
     truncated_flags = [0] * batch_size  # Track truncated flags for DAPO filter_groups
 
     for i in range(batch_size):
-        # Truncation penalty (relative): penalty = truncation_penalty_coeff * base_reward_range
+        # Truncation penalty: penalty = truncation_penalty_coeff * base_reward_range (if relative) or truncation_penalty_coeff (if absolute)
         if i < len(finish_reasons) and finish_reasons[i] == "length":
-            trunc_penalty = -truncation_penalty * base_reward_range
+            if penalty_mode_from_result == "relative":
+                trunc_penalty = -truncation_penalty * base_reward_range
+                penalty_log_msg = f"penalty={truncation_penalty} * {base_reward_range:.4f} = {trunc_penalty:.4f} (relative)"
+            else:  # absolute
+                trunc_penalty = -truncation_penalty
+                penalty_log_msg = f"penalty={truncation_penalty:.4f} (absolute)"
             penalties[i] += trunc_penalty
-            truncation_penalties[i] = truncation_penalty  # Log coefficient (for logging)
+            truncation_penalties[i] = trunc_penalty  # Log actual penalty value
             truncated_flags[i] = 1  # Mark as truncated for DAPO filter_groups
             logger.info(
-                f"[RELATIVE_PENALTY] Sample {i}: Truncated (finish_reason=length), "
-                f"penalty={truncation_penalty} * {base_reward_range:.4f} = {trunc_penalty:.4f}"
+                f"[TRUNCATION_PENALTY] Sample {i}: Truncated (finish_reason=length), "
+                f"{penalty_log_msg}"
             )
 
-        # Format penalty (relative): penalty = format_penalty_coeff * base_reward_range
+        # Format penalty: penalty = format_penalty_coeff * base_reward_range (if relative) or format_penalty_coeff (if absolute)
         # Note: format_valid_flags is already computed above
         if format_valid_flags[i] == 0:
-            fmt_penalty = -format_penalty * base_reward_range
+            if penalty_mode_from_result == "relative":
+                fmt_penalty = -format_penalty * base_reward_range
+                penalty_log_msg = f"penalty={format_penalty} * {base_reward_range:.4f} = {fmt_penalty:.4f} (relative)"
+            else:  # absolute
+                fmt_penalty = -format_penalty
+                penalty_log_msg = f"penalty={format_penalty:.4f} (absolute)"
             penalties[i] += fmt_penalty
-            format_penalties[i] = format_penalty  # Log coefficient (for logging)
+            format_penalties[i] = fmt_penalty  # Log actual penalty value
             logger.info(
-                f"[RELATIVE_PENALTY] Sample {i}: Format violation (no valid <rewrite_reasoning> tags found), "
-                f"response_preview='{rewrite_cots[i][:100]}...', "
-                f"penalty={format_penalty} * {base_reward_range:.4f} = {fmt_penalty:.4f}"
+                f"[FORMAT_PENALTY] Sample {i}: Format violation (no valid <rewrite_reasoning> tags found), "
+                f"response_preview='{rewrite_cots[i][:100]}...', {penalty_log_msg}"
             )
 
     # Convert total_rewards to tensor and apply penalties
@@ -1035,6 +1174,8 @@ def compute_cot_rewriter_reward(
             "truncation_penalties": truncation_penalties,
             "format_penalties": format_penalties,
             "too_short_penalties": too_short_penalties,
+            "too_long_penalties": too_long_penalties,  # NEW: too_long_penalty values
+            "penalty_mode": penalty_mode_from_result,  # NEW: "relative" or "absolute"
             # DAPO filter_groups support: "truncated" flag (1 if truncated, 0 otherwise)
             "truncated": truncated_flags,
             # DAPO filter_groups support: "format_valid" flag (1 if valid, 0 if invalid)
@@ -1044,6 +1185,11 @@ def compute_cot_rewriter_reward(
             "length_ratio": length_ratios,
             # NEW: reward_deltas for logging rewrite-original improvement
             "reward_deltas": result.get("reward_deltas", [0.0] * batch_size),
+            # PPL values (ppl mode only) - for debugging/observation
+            "rewrite_ppls": result.get("rewrite_ppls", [float('nan')] * batch_size),
+            "original_ppls": result.get("original_ppls", [float('nan')] * batch_size),
+            # Relative improvement rates (formula 1 observation value)
+            "relative_improvement_rates": result.get("relative_improvement_rates", [float('nan')] * batch_size),
         },
     }
 

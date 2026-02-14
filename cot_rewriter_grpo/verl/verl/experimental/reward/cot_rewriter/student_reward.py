@@ -246,7 +246,9 @@ class VLLMStudentRewardClient:
         micro_batch_size: int = 4,
         max_num_seqs: int = 1,
         reward_mode: str = "ppl",  # "ppl" or "logprob": Reward calculation mode
-        reward_only_use_logprob: bool = False,  # If True, R_cog = answer_log_prob(rewrite) only (no delta)
+        use_reward_delta: bool = True,  # If True (default), R_cog = rewrite - original (delta).
+                                      # If False, R_cog = rewrite only (absolute value).
+        reward_only_use_logprob: bool = None,  # Deprecated: use use_reward_delta instead
     ):
         """
         Initialize Multi-GPU vLLM Student Reward Client with Ray actors.
@@ -264,7 +266,9 @@ class VLLMStudentRewardClient:
             micro_batch_size: Batch size for each micro-batch to avoid OOM
             max_num_seqs: Maximum concurrent sequences in vLLM scheduler
             reward_mode: Reward calculation mode - "ppl" or "logprob"
-            reward_only_use_logprob: If True, R_cog = answer_log_prob(rewrite) only (no delta)
+            use_reward_delta: If True (default), R_cog = value(rewrite) - value(original) (delta).
+                If False, R_cog = value(rewrite) only (absolute value).
+            reward_only_use_logprob: (Deprecated) Use use_reward_delta instead.
         """
 
         self.model_path = model_path
@@ -275,7 +279,24 @@ class VLLMStudentRewardClient:
         self.micro_batch_size = micro_batch_size
         self.max_num_seqs = max_num_seqs
         self.reward_mode = reward_mode
-        self.reward_only_use_logprob = reward_only_use_logprob
+
+        # Handle reward_only_use_logprob deprecation and map to use_reward_delta
+        # reward_only_use_logprob has INVERTED logic compared to use_reward_delta
+        # - reward_only_use_logprob=True means absolute value (use_reward_delta=False)
+        # - reward_only_use_logprob=False means delta (use_reward_delta=True)
+        if reward_only_use_logprob is not None:
+            import warnings
+            warnings.warn(
+                "[DEPRECATION] reward_only_use_logprob is deprecated. Use use_reward_delta instead. "
+                "Note: reward_only_use_logprob has inverted logic (True=absolute, False=delta). "
+                "Setting use_reward_delta accordingly.",
+                DeprecationWarning,
+                stacklevel=2
+            )
+            self.use_reward_delta = not reward_only_use_logprob  # Invert the logic!
+        else:
+            self.use_reward_delta = use_reward_delta
+        self.reward_only_use_logprob = reward_only_use_logprob  # Keep for logging
 
         # Auto-detect devices if not specified
         if devices is None:
@@ -460,6 +481,7 @@ class VLLMStudentRewardClient:
         answers: List[str],
         original_cots: Optional[List[str]] = None,
         alpha_cog: float = 0.01,
+        use_reward_delta: Optional[bool] = None,
         reward_only_use_logprob: Optional[bool] = None,
         **kwargs,  # Accept extra args for compatibility
     ) -> Dict[str, Any]:
@@ -470,9 +492,8 @@ class VLLMStudentRewardClient:
         all actors for true data parallelism.
 
         Computes two reward components:
-        1. R_cog = answer_log_prob(Q, Rewrite_CoT, A) - answer_log_prob(Q, Original_CoT, A)
-                  OR (if reward_only_use_logprob=True):
-                  R_cog = answer_log_prob(Q, Rewrite_CoT, A) only (no delta)
+        1. R_cog = value(rewrite) - value(original) (if use_reward_delta=True)
+                  OR R_cog = value(rewrite) only (if use_reward_delta=False)
         2. R_useful = answer_log_prob(Q, Rewrite_CoT, A) - answer_log_prob(Q, A)
 
         Args:
@@ -481,14 +502,29 @@ class VLLMStudentRewardClient:
             answers: List of ground truth answers
             original_cots: Optional list of original CoTs
             alpha_cog: Weight for min log prob term (only used in logprob mode)
-            reward_only_use_logprob: If True, use only rewrite logprob (no delta from original)
+            use_reward_delta: If True, compute delta (rewrite - original).
+                If False, use absolute value. If None, use self.use_reward_delta.
+            reward_only_use_logprob: (Deprecated) Use use_reward_delta instead
 
         Returns:
             Dict containing rewards and log probs including R_cog and R_useful
         """
         # Use instance value if not provided in call
-        if reward_only_use_logprob is None:
-            reward_only_use_logprob = self.reward_only_use_logprob
+        # Handle both new and old parameter names
+        if use_reward_delta is None and reward_only_use_logprob is None:
+            use_reward_delta = self.use_reward_delta
+        elif reward_only_use_logprob is not None:
+            # Old parameter provided: invert logic (True=absolute, False=delta)
+            import warnings
+            warnings.warn(
+                "[DEPRECATION] reward_only_use_logprob is deprecated. Use use_reward_delta instead. "
+                "Note: reward_only_use_logprob has inverted logic (True=absolute, False=delta).",
+                DeprecationWarning,
+                stacklevel=2
+            )
+            use_reward_delta = not reward_only_use_logprob
+        else:
+            use_reward_delta = use_reward_delta if use_reward_delta is not None else self.use_reward_delta
         import time
 
         self.initialize()
@@ -604,6 +640,12 @@ class VLLMStudentRewardClient:
         all_token_log_probs = []
         all_token_ids = []
 
+        # Store PPL values for ppl mode (for logging/debugging)
+        rewrite_ppls = []
+        original_ppls = []
+        # Store relative improvement rate (formula 1) as observation value
+        relative_improvement_rates = []  # R_cog_formula1 = avg_prob(rewrite)/avg_prob(original) - 1
+
         for i in range(batch_size):
             # Get rewrite result
             rewrite_result = rewrite_results[i]
@@ -625,29 +667,45 @@ class VLLMStudentRewardClient:
                 original_min = -100.0
 
             # ===== R_cog 计算公式 =====
-            # R_cog = answer_log_prob(Q, Rewrite_CoT, A) - answer_log_prob(Q, Original_CoT, A)
-            # OR (if reward_only_use_logprob=True):
-            # R_cog = answer_log_prob(Q, Rewrite_CoT, A) only (no delta)
+            # R_cog = value(rewrite) - value(original) (if use_reward_delta=True)
+            # OR R_cog = value(rewrite) only (if use_reward_delta=False)
             # 根据 reward_mode 选择计算方式
             if self.reward_mode == "ppl":
-                # PPL 模式: R_cog = PPL(original) - PPL(rewrite)
-                # 其中 PPL = exp(-mean_log_prob)
+                # PPL 模式: 使用公式2 (绝对质量)
+                # R_cog = avg_prob(rewrite) = 1 / PPL(rewrite)
+                # 同时计算公式1 (相对改进率) 作为观测值
+                # R_cog_formula1 = avg_prob(rewrite) / avg_prob(original) - 1
+                #               = PPL(original) / PPL(rewrite) - 1
                 import math
-                rewrite_ppl = math.exp(-rewrite_mean)
-                if reward_only_use_logprob:
-                    # When reward_only_use_logprob=True, use only rewrite PPL (no delta)
-                    # Reward = -PPL(rewrite) so higher rewrite quality = higher reward
-                    reward = -rewrite_ppl
+                rewrite_avg_prob = math.exp(rewrite_mean)  # avg_prob for rewrite
+
+                # 公式2: 绝对质量度量 (实际用于GRPO的reward)
+                reward = rewrite_avg_prob
+
+                # 计算公式1作为观测值
+                if original_mean > -100:
+                    original_avg_prob = math.exp(original_mean)
+                    if original_avg_prob < 1e-10:
+                        relative_improvement_rate = 0.0
+                    else:
+                        relative_improvement_rate = (rewrite_avg_prob / original_avg_prob) - 1.0
                 else:
-                    # Default: compute delta from original
-                    original_ppl = math.exp(-original_mean) if original_mean > -100 else 100.0
-                    reward = original_ppl - rewrite_ppl
+                    relative_improvement_rate = 0.0
+                relative_improvement_rates.append(relative_improvement_rate)
+
+                # Store PPL values for logging (PPL = 1/avg_prob)
+                rewrite_ppls.append(1.0 / rewrite_avg_prob if rewrite_avg_prob > 0 else float('inf'))
+                if original_mean > -100:
+                    original_avg_prob = math.exp(original_mean)
+                    original_ppls.append(1.0 / original_avg_prob if original_avg_prob > 0 else float('inf'))
+                else:
+                    original_ppls.append(float('nan'))
             else:  # "logprob" 模式
                 # Logprob 模式: R_cog = answer_log_prob(rewrite) - answer_log_prob(original)
                 # 其中 answer_log_prob = mean(token_log_probs) + alpha_cog * min(token_log_probs)
                 rewrite_answer_log_prob = rewrite_mean + alpha_cog * rewrite_min
-                if reward_only_use_logprob:
-                    # When reward_only_use_logprob=True, use only rewrite logprob (no delta)
+                if not use_reward_delta:
+                    # When use_reward_delta=False, use only rewrite logprob (no delta)
                     reward = rewrite_answer_log_prob
                 else:
                     # Default: compute delta from original
@@ -672,11 +730,14 @@ class VLLMStudentRewardClient:
             all_token_ids.append([])  # Token IDs not needed for reward
 
         return {
-            "rewards": rewards,  # R_cog
+            "rewards": rewards,  # R_cog (formula 2: avg_prob(rewrite))
             "useful_rewards": useful_rewards,  # R_useful
             "rewrite_mean_log_probs": rewrite_mean_log_probs,
             "original_mean_log_probs": original_mean_log_probs,
             "no_cot_mean_log_probs": no_cot_mean_log_probs,  # Baseline (no CoT)
+            "rewrite_ppls": rewrite_ppls,  # PPL values for rewrite (ppl mode only)
+            "original_ppls": original_ppls,  # PPL values for original (ppl mode only)
+            "relative_improvement_rates": relative_improvement_rates,  # Formula 1: avg_prob(rewrite)/avg_prob(original) - 1
             "rewrite_token_log_probs": all_token_log_probs,
             "rewrite_token_ids": all_token_ids,
             "log_probs": rewrite_mean_log_probs,

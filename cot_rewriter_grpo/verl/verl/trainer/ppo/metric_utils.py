@@ -491,7 +491,12 @@ def compute_reward_breakdown_metrics(reward_extra_infos_dict: dict[str, list[Any
         ("truncation_penalties", "penalty/truncation"),
         ("format_penalties", "penalty/format"),
         ("too_short_penalties", "penalty/too_short"),
+        ("too_long_penalties", "penalty/too_long"),  # NEW: too_long_penalty statistics
         ("length_ratio", "stats/length_ratio"),
+        # PPL values (ppl mode only) - all under ppl group
+        ("rewrite_ppls", "ppl/rewrite"),
+        ("original_ppls", "ppl/original"),
+        ("relative_improvement_rates", "ppl/relative_improvement"),  # Formula 1: relative improvement rate
     ]
 
     for dict_key, metric_prefix in reward_components:
