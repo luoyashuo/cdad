@@ -528,26 +528,24 @@ class CombinedRewardComputer:
         # Memory management: student is cleaned up before FSF computation
         r_logic = [0.0] * batch_size
 
-        # === DEBUG: Extract and save pre-computed FSF from training data ===
+        # === Load pre-computed original_fsf from training data ===
         # Training data has 'fsf' field with pre-computed FSF values
-        # We need to save these to rollout_data for debugging
-        pre_computed_original_fsfs = []
+        # We use this as original_fsf instead of computing it via FSF model
+        original_fsfs = []
         for i in range(batch_size):
             data_item = data[i]
             if 'fsf' in data_item.non_tensor_batch:
                 fsf_val = data_item.non_tensor_batch['fsf']
                 if hasattr(fsf_val, 'item'):
                     fsf_val = fsf_val.item()
-                pre_computed_original_fsfs.append(fsf_val if fsf_val is not None else 0.0)
+                original_fsfs.append(fsf_val if fsf_val is not None else 0.0)
             else:
-                pre_computed_original_fsfs.append(0.0)
+                original_fsfs.append(0.0)
 
         # Log pre-computed FSF for debugging
-        for i, fsf_val in enumerate(pre_computed_original_fsfs):
+        for i, fsf_val in enumerate(original_fsfs):
             if fsf_val != 0.0:
-                logger.info(f"[DEBUG] Sample {i}: pre_computed_original_fsf={fsf_val}")
-
-        original_fsfs = [0.0] * batch_size
+                logger.info(f"[FSF] Sample {i}: pre_computed_original_fsf={fsf_val:.4f}")
         rewrite_fsfs = [0.0] * batch_size
         original_dot_outputs = [None] * batch_size  # Raw DOT outputs for original CoTs
         rewrite_dot_outputs = [None] * batch_size  # Raw DOT outputs for rewrite CoTs
@@ -579,18 +577,32 @@ class CombinedRewardComputer:
             )
 
             try:
-                logger.info(f"[FSF] Computing FSF for {len(questions)} samples (save_dot_outputs={self.save_fsf_dot_outputs})...")
-                logic_result = self.fsf_judge.compute_logic_reward_batch(
-                    questions=questions,
-                    original_cots=original_cots,
+                # Compute rewrite FSF only (original_fsf is loaded from dataset)
+                logger.info(f"[FSF] Computing FSF for {len(rewrite_cots)} rewrite CoTs only "
+                           f"(original_fsf loaded from dataset, save_dot_outputs={self.save_fsf_dot_outputs})...")
+                fsf_result = self.fsf_judge.compute_rewrite_fsf_only(
                     rewrite_cots=rewrite_cots,
                     return_dot_outputs=self.save_fsf_dot_outputs,
                 )
 
+                rewrite_fsfs = fsf_result["rewrite_fsfs"]
+                if self.save_fsf_dot_outputs:
+                    rewrite_dot_outputs = fsf_result.get("rewrite_dot_outputs", [None] * batch_size)
+
                 # Count samples with unparseable FSF
-                original_failed = sum(1 for f in logic_result["original_fsfs"] if f is None)
-                rewrite_failed = sum(1 for f in logic_result["rewrite_fsfs"] if f is None)
-                fsf_parse_failed_count = original_failed + rewrite_failed
+                rewrite_failed = sum(1 for f in rewrite_fsfs if f is None)
+                fsf_parse_failed_count = rewrite_failed
+
+                # Compute logic rewards: R_logic = original_fsf - rewrite_fsf
+                # Positive means rewrite has lower FSF (fewer failed steps) -> better
+                r_logic = []
+                for orig_fsf, rew_fsf in zip(original_fsfs, rewrite_fsfs):
+                    if rew_fsf is None:
+                        # Parse failed, use 0 for logic reward
+                        r_logic.append(0.0)
+                    else:
+                        # FSF difference: positive means improvement
+                        r_logic.append(orig_fsf - rew_fsf)
 
                 has_any_parse_failure = fsf_parse_failed_count > 0
 
@@ -598,37 +610,34 @@ class CombinedRewardComputer:
                     # Skip entire group when any parsing fails (conservative approach)
                     # This means R_logic = 0 for all samples, but other rewards (R_cog, R_useful) are still applied
                     logger.warning(
-                        f"[FSF] FSF parsing failed for {fsf_parse_failed_count} samples "
-                        f"(original_failed={original_failed}, rewrite_failed={rewrite_failed}). "
+                        f"[FSF] FSF parsing failed for {fsf_parse_failed_count} rewrite samples. "
                         f"Skipping FSF reward for entire group (fsf_skip_group_on_parse_error=True). "
                         f"R_logic will be 0 for all samples, but R_cog and R_useful are still applied."
                     )
-                    # Set all FSF rewards to 0 for the group
+                    # Set all FSF rewards to 0 for group
                     r_logic = [0.0] * batch_size
-                    original_fsfs = [0.0] * batch_size
                     rewrite_fsfs = [0.0] * batch_size
-                    # DOT outputs are still saved if enabled
-                    if self.save_fsf_dot_outputs:
-                        original_dot_outputs = logic_result.get("original_dot_outputs", [None] * batch_size)
-                        rewrite_dot_outputs = logic_result.get("rewrite_dot_outputs", [None] * batch_size)
+                    rewrite_dot_outputs = [None] * batch_size
                     fsf_group_skipped = True
                 else:
-                    # Use FSF results (failed samples get 0.0 logic reward if not skipping group)
-                    r_logic = logic_result["logic_rewards"]
-                    original_fsfs = logic_result["original_fsfs"]
-                    rewrite_fsfs = logic_result["rewrite_fsfs"]
-                    # Save DOT outputs if enabled
-                    if self.save_fsf_dot_outputs:
-                        original_dot_outputs = logic_result.get("original_dot_outputs", [None] * batch_size)
-                        rewrite_dot_outputs = logic_result.get("rewrite_dot_outputs", [None] * batch_size)
                     fsf_group_skipped = False
                     if has_any_parse_failure:
                         logger.warning(
-                            f"[FSF] FSF parsing failed for {fsf_parse_failed_count} samples "
-                            f"(original_failed={original_failed}, rewrite_failed={rewrite_failed}). "
+                            f"[FSF] FSF parsing failed for {fsf_parse_failed_count} rewrite samples. "
                             f"Using partial results (fsf_skip_group_on_parse_error=False). "
                             f"Failed samples have R_logic=0."
                         )
+
+                # Log FSF comparison statistics
+                valid_pairs = [(o, r) for o, r in zip(original_fsfs, rewrite_fsfs) if r is not None]
+                if valid_pairs:
+                    improvements = sum(1 for o, r in valid_pairs if r < o)
+                    logger.info(
+                        f"[FSF] Statistics: {len(valid_pairs)} valid pairs, "
+                        f"{improvements} improvements (rewrite_fsf < original_fsf), "
+                        f"mean original_fsf={sum(o for o, _ in valid_pairs)/len(valid_pairs):.4f}, "
+                        f"mean rewrite_fsf={sum(r for _, r in valid_pairs)/len(valid_pairs):.4f}"
+                    )
             finally:
                 # FSF Judge cleanup - shutdown workers after compute_logic_reward
                 if self.fsf_judge is not None:

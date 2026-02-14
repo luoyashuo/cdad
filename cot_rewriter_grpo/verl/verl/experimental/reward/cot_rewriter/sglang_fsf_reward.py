@@ -187,7 +187,7 @@ Generate complete Graphviz DOT code in dot blocks."""
             },
         ]
         prompt = self.tokenizer.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True
+            messages, tokenize=False, add_generation_prompt=True, enable_thinking=False
         )
         return prompt
 
@@ -207,17 +207,12 @@ Generate complete Graphviz DOT code in dot blocks."""
         try:
             import pydot
 
-            # Try to find DOT graph in output
-            dot_match = re.search(r'(?:strict\s+)?digraph\s+.*?(?:\n|\r|\{)', dot_output, re.DOTALL)
-            if not dot_match:
-                dot_match = re.search(r'\{[^}]*\}', dot_output, re.DOTALL)
+            # Strip leading newlines and markdown code blocks
+            # Like analyze_rg_fsf.py, directly parse DOT without regex
+            cleaned_output = dot_output.lstrip('\n\n').strip('```')
 
-            if not dot_match:
-                logger.warning(f"[SGLangFSFActor-{self.gpu_ids}] No DOT format found")
-                return None
-
-            dot_code = dot_match.group(0) if dot_match.lastindex else dot_output
-            graphs = pydot.graph_from_dot_data(dot_code)
+            # Directly parse with pydot (no regex matching needed)
+            graphs = pydot.graph_from_dot_data(cleaned_output)
 
             if not graphs or len(graphs) == 0:
                 logger.warning(f"[SGLangFSFActor-{self.gpu_ids}] Failed to parse DOT graph")
@@ -583,6 +578,68 @@ class SGLangFSFClient:
             logger.info("[SGLangFSFClient] All workers shutdown")
         except Exception as e:
             logger.warning(f"[SGLangFSFClient] Shutdown error: {e}")
+
+    def compute_rewrite_fsf_only(
+        self,
+        rewrite_cots: List[str],
+        return_dot_outputs: bool = False,  # Whether to return raw DOT outputs
+    ) -> Dict[str, Any]:
+        """
+        Compute FSF for rewrite CoTs only (no original CoT computation).
+
+        This is optimized for cases where original_fsf is pre-computed in the dataset.
+
+        Args:
+            rewrite_cots: List of rewritten CoT reasonings
+            return_dot_outputs: If True, include raw DOT outputs in return
+
+        Returns:
+            Dict with:
+                - rewrite_fsfs: FSF values for rewrite CoTs
+                - rewrite_dot_outputs: (optional) Raw DOT outputs for rewrite CoTs
+        """
+        self.initialize()
+        self.resume_memory()
+
+        batch_size = len(rewrite_cots)
+
+        # Split data across workers
+        rewrite_chunks = self._split_into_chunks(rewrite_cots, self.num_actors)
+
+        # Compute rewrite FSFs
+        logger.info(f"[SGLangFSFClient] Computing FSF for {len(rewrite_cots)} rewrite CoTs only "
+                    f"(micro_batch_size={self.micro_batch_size}, return_dot_outputs={return_dot_outputs})...")
+        rewrite_futures = []
+        for worker_idx, chunk_cots in enumerate(rewrite_chunks):
+            if chunk_cots:
+                future = self.workers[worker_idx].compute_fsf_batch.remote(
+                    chunk_cots, self.micro_batch_size, return_dot_outputs
+                )
+                rewrite_futures.append((worker_idx, len(chunk_cots), future))
+
+        # Aggregate rewrite results
+        rewrite_fsfs = [None] * batch_size
+        rewrite_dot_outputs = [None] * batch_size if return_dot_outputs else None
+        for worker_idx, chunk_size, future in rewrite_futures:
+            chunk_results = ray.get(future)
+            if return_dot_outputs:
+                chunk_fsfs, chunk_dots = chunk_results
+            else:
+                chunk_fsfs = chunk_results
+                chunk_dots = None
+            start_idx = sum(len(rewrite_chunks[i]) for i in range(worker_idx))
+            for i, result in enumerate(chunk_fsfs):
+                rewrite_fsfs[start_idx + i] = result
+            if return_dot_outputs and chunk_dots is not None:
+                for i, dot in enumerate(chunk_dots):
+                    rewrite_dot_outputs[start_idx + i] = dot
+
+        result = {
+            "rewrite_fsfs": rewrite_fsfs,
+        }
+        if return_dot_outputs:
+            result["rewrite_dot_outputs"] = rewrite_dot_outputs
+        return result
 
     def compute_logic_reward_batch(
         self,
