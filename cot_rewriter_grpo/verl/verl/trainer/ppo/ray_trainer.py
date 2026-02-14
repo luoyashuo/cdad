@@ -658,12 +658,22 @@ class RayPPOTrainer:
         }
 
         for k, v in reward_extra_infos_dict.items():
-            if len(v) == n:
+            # Handle both list-like values and scalar values (bool, int, float, str)
+            if hasattr(v, '__len__') and len(v) == n:
+                base_data[k] = v
+            elif not hasattr(v, '__len__'):
+                # Scalar value (bool, int, float, str, etc.) - broadcast to all samples
                 base_data[k] = v
 
         lines = []
         for i in range(n):
-            entry = {k: v[i] for k, v in base_data.items()}
+            entry = {}
+            for k, v in base_data.items():
+                if hasattr(v, '__getitem__') and i < len(v):
+                    entry[k] = v[i]
+                elif not hasattr(v, '__getitem__'):
+                    # Scalar value - add to every entry
+                    entry[k] = v
             lines.append(json.dumps(entry, ensure_ascii=False))
 
         with open(filename, "w") as f:
@@ -1499,13 +1509,18 @@ class RayPPOTrainer:
                             # Also add any other reward fields from non_tensor_batch
                             reward_fields = [
                                 "original_cot", "ground_truth",
+                                # Reward breakdown fields
                                 "cognitive_rewards", "useful_rewards", "rewrite_mean_log_probs", "original_mean_log_probs", "no_cot_mean_log_probs",
                                 "rewrite_ppls", "original_ppls",  # PPL values (ppl mode only)
                                 "relative_improvement_rates",  # Formula 1: avg_prob(rewrite)/avg_prob(original) - 1 (observation)
                                 "logic_rewards", "total_rewards", "original_fsfs", "rewrite_fsfs",
-                                "truncation_penalties", "format_penalties", "too_short_penalties",
+                                # Penalty fields
+                                "truncation_penalties", "format_penalties", "too_short_penalties", "too_long_penalties",
+                                # DAPO filter_groups flags
                                 "truncated", "format_valid", "length_ratio",
-                                "reward_deltas",  # NEW: rewrite-original diff (auto computes max/mean/min)
+                                "reward_deltas",  # NEW: rewrite-original diff
+                                # FSF V2: parse failure flags
+                                "fsf_parse_failed", "fsf_group_skipped",
                             ]
                             for field in reward_fields:
                                 if field in batch.non_tensor_batch and field not in reward_extra_infos_dict:
@@ -2070,9 +2085,12 @@ class RayDAPOTrainer(RayPPOTrainer):
                                 "relative_improvement_rates",  # Formula 1: avg_prob(rewrite)/avg_prob(original) - 1 (observation)
                                 "logic_rewards", "total_rewards", "original_fsfs", "rewrite_fsfs",
                                 # Penalty fields
-                                "truncation_penalties", "format_penalties", "too_short_penalties",
+                                "truncation_penalties", "format_penalties", "too_short_penalties", "too_long_penalties",
                                 # DAPO filter_groups flags
                                 "truncated", "format_valid", "length_ratio",
+                                "reward_deltas",  # NEW: rewrite-original diff
+                                # FSF V2: parse failure flags
+                                "fsf_parse_failed", "fsf_group_skipped",
                             ]
                             for field in reward_fields:
                                 if field in batch.non_tensor_batch:

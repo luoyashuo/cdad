@@ -242,6 +242,17 @@ class CombinedRewardComputer:
                                       # Deprecated alias: reward_only_use_logprob (inverted logic!)
         reward_only_use_logprob: bool = None,  # Deprecated: use use_reward_delta instead
                                                 # True = use absolute value (no delta), False = use delta
+        # ========== FSF Reward Configuration ==========
+        # FSF reward using build_cot_rewrite_from_sharegpt.py message format
+        # GPU devices are auto-detected based on fsf_tensor_parallel_size
+        fsf_temperature: float = 0.6,  # Sampling temperature for FSF
+        fsf_top_k: int = 20,  # Sampling top-k for FSF
+        fsf_top_p: float = 0.95,  # Sampling top-p for FSF
+        fsf_max_new_tokens: int = 8000,  # Max new tokens for FSF
+        fsf_gpu_memory_utilization: float = 0.4,  # GPU memory for FSF
+        fsf_max_model_len: int = 12000,  # Max model len for FSF
+        fsf_tensor_parallel_size: int = 1,  # TP size for FSF
+        fsf_reward_scale: float = 1.0,  # Scale factor for FSF reward (replaces lambda_logic)
         **kwargs,  # Ignore deprecated params
     ):
         """
@@ -298,6 +309,15 @@ class CombinedRewardComputer:
                 For "logprob" mode: delta = logprob(rewrite) - logprob(original) (higher is better)
             reward_only_use_logprob: (Deprecated) Use use_reward_delta instead. This parameter has
                 inverted logic: True means absolute value (no delta), False means use delta.
+            # ========== FSF Parameters ==========
+            fsf_temperature: Sampling temperature for FSF (default: 0.6)
+            fsf_top_k: Sampling top-k for FSF (default: 20)
+            fsf_top_p: Sampling top-p for FSF (default: 0.95)
+            fsf_max_new_tokens: Max new tokens for FSF (default: 8000)
+            fsf_gpu_memory_utilization: GPU memory fraction for FSF (default: 0.4)
+            fsf_max_model_len: Max model len for FSF (default: 12000)
+            fsf_tensor_parallel_size: TP size for FSF, GPUs are auto-detected (default: 1)
+            fsf_reward_scale: Scale factor for FSF reward (replaces lambda_logic, default: 1.0)
 
         阶梯式奖励配置示例:
         - tier_step=0.05, tier_reward=0.1:
@@ -373,26 +393,19 @@ class CombinedRewardComputer:
                 reward_mode=reward_mode,
             )
 
-        # Initialize FSF Judge client (if needed)
-        if use_logic_reward:
-            if not fsf_model_path:
-                raise ValueError("fsf_model_path must be provided when use_logic_reward=True")
-
-            if reward_backend == "sglang":
-                from verl.experimental.reward.cot_rewriter.sglang_fsf_reward import SGLangFSFJudge
-                self.fsf_judge = SGLangFSFJudge(
-                    model_path=fsf_model_path,
-                    device=device,
-                    gpu_memory_utilization=sglang_gpu_memory_utilization,
-                )
-            else:
-                from verl.experimental.reward.cot_rewriter.fsf_reward import HFFSFJudge
-                self.fsf_judge = HFFSFJudge(
-                    model_path=fsf_model_path,
-                    device=device,
-                )
-        else:
-            self.fsf_judge = None
+        # ========== Initialize FSF Reward ==========
+        # FSF Judge is NOT initialized here - it will be created on-demand in compute_reward
+        # to ensure proper memory management: student -> cleanup -> FSF -> cleanup
+        self.fsf_model_path = fsf_model_path
+        self.fsf_temperature = fsf_temperature
+        self.fsf_top_k = fsf_top_k
+        self.fsf_top_p = fsf_top_p
+        self.fsf_max_new_tokens = fsf_max_new_tokens
+        self.fsf_gpu_memory_utilization = fsf_gpu_memory_utilization
+        self.fsf_max_model_len = fsf_max_model_len
+        self.fsf_tensor_parallel_size = fsf_tensor_parallel_size
+        self.fsf_reward_scale = fsf_reward_scale  # Scale factor for FSF reward (replaces lambda_logic)
+        self.fsf_judge = None  # Created on-demand in compute_reward
 
     def compute_reward(
         self,
@@ -501,23 +514,69 @@ class CombinedRewardComputer:
             r_cog = r_cog_raw
 
         # Compute logic reward (if enabled)
-        if (
-            self.use_logic_reward
-            and self.fsf_judge
-            and original_cots
-            and all(c for c in original_cots)
-        ):
-            logic_result = self.fsf_judge.compute_logic_reward(
-                original_cots=original_cots,
-                rewrite_cots=rewrite_cots,
+        # FSF is computed on-demand with proper memory management
+        # Memory management: student is cleaned up before FSF computation
+        r_logic = [0.0] * batch_size
+        original_fsfs = [0.0] * batch_size
+        rewrite_fsfs = [0.0] * batch_size
+        fsf_parse_failed = False
+        fsf_group_skipped = False
+
+        # Try FSF if enabled
+        if self.use_logic_reward:
+            if not self.fsf_model_path:
+                raise ValueError("fsf_model_path must be provided when use_logic_reward=True")
+
+            # Cleanup student client first to free GPU memory
+            logger.info("[FSF] Cleaning up student client before loading FSF model...")
+            if hasattr(self.student_client, 'cleanup'):
+                self.student_client.cleanup()
+
+            # Create FSF Judge on-demand
+            from verl.experimental.reward.cot_rewriter.sglang_fsf_reward import get_fsf_judge
+            self.fsf_judge = SGLangFSFJudge(
+                model_path=self.fsf_model_path,
+                gpu_memory_utilization=self.fsf_gpu_memory_utilization,
+                max_model_len=self.fsf_max_model_len,
+                tensor_parallel_size=self.fsf_tensor_parallel_size,
+                temperature=self.fsf_temperature,
+                top_k=self.fsf_top_k,
+                top_p=self.fsf_top_p,
+                max_new_tokens=self.fsf_max_new_tokens,
             )
-            r_logic = logic_result["logic_rewards"]
-            original_fsfs = logic_result["original_fsfs"]
-            rewrite_fsfs = logic_result["rewrite_fsfs"]
-        else:
-            r_logic = [0.0] * batch_size
-            original_fsfs = [0.0] * batch_size
-            rewrite_fsfs = [0.0] * batch_size
+
+            try:
+                logger.info(f"[FSF] Computing FSF for {len(questions)} samples...")
+                logic_result = self.fsf_judge.compute_logic_reward(
+                    questions=questions,
+                    original_cots=original_cots,
+                    rewrite_cots=rewrite_cots,
+                )
+
+                # Check if any sample has unparseable FSF
+                # If any sample fails, skip FSF reward for entire group
+                fsf_parse_failed = any(r is None for r in logic_result["logic_rewards"])
+
+                if fsf_parse_failed:
+                    logger.warning(
+                        f"[FSF] FSF parsing failed for at least one sample in group. "
+                        f"Skipping FSF reward for entire group."
+                    )
+                    # Set all FSF rewards to 0 for the group
+                    r_logic = [0.0] * batch_size
+                    original_fsfs = [0.0] * batch_size
+                    rewrite_fsfs = [0.0] * batch_size
+                    fsf_group_skipped = True
+                else:
+                    r_logic = logic_result["logic_rewards"]
+                    original_fsfs = logic_result["original_fsfs"]
+                    rewrite_fsfs = logic_result["rewrite_fsfs"]
+                    fsf_group_skipped = False
+            finally:
+                # FSF Judge cleanup - destroy engine after compute_logic_reward
+                if self.fsf_judge is not None:
+                    self.fsf_judge._destroy_engine()
+                    self.fsf_judge = None
 
         # Compute too_short_penalty and too_long_penalty based on length ratio
         # Penalty formula with low/high thresholds:
@@ -617,13 +676,13 @@ class CombinedRewardComputer:
                 f"too_long: low={low_long}, high={high_long} (num_above_low={num_above_low_long}/{len(valid_ratios)}, num_above_high={num_above_high_long}/{len(valid_ratios)})"
             )
 
-        # Compute base rewards: R_base = R_cog + lambda_useful * R_useful + lambda_logic * R_logic
-        # Note: R_useful is only included if use_useful_reward is True
+        # Compute base rewards: R_base = R_cog + lambda_useful * R_useful + fsf_reward_scale * R_logic
+        # Note: R_useful is only included if use_useful_reward is True. fsf_reward_scale replaces lambda_logic.
         if self.use_useful_reward:
-            base_rewards = [c + self.lambda_useful * u + self.lambda_logic * l
+            base_rewards = [c + self.lambda_useful * u + self.fsf_reward_scale * l
                            for c, u, l in zip(r_cog, r_useful, r_logic)]
         else:
-            base_rewards = [c + self.lambda_logic * l
+            base_rewards = [c + self.fsf_reward_scale * l
                            for c, l in zip(r_cog, r_logic)]
 
         # Determine penalty scaling factor based on penalty_mode
@@ -848,6 +907,16 @@ def compute_cot_rewriter_reward(
                                        # If False, use absolute value.
                                        # Deprecated alias: reward_only_use_logprob (inverted logic!)
     reward_only_use_logprob: bool = None,  # Deprecated: use use_reward_delta instead
+    # ========== FSF Reward Parameters ==========
+    # GPU devices are auto-detected based on fsf_tensor_parallel_size
+    fsf_temperature: float = 0.6,  # Sampling temperature for FSF
+    fsf_top_k: int = 20,  # Sampling top-k for FSF
+    fsf_top_p: float = 0.95,  # Sampling top-p for FSF
+    fsf_max_new_tokens: int = 8000,  # Max new tokens for FSF
+    fsf_gpu_memory_utilization: float = 0.4,  # GPU memory for FSF
+    fsf_max_model_len: int = 12000,  # Max model len for FSF
+    fsf_tensor_parallel_size: int = 1,  # TP size for FSF (GPUs auto-detected)
+    fsf_reward_scale: float = 1.0,  # Scale factor for FSF reward (replaces lambda_logic)
     **kwargs,
 ) -> Dict[str, Any]:
     # Use alpha if provided (from config), otherwise use alpha_cog
@@ -883,6 +952,7 @@ def compute_cot_rewriter_reward(
         student_max_num_seqs: Maximum concurrent sequences in vLLM (vLLM only)
         student_tensor_parallel_size: Tensor parallelism size for Student Model
         student_logprob_last_n_tokens: SGLang only - only compute last N tokens' logprobs
+            fsf_reward_scale: Scale factor for FSF reward (replaces lambda_logic, default: 1.0)
 
     Returns:
         Dictionary with:
@@ -1045,6 +1115,15 @@ def compute_cot_rewriter_reward(
         reward_mode=reward_mode,
         use_reward_delta=use_reward_delta,
         reward_only_use_logprob=reward_only_use_logprob,  # For backward compatibility
+        # ========== FSF Parameters ==========
+        fsf_temperature=fsf_temperature,
+        fsf_top_k=fsf_top_k,
+        fsf_top_p=fsf_top_p,
+        fsf_max_new_tokens=fsf_max_new_tokens,
+        fsf_gpu_memory_utilization=fsf_gpu_memory_utilization,
+        fsf_max_model_len=fsf_max_model_len,
+        fsf_tensor_parallel_size=fsf_tensor_parallel_size,
+        fsf_reward_scale=fsf_reward_scale,
     )
 
     # Compute rewards for all samples
@@ -1190,6 +1269,9 @@ def compute_cot_rewriter_reward(
             "original_ppls": result.get("original_ppls", [float('nan')] * batch_size),
             # Relative improvement rates (formula 1 observation value)
             "relative_improvement_rates": result.get("relative_improvement_rates", [float('nan')] * batch_size),
+            # FSF: Parse failure and group skip flags
+            "fsf_parse_failed": result.get("fsf_parse_failed", False),
+            "fsf_group_skipped": result.get("fsf_group_skipped", False),
         },
     }
 
