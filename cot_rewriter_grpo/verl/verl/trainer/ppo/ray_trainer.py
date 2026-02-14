@@ -1543,6 +1543,9 @@ class RayPPOTrainer:
                                 "reward_deltas",  # NEW: rewrite-original diff
                                 # FSF V2: parse failure flags
                                 "fsf_parse_failed", "fsf_group_skipped",
+                                # FSF DOT outputs (raw FSF outputs for debugging/analysis)
+                                # Note: original_dot_outputs is always None (original_cot FSF is pre-computed in dataset)
+                                "rewrite_dot_outputs",
                             ]
                             for field in reward_fields:
                                 if field in batch.non_tensor_batch and field not in reward_extra_infos_dict:
@@ -2113,6 +2116,9 @@ class RayDAPOTrainer(RayPPOTrainer):
                                 "reward_deltas",  # NEW: rewrite-original diff
                                 # FSF V2: parse failure flags
                                 "fsf_parse_failed", "fsf_group_skipped",
+                                # FSF DOT outputs (raw FSF outputs for debugging/analysis)
+                                # Note: original_dot_outputs is always None (original_cot FSF is pre-computed in dataset)
+                                "rewrite_dot_outputs",
                             ]
                             for field in reward_fields:
                                 if field in batch.non_tensor_batch:

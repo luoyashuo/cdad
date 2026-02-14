@@ -47,7 +47,7 @@ class CoTRewriterRewardManager:
             reward_fn_key: Key for reward function in data
             max_resp_len: Maximum response length (required for overlong_buffer)
             overlong_buffer_cfg: Config for overlong response penalty
-            **kwargs: Additional keyword arguments
+            **kwargs: Additional keyword arguments (passed to compute_cot_rewriter_reward)
         """
         self.tokenizer = tokenizer
         self.num_examine = num_examine
@@ -55,6 +55,7 @@ class CoTRewriterRewardManager:
         self.reward_fn_key = reward_fn_key
         self.overlong_buffer_cfg = overlong_buffer_cfg
         self.max_resp_len = max_resp_len
+        self.compute_score_kwargs = kwargs  # Store additional kwargs for compute_cot_rewriter_reward
 
         if self.overlong_buffer_cfg is not None:
             if self.max_resp_len is None:
@@ -105,8 +106,8 @@ class CoTRewriterRewardManager:
 
         # Call compute_cot_rewriter_reward directly with the full batch
         # The function is wrapped by _call_with_kwargs which merges reward_kwargs
-        # We pass data and tokenizer as keyword arguments
-        result = self.compute_score(data=data, tokenizer=self.tokenizer)
+        # We pass data, tokenizer, and additional kwargs (e.g., save_fsf_dot_outputs)
+        result = self.compute_score(data=data, tokenizer=self.tokenizer, **self.compute_score_kwargs)
 
         # Process the result
         if isinstance(result, dict):

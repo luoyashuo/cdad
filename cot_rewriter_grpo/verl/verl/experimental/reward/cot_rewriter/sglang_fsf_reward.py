@@ -147,14 +147,15 @@ class SGLangFSFActor:
                 self._loop = asyncio.new_event_loop()
             asyncio.set_event_loop(self._loop)
 
+
     def _build_fsf_prompt(self, reasoning: str) -> str:
         """
         Build FSF prompt with proper format.
-        
+
         Prompt Template (from build_fsf_judge_graph.py):
         - System: "You are a helpful assistant that converts reasoning traces into Graphviz diagrams."
         - User: GRAPH_GENERATION_PROMPT + Reasoning trace
-        
+
         The FSF model will generate a DOT format graph representing the reasoning process.
         """
         GRAPH_GENERATION_PROMPT = """Parse the reasoning trace into a Graphviz diagram. Focus on these essentials:
@@ -175,6 +176,13 @@ Requirements:
 - Do NOT reorder or reorganize the reasoning flow
 
 Generate complete Graphviz DOT code in dot blocks."""
+        # 处理 <rewrite_reasoning> 标签
+        if '<rewrite_reasoning>' in reasoning:
+            reasoning = reasoning.split('<rewrite_reasoning>')[-1]
+        if '</rewrite_reasoning>' in reasoning:
+            reasoning = reasoning.split('</rewrite_reasoning>')[0]
+            
+        reasoning = reasoning.strip()
 
         messages = [
             {
@@ -183,14 +191,14 @@ Generate complete Graphviz DOT code in dot blocks."""
             },
             {
                 "role": "user",
-                "content": f"{GRAPH_GENERATION_PROMPT}\n\nReasoning trace:\n{reasoning}",
+                "content": f"{GRAPH_GENERATION_PROMPT}\\n\\nReasoning trace:\\n{reasoning}",
             },
         ]
+
         prompt = self.tokenizer.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=True, enable_thinking=False
         )
         return prompt
-
     def _parse_fsf_from_dot(self, dot_output: str) -> Optional[float]:
         """
         Parse FSF value from DOT graph format output.
@@ -240,7 +248,8 @@ Generate complete Graphviz DOT code in dot blocks."""
                     continue
 
             fsf = failed_nodes / node_count
-            logger.debug(f"[SGLangFSFActor-{self.gpu_ids}] FSF={fsf:.4f} ({failed_nodes}/{node_count})")
+            # Log FSF parsing details at INFO level for visibility
+            logger.info(f"[SGLangFSFActor-{self.gpu_ids}] FSF={fsf:.4f} ({failed_nodes}/{node_count} nodes, {node_count-failed_nodes} successful)")
             return fsf
 
         except ImportError:

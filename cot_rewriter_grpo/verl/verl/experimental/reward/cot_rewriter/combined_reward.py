@@ -423,6 +423,7 @@ class CombinedRewardComputer:
         original_cots: List[str],
         rewrite_cots: List[str],
         answers: List[str],
+        data: Any = None,  # Optional: DataProto for accessing pre-computed FSF values
     ) -> Dict[str, Any]:
         """
         Compute combined reward.
@@ -443,6 +444,7 @@ class CombinedRewardComputer:
             original_cots: List of original CoT reasonings
             rewrite_cots: List of rewritten CoT reasonings (Actor 生成)
             answers: List of ground truth answers
+            data: Optional DataProto for accessing pre-computed FSF values from training data
 
         Returns:
             Dictionary with reward info and extra metrics
@@ -532,15 +534,19 @@ class CombinedRewardComputer:
         # Training data has 'fsf' field with pre-computed FSF values
         # We use this as original_fsf instead of computing it via FSF model
         original_fsfs = []
-        for i in range(batch_size):
-            data_item = data[i]
-            if 'fsf' in data_item.non_tensor_batch:
-                fsf_val = data_item.non_tensor_batch['fsf']
-                if hasattr(fsf_val, 'item'):
-                    fsf_val = fsf_val.item()
-                original_fsfs.append(fsf_val if fsf_val is not None else 0.0)
-            else:
-                original_fsfs.append(0.0)
+        if data is not None:
+            for i in range(batch_size):
+                data_item = data[i]
+                if 'fsf' in data_item.non_tensor_batch:
+                    fsf_val = data_item.non_tensor_batch['fsf']
+                    if hasattr(fsf_val, 'item'):
+                        fsf_val = fsf_val.item()
+                    original_fsfs.append(fsf_val if fsf_val is not None else 0.0)
+                else:
+                    original_fsfs.append(0.0)
+        else:
+            # No data provided, initialize all FSF values to 0
+            original_fsfs = [0.0] * batch_size
 
         # Log pre-computed FSF for debugging
         for i, fsf_val in enumerate(original_fsfs):
@@ -593,16 +599,17 @@ class CombinedRewardComputer:
                 rewrite_failed = sum(1 for f in rewrite_fsfs if f is None)
                 fsf_parse_failed_count = rewrite_failed
 
-                # Compute logic rewards: R_logic = original_fsf - rewrite_fsf
-                # Positive means rewrite has lower FSF (fewer failed steps) -> better
+                # Compute logic rewards: R_logic = -rewrite_fsf
+                # original_fsf is only used as observation/metric, not in reward calculation
+                # Lower rewrite_fsf = better (fewer failed steps) -> higher reward
                 r_logic = []
                 for orig_fsf, rew_fsf in zip(original_fsfs, rewrite_fsfs):
                     if rew_fsf is None:
                         # Parse failed, use 0 for logic reward
                         r_logic.append(0.0)
                     else:
-                        # FSF difference: positive means improvement
-                        r_logic.append(orig_fsf - rew_fsf)
+                        # R_logic = -rewrite_fsf (negative reward proportional to failed step fraction)
+                        r_logic.append(-rew_fsf)
 
                 has_any_parse_failure = fsf_parse_failed_count > 0
 
@@ -836,8 +843,7 @@ class CombinedRewardComputer:
             "reward_deltas": reward_deltas,  # NEW: Log raw rewrite-original deltas
             "original_fsfs": original_fsfs,  # FSF values for original CoTs (pre-computed from dataset)
             "rewrite_fsfs": rewrite_fsfs,  # FSF values for rewrite CoTs (computed by FSF model)
-            "original_dot_outputs": original_dot_outputs,  # Raw FSF DOT outputs for original CoTs (if save_fsf_dot_outputs=True)
-            "rewrite_dot_outputs": rewrite_dot_outputs,  # Raw FSF DOT outputs for rewrite CoTs (if save_fsf_dot_outputs=True)
+            # Note: original_dot_outputs is omitted (original cot does not call FSF judge)
             "fsf_parse_failed_count": fsf_parse_failed_count,  # Number of samples with FSF parse failures
             "fsf_group_skipped": fsf_group_skipped,  # Whether FSF reward was skipped for entire group
             "extra_info": {
@@ -849,11 +855,14 @@ class CombinedRewardComputer:
                 "too_long_penalty_coeffs": too_long_penalty_coeffs,  # NEW: too_long_penalty coefficients
                 "length_ratios": length_ratios,  # For DAPO filter_groups
                 # Penalty info for external use (format/truncation penalties)
-            "penalty_mode": self.penalty_mode,  # NEW: "relative" or "absolute"
-            "base_rewards": base_rewards,
-            "base_reward_range": base_reward_range,
-            # === DEBUG: Pre-computed FSF from training data ===
-            "pre_computed_original_fsfs": pre_computed_original_fsfs,  # Pre-computed FSF for original CoTs (from training data)
+                "penalty_mode": self.penalty_mode,  # NEW: "relative" or "absolute"
+                "base_rewards": base_rewards,
+                "base_reward_range": base_reward_range,
+                # === DEBUG: Pre-computed FSF from training data ===
+                "pre_computed_original_fsfs": original_fsfs,  # Pre-computed FSF for original CoTs (from training data)
+                # === FSF DOT outputs (for saving to rollout_data/val_data) ===
+                "rewrite_dot_outputs": rewrite_dot_outputs,  # Raw DOT outputs for rewrite CoTs (if save_fsf_dot_outputs=True)
+            }
         }
 
 
@@ -1224,6 +1233,7 @@ def compute_cot_rewriter_reward(
         original_cots=original_cots,
         rewrite_cots=extracted_rewrite_cots,
         answers=answers,
+        data=data,
     )
 
     # Fill in results for all samples
@@ -1239,11 +1249,10 @@ def compute_cot_rewriter_reward(
     original_fsfs = result.get("original_fsfs", [0.0] * batch_size)
     rewrite_fsfs = result.get("rewrite_fsfs", [0.0] * batch_size)
     # Extract DOT outputs if available (when save_fsf_dot_outputs=True)
-    original_dot_outputs = result["extra_info"].get("original_dot_outputs", [None] * batch_size)
+    # Note: original_dot_outputs is not extracted (original cot does not call FSF judge)
     rewrite_dot_outputs = result["extra_info"].get("rewrite_dot_outputs", [None] * batch_size)
     # FSF parse success status: True if FSF value is not None, False otherwise
-    original_fsf_parse_success = [1 if f is not None else 0 for f in original_fsfs]
-    rewrite_fsf_parse_success = [1 if f is not None else 0 for f in rewrite_fsfs]
+    # Note: original_fsf_parse_success is not needed (original cot FSF is pre-computed in dataset)
     rewrite_fsf_parse_success = [1 if f is not None else 0 for f in rewrite_fsfs]
     too_short_penalties = result.get("too_short_penalties", [0.0] * batch_size)
     too_short_penalty_coeffs = result["extra_info"].get("too_short_penalty_coeffs", [0.0] * batch_size)
@@ -1346,14 +1355,14 @@ def compute_cot_rewriter_reward(
             "no_cot_mean_log_probs": no_cot_mean_log_probs,  # Baseline (no CoT)
             "logic_rewards": logic_rewards,
             "total_rewards": total_rewards,
-            "original_fsfs": original_fsfs,
-            "rewrite_fsfs": rewrite_fsfs,
+            "original_fsfs": original_fsfs,  # Pre-computed from dataset (observation only)
+            "rewrite_fsfs": rewrite_fsfs,    # Computed by FSF judge (used for R_logic)
             # FSF parse success status: 1 if FSF value is not None, 0 otherwise
-            "original_fsf_parse_success": original_fsf_parse_success,  # FSF 解析是否成功 (original)
+            # Note: original_fsf_parse_success is omitted (original cot FSF is pre-computed in dataset)
             "rewrite_fsf_parse_success": rewrite_fsf_parse_success,  # FSF 解析是否成功 (rewrite)
             # FSF DOT outputs (if save_fsf_dot_outputs=True)
-            "original_dot_outputs": original_dot_outputs,  # Raw DOT outputs for original CoTs
-            "rewrite_dot_outputs": rewrite_dot_outputs,  # Raw DOT outputs for rewrite CoTs
+            # Note: original_dot_outputs is omitted (original cot does not call FSF judge)
+            "rewrite_dot_outputs": rewrite_dot_outputs,  # Raw DOT outputs for rewrite CoTs only
             # Penalties for SwanLab logging
             "truncation_penalties": truncation_penalties,
             "format_penalties": format_penalties,
@@ -1377,8 +1386,6 @@ def compute_cot_rewriter_reward(
             # FSF: Parse failure count and group skip flag
             "fsf_parse_failed_count": result.get("fsf_parse_failed_count", 0),  # Number of samples with parse failures
             "fsf_group_skipped": result.get("fsf_group_skipped", False),  # Whether FSF reward was skipped for entire group
-            "original_fsf_parse_success": original_fsf_parse_success,  # FSF parse success status for original CoTs (1=success, 0=failed)
-            "rewrite_fsf_parse_success": rewrite_fsf_parse_success,  # FSF parse success status for rewrite CoTs (1=success, 0=failed)
         },
     }
 

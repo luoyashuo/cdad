@@ -567,4 +567,25 @@ def compute_reward_breakdown_metrics(reward_extra_infos_dict: dict[str, list[Any
         fsf_group_skipped = reward_extra_infos_dict["fsf_group_skipped"]
         metrics["fsf/group_skipped"] = 1.0 if fsf_group_skipped else 0.0
 
+    # FSF delta (observation only, not used in reward calculation):
+    # delta = original_fsf - rewrite_fsf (positive = improvement)
+    # Note: R_logic = -rewrite_fsf is used for reward, original_fsf is only for observation
+    if "original_fsfs" in reward_extra_infos_dict and "rewrite_fsfs" in reward_extra_infos_dict:
+        original_fsfs = reward_extra_infos_dict["original_fsfs"]
+        rewrite_fsfs = reward_extra_infos_dict["rewrite_fsfs"]
+        if original_fsfs and rewrite_fsfs and len(original_fsfs) == len(rewrite_fsfs):
+            # Calculate deltas for observation: how much rewrite improved over original
+            fsf_deltas = []
+            for o_fsf, r_fsf in zip(original_fsfs, rewrite_fsfs):
+                if o_fsf is not None and r_fsf is not None:
+                    fsf_deltas.append(o_fsf - r_fsf)
+            if fsf_deltas:
+                deltas_array = np.array(fsf_deltas, dtype=np.float64)
+                metrics["fsf/delta/mean"] = float(np.mean(deltas_array))
+                metrics["fsf/delta/max"] = float(np.max(deltas_array))
+                metrics["fsf/delta/min"] = float(np.min(deltas_array))
+                # Count improvements (delta > 0 means rewrite has fewer failed steps)
+                improvements = sum(1 for d in fsf_deltas if d > 0)
+                metrics["fsf/improvement_rate"] = improvements / len(fsf_deltas)
+
     return metrics

@@ -6,6 +6,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **CoT Rewriter GRPO** 是基于 VERL 框架的 Chain-of-Thought (CoT) 改写模型训练系统，使用 GRPO (Group Relative Policy Optimization) 算法训练一个能将原始推理过程改写得更清晰、高效的模型。
 
+**核心目标**: 训练一个 CoT Rewriter 模型，能够将原始的 Chain-of-Thought 推理过程改写得更加清晰、高效，减少失败分支，帮助下游模型（Student Model）更好地理解和利用推理过程。
+
 ## 环境要求
 
 - **Python**: 3.12 (使用 uv 管理)
@@ -38,30 +40,100 @@ export VLLM_USE_V1=0                      # 强制使用 vLLM V0 引擎
 export VLLM_ATTENTION_BACKEND=FLASH_ATTN  # 使用 Flash Attention
 ```
 
-## 训练流程
+### QC 服务器环境特殊配置
+
+如果在 QC 服务器上运行（CUDA Driver 525+），需要设置：
+```bash
+export VLLM_USE_V1=0                      # 强制使用 vLLM V0 引擎
+export VLLM_ATTENTION_BACKEND=FLASH_ATTN  # 使用 Flash Attention
+```
+
+## 常用命令
 
 ### 启动训练
 
 使用配置文件启动训练：
 
 ```bash
-# 使用 4x80GB GPU (全参数微调)
-bash scripts/grpo/start_ruc_4gpu_80g.sh
+# QC 环境 8x80GB GPU (全参数微调)
+bash scripts/grpo/start_qc.sh              # 默认使用 GPU 0-7
+bash scripts/grpo/start_qc.sh 0,1,2,3      # 指定 GPU
+bash scripts/grpo/start_qc.sh 0,1,2,3 llama3_8b_grpo_8x80g  # 指定 GPU 和配置
 
-# 使用 2x40GB GPU (LoRA 微调)
+# RUC 环境 4x80GB GPU (全参数微调)
+bash scripts/grpo/start_ruc_4gpu_80g.sh     # 默认使用 GPU 0,1,2,3
+bash scripts/grpo/start_ruc_4gpu_80g.sh 4,5,6,7  # 指定 GPU
+
+# 通用 2x40GB GPU (LoRA 微调)
 bash scripts/grpo/start.sh
 ```
-
-### 关键配置文件
-
-- `examples/qwen3_4b_grpo_ruc_4x80g_full.yaml` - 4x80GB GPU 全参数微调配置
-- `examples/qwen3_4b_grpo_2x40g_lora.yaml` - 2x40GB GPU LoRA 微调配置
-- `examples/field_mapping_examples.md` - 数据字段映射说明
 
 ### 停止训练
 
 ```bash
+# RUC 环境
 bash scripts/grpo/stop_train_ruc_4gpu.sh
+
+# 手动停止
+ps aux | grep main_ppo.py
+kill <PID>
+```
+
+### 运行测试
+
+```bash
+# 运行 sanity tests (CPU)
+cd verl
+pytest tests/special_sanity/test_import.py -v
+
+# 运行单元测试 (需要 GPU)
+pytest tests/utils/test_config_on_cpu.py -v
+
+# 测试 SGLang Student Reward
+python scripts/grpo/test_sglang_simple.py
+```
+
+### 调试命令
+
+```bash
+# 查看训练日志
+tail -f logs/grpo/<config_name>.log
+
+# 查看 GPU 状态
+watch -n 1 nvidia-smi
+
+# 检查 Ray 进程
+ps aux | grep ray
+
+# 清理 Ray 临时文件
+rm -rf /tmp/ray_*
+```
+
+## 关键配置文件
+
+| 配置文件 | GPU 配置 | 微调方式 | Reward Backend |
+|----------|-----------|----------|----------------|
+| `examples/llama3_8b_grpo_8x80g.yaml` | 8x80GB | 全参数 | SGLang |
+| `examples/qwen3_4b_grpo_8x80g.yaml` | 8x80GB | 全参数 | vLLM |
+| `examples/llama3_8b_zero_grpo_8x80g.yaml` | 8x80GB | ZeRO | vLLM |
+| `examples/phi_4b_grpo_8x80g.yaml` | 8x80GB | 全参数 | vLLM |
+| `examples/qwen3_4b_gspo_8x80g.yaml` | 8x80GB | 全参数 | GSPO |
+| `examples/qwen2_5_7b_gspo_8x80g.yaml` | 8x80GB | 全参数 | GSPO |
+
+### 数据字段映射
+
+数据格式配置详见: `examples/field_mapping_examples.md`
+
+```yaml
+# 在配置文件中自定义字段映射
+custom_reward_function:
+  reward_kwargs:
+    field_mapping:
+      prompt_key: problem             # 问题字段名
+      reward_model_key: reward_model  # 奖励模型字段名
+      question_key: question          # 问题文本字段名
+      original_cot_key: original_cot  # 原始 CoT 字段名
+      ground_truth_key: ground_truth  # 正确答案字段名
 ```
 
 ## 系统架构
@@ -92,12 +164,18 @@ VERL 使用 Hybrid Engine 架构，同一模型有两种形态：
 
 ### 奖励函数
 
-**总奖励公式**: `R = R_cog + λ * R_logic`
+**总奖励公式**: `R = R_cog + lambda * R_logic`
 
 **认知奖励** (Cognitive Reward):
 ```
-answer_log_prob = mean(token_log_probs) + α * min(token_log_probs)
+answer_log_prob = mean(token_log_probs) + alpha * min(token_log_probs)
 R_cog = answer_log_prob(rewritten) - answer_log_prob(original)
+```
+
+**逻辑奖励** (Logic Reward, 可选):
+```
+FSF(Q, CoT) = 失败分支占比
+R_logic = FSF(Q, Original_CoT) - FSF(Q, Rewritten_CoT)
 ```
 
 当前配置: `use_logic_reward: false`，所以 `R = R_cog`
@@ -112,6 +190,8 @@ R_cog = answer_log_prob(rewritten) - answer_log_prob(original)
    - `combined_reward.py` - 组合奖励计算入口
    - `student_reward.py` - Student Model vLLM 实现
    - `sglang_student_reward.py` - Student Model SGLang 实现
+   - `sglang_fsf_reward.py` - FSF Judge SGLang 实现
+   - `reward_manager.py` - 自定义 Reward Manager
 
 2. **FSDP Workers** - `workers/fsdp_workers.py`
    - 支持 vLLM offload/reload 机制
@@ -131,24 +211,31 @@ R_cog = answer_log_prob(rewritten) - answer_log_prob(original)
 
 ### 训练脚本
 
-- `scripts/grpo/` - GRPO 训练脚本
-  - `start_ruc_4gpu_80g.sh` - 4x80GB GPU 启动脚本
-  - `start_sglang_debug.sh` - SGLang 调试脚本
-  - `run_train.sh` - 通用训练脚本
+- `scripts/grpo/start_qc.sh` - QC 环境 8x80G 启动脚本
+- `scripts/grpo/start_ruc_4gpu_80g.sh` - RUC 环境 4x80G 启动脚本
+- `scripts/grpo/run_train.sh` - 通用训练脚本（由 start 脚本调用）
+- `scripts/grpo/stop_train_ruc_4gpu.sh` - RUC 环境停止脚本
 
 - `scripts/train_fsf_judge/` - FSF Judge 模型训练脚本
 - `scripts/serve_judge/` - 奖励模型服务脚本
+
+### 调试/测试脚本
+
+- `scripts/grpo/test_sglang_simple.py` - SGLang Student Reward 测试
+- `scripts/grpo/test_model_format_sglang.py` - SGLang 模型格式测试
+- `scripts/grpo/test_model_format.py` - 通用模型格式测试
 
 ## 文档
 
 - `docs/training_architecture.md` - 详细的训练架构文档
 - `docs/MODIFICATIONS_SUMMARY.md` - VERL 框架修改总结
 - `docs/batch_size_parameters.md` - Batch size 参数说明
-- `docs/DEBUG.md` / `docs/DEBUG_RUC.md` - 调试指南
+- `docs/DEBUG.md` / `docs/DEBUG_RUC.md` / `docs/DEBUG_QC.md` - 调试指南
+- `examples/field_mapping_examples.md` - 数据字段映射说明
 
 ## 显存管理关键点
 
-### GPU 内存预算 (4x80GB 配置)
+### GPU 内存预算 (8x80GB 配置)
 
 每张 GPU 在不同阶段的显存占用：
 
@@ -174,34 +261,6 @@ actor_rollout_ref.rollout:
 # Student Model 显存配置
 custom_reward_function.reward_kwargs:
   vllm_gpu_memory_utilization: 0.4
+  sglang_mem_fraction_static: 0.5
 ```
 
-## 常见问题
-
-### vLLM Sleep 失效
-
-如果遇到 vLLM 无法正确释放显存：
-- 参考: https://github.com/vllm-project/vllm/issues/15254
-- 解决: 确保 `sleep_level: 2` 且 `free_cache_engine: true`
-
-### Ray OpenTelemetry 冲突
-
-如果遇到 OpenTelemetry 相关错误：
-```bash
-export RAY_TRACING_ENABLED=0
-export RAY_USAGE_STATS_ENABLED=0
-```
-
-### PyTorch 兼容性问题
-
-vLLM 0.8.4 可能与 PyTorch 2.6+ 有兼容性问题：
-```bash
-bash scripts/fix_vllm_pytorch_compatibility.sh
-```
-
-## 注意事项
-
-1. **目录结构**: VERL 框架需要和本项目在同一父目录下
-2. **中文用户**: 用户期望用中文沟通
-3. **数据格式**: 训练数据使用 JSONL 格式，包含 `problem`, `original_cot`, `ground_truth` 等字段
-4. **Asyncio Patch**: SGLang 使用时需要应用 `scripts/grpo/asyncio_patch.py`

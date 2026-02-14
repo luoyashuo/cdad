@@ -11,4 +11,4 @@ source /data/luoys/projects/cdad/cot_rewriter_grpo/.venv/bin/activate
 # LOG
 /data/luoys/projects/cdad/cot_rewriter_grpo/logs/grpo/llama3_8b_grpo_8x80g.log
 # 问题
-为什么rollout data的fsf 全部都是0，（rewrite和original都是0），你是不是没正确解析计算
+/data/luoys/checkpoints/cdad/rollout_data/llama3_8b_grpo_8x80g_v6
