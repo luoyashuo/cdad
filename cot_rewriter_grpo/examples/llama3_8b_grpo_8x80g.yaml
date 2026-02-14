@@ -228,7 +228,7 @@ custom_reward_function:
     fsf_max_new_tokens: 8000
     fsf_gpu_memory_utilization: 0.4
     fsf_max_model_len: 12000
-    fsf_reward_scale: 1.0             # FSF 奖励缩放因子
+    fsf_reward_scale: 4            # FSF 奖励缩放因子
     fsf_micro_batch_size: 1           # FSF 推理微批次大小 (控制显存，默认4)
     fsf_skip_group_on_parse_error: true  # DOT解析失败时跳过整个group (默认true)
     save_fsf_dot_outputs: true        # 保存 FSF DOT 输出到 rollout_data

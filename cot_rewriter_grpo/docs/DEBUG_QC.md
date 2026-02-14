@@ -12,3 +12,4 @@ source /data/luoys/projects/cdad/cot_rewriter_grpo/.venv/bin/activate
 /data/luoys/projects/cdad/cot_rewriter_grpo/logs/grpo/llama3_8b_grpo_8x80g.log
 # 问题
 /data/luoys/checkpoints/cdad/rollout_data/llama3_8b_grpo_8x80g_v6
+这个下面
