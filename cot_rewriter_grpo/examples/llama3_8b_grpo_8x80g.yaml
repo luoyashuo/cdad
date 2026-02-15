@@ -27,8 +27,8 @@ trainer:
 
 # ========== 数据配置 ==========
 data:
-  train_files: ${oc.env:DATA_BASE_DIR}/omnithought_rv_optimal_cot_rewrite_v2/train.jsonl
-  val_files: ${oc.env:DATA_BASE_DIR}/omnithought_rv_optimal_cot_rewrite_v2/val.jsonl
+  train_files: ${oc.env:DATA_BASE_DIR}/omnithought_rv_optimal_cot_rewrite_v4/train.jsonl
+  val_files: ${oc.env:DATA_BASE_DIR}/omnithought_rv_optimal_cot_rewrite_v4/val.jsonl
   train_batch_size: 1
   val_batch_size: 4
   gen_batch_size: 1
@@ -65,14 +65,14 @@ actor_rollout_ref:
     clip_ratio: 0.2
     clip_ratio_low: 0.2
     clip_ratio_high: 0.28
-    entropy_coeff: 0.0001 # 小一点，太大了不收敛
-    entropy_coeff_lower_bound: 0.08
+    entropy_coeff: 0.0005 # 小一点，太大了不收敛
+    entropy_coeff_lower_bound: 0.05
     grad_clip: 1.0
     ppo_mini_batch_size: 1
     ppo_micro_batch_size_per_gpu: 1
     use_kl_in_reward: false
     use_kl_loss: true
-    kl_loss_coef: 0.01
+    kl_loss_coef: 0.005
     kl_loss_type: low_var_kl
     entropy_from_logits_with_chunking: true
     fsdp_config:
@@ -248,15 +248,16 @@ custom_reward_function:
       original_cot_key: original_cot  # 原始 CoT 字段名
       ground_truth_key: ground_truth  # 正确答案字段名
     # ==================== 长度惩罚配置 ====================
-    # 对过长或过短的 rewrite 进行惩罚
+    similarity_threshold: 0.9    # 相似度阈值
+    similarity_penalty: 1.0      # 惩罚系数
     truncation_penalty: 0.5           # 截断惩罚值
     format_penalty: 0.5               # 格式错误惩罚值
     # 过短惩罚阈值
-    too_short_threshold_low: 0.4      # 过短下限阈值 (相比 original)
-    too_short_threshold_high: 0.8     # 过短上限阈值
+    too_short_threshold_low: 0.2      # 过短下限阈值 (相比 original)
+    too_short_threshold_high: 0.5     # 过短上限阈值
     too_short_max_penalty: 0.5        # 最大过短惩罚
     # 过长惩罚阈值
-    too_long_threshold_low: 1.5       # 过长下限阈值 (相比 original)
+    too_long_threshold_low: 2.0      # 过长下限阈值 (相比 original)
     too_long_threshold_high: 2.5      # 过长上限阈值
     too_long_max_penalty: 0.5         # 最大过长惩罚
     penalty_mode: absolute            # 惩罚模式: absolute | relative

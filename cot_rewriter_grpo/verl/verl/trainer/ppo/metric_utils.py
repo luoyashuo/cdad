@@ -501,7 +501,9 @@ def compute_reward_breakdown_metrics(reward_extra_infos_dict: dict[str, list[Any
         ("format_penalties", "penalty/format"),
         ("too_short_penalties", "penalty/too_short"),
         ("too_long_penalties", "penalty/too_long"),  # NEW: too_long_penalty statistics
+        ("repeat_penalties", "penalty/repeat"),  # Repeat penalty for high similarity
         ("length_ratio", "stats/length_ratio"),
+        ("similarities", "stats/similarity"),  # Similarity between original and rewrite CoT
         # PPL values (ppl mode only) - all under ppl group
         ("rewrite_ppls", "ppl/rewrite"),
         ("original_ppls", "ppl/original"),

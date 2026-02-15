@@ -22,6 +22,7 @@ Supports two backends:
 
 from typing import Any, Dict, List, Optional, Tuple
 import re
+from difflib import SequenceMatcher
 
 import torch
 
@@ -260,6 +261,11 @@ class CombinedRewardComputer:
                                          # - 'direct': R_logic = -rewrite_fsf (default)
                                          # - 'threshold': R_logic = -1 if fsf > 0 else 0
         save_prompts: bool = False,  # Whether to save request prompts for student_model and fsf_judge
+        # ========== Repeat Penalty Configuration ==========
+        similarity_threshold: float = 0.9,  # Threshold for repeat penalty (0.0-1.0). If similarity between
+                                            # original_cot and rewrite_cot exceeds this, apply penalty.
+        similarity_penalty: float = 0.5,  # Penalty coefficient for high similarity (default: 0.5).
+                                          # Applied when similarity > similarity_threshold.
         **kwargs,  # Ignore deprecated params
     ):
         """
@@ -329,6 +335,11 @@ class CombinedRewardComputer:
                 Lower values reduce memory but increase computation time.
             fsf_skip_group_on_parse_error: If True (default), skip FSF reward for entire group
                 when any sample fails to parse. If False, use 0.0 for failed samples.
+            similarity_threshold: Threshold for repeat penalty (default: 0.9). If the similarity
+                between original_cot and rewrite_cot (computed using SequenceMatcher) exceeds
+                this value, a penalty is applied to discourage near-identical rewrites.
+            similarity_penalty: Penalty coefficient for high similarity (default: 0.5). Applied
+                when similarity > similarity_threshold, scaled by penalty_mode if "relative".
 
         阶梯式奖励配置示例:
         - tier_step=0.05, tier_reward=0.1:
@@ -422,6 +433,10 @@ class CombinedRewardComputer:
         self.fsf_reward_mode = fsf_reward_mode  # FSF reward calculation mode: 'direct' or 'threshold'
         self.save_prompts = save_prompts  # Whether to save request prompts for debugging
         self.fsf_judge = None  # Created on-demand in compute_reward
+
+        # ========== Repeat Penalty Parameters ==========
+        self.similarity_threshold = similarity_threshold
+        self.similarity_penalty = similarity_penalty
 
     def compute_reward(
         self,
@@ -846,8 +861,57 @@ class CombinedRewardComputer:
                     f"penalty_coeff={too_long_penalty_coeffs[i]:.4f} * {base_reward_range:.4f} = {too_long_penalties_actual[i]:.4f} ({self.penalty_mode})"
                 )
 
-        # Combine rewards: R = R_base + too_short_penalty + too_long_penalty
-        total_rewards = [b + s + l for b, s, l in zip(base_rewards, too_short_penalties_actual, too_long_penalties_actual)]
+        # ========== Compute Repeat Penalty ==========
+        # Calculate similarity between original_cot and rewrite_cot using SequenceMatcher
+        # Apply penalty if similarity > similarity_threshold
+        repeat_penalties_actual = [0.0] * batch_size
+        repeat_penalty_coeffs = [0.0] * batch_size  # Coefficients for logging
+        similarities = [0.0] * batch_size  # Store similarity values for logging
+
+        for i in range(batch_size):
+            original_text = original_cots[i] if original_cots[i] else ""
+            rewrite_text = rewrite_cots[i] if rewrite_cots[i] else ""
+
+            if original_text and rewrite_text:
+                # Calculate similarity using SequenceMatcher
+                sm = SequenceMatcher(None, original_text, rewrite_text)
+                blocks = sm.get_matching_blocks()
+                total_match = sum(block.size for block in blocks)
+                similarity = 2 * total_match / (len(original_text) + len(rewrite_text))
+                similarities[i] = similarity
+
+                # Apply penalty if similarity exceeds threshold
+                if similarity > self.similarity_threshold:
+                    repeat_penalty_coeffs[i] = self.similarity_penalty
+                    if self.penalty_mode == "relative":
+                        repeat_penalties_actual[i] = -self.similarity_penalty * base_reward_range
+                    else:  # absolute
+                        repeat_penalties_actual[i] = -self.similarity_penalty
+
+                    if i < 3:  # Log first few samples
+                        logger.info(
+                            f"[REPEAT_PENALTY] Sample {i}: "
+                            f"similarity={similarity:.4f} > threshold={self.similarity_threshold}, "
+                            f"penalty_coeff={self.similarity_penalty:.4f} -> actual={repeat_penalties_actual[i]:.4f} ({self.penalty_mode})"
+                        )
+                elif i < 3 and similarity > 0.7:  # Log high similarity warnings
+                    logger.info(
+                        f"[REPEAT_PENALTY] Sample {i}: "
+                        f"similarity={similarity:.4f} <= threshold={self.similarity_threshold}, no penalty applied"
+                    )
+
+        # Log repeat penalty statistics
+        high_sim_count = sum(1 for s in similarities if s > self.similarity_threshold)
+        if high_sim_count > 0:
+            logger.info(
+                f"[REPEAT_PENALTY] batch_size={batch_size}, "
+                f"{high_sim_count} samples with similarity > {self.similarity_threshold}, "
+                f"mean_similarity={sum(similarities)/len(similarities):.4f}, "
+                f"max_similarity={max(similarities):.4f}"
+            )
+
+        # Combine rewards: R = R_base + too_short_penalty + too_long_penalty + repeat_penalty
+        total_rewards = [b + s + l + r for b, s, l, r in zip(base_rewards, too_short_penalties_actual, too_long_penalties_actual, repeat_penalties_actual)]
 
         # Return penalty coefficients AND actual penalty values for use in format/truncation penalty calculation
         # Store in extra_info for external use
@@ -860,6 +924,10 @@ class CombinedRewardComputer:
             # Actual penalty values applied (negative values)
             "too_short_penalties_actual": too_short_penalties_actual,
             "too_long_penalties_actual": too_long_penalties_actual,
+            # Repeat penalty
+            "repeat_penalty_coeffs": repeat_penalty_coeffs,
+            "repeat_penalties_actual": repeat_penalties_actual,
+            "similarities": similarities,
         }
 
         # Log per-sample prompts with computed rewards
@@ -897,6 +965,7 @@ class CombinedRewardComputer:
             # === TOP-LEVEL KEYS for compute_cot_rewriter_reward to access ===
             "too_short_penalties": too_short_penalties,  # Penalty coefficients (0-0.5)
             "too_long_penalties": too_long_penalties,  # Penalty coefficients (0-0.5)
+            "repeat_penalties": repeat_penalty_coeffs,  # Repeat penalty coefficients
             # === NESTED extra_info ===
             "extra_info": {
                 "lambda_logic": self.lambda_logic,
@@ -905,6 +974,9 @@ class CombinedRewardComputer:
                 "too_short_penalty_coeffs": too_short_penalty_coeffs,  # Coefficients for logging
                 "too_long_penalties": too_long_penalties,  # NEW: too_long_penalty coefficients
                 "too_long_penalty_coeffs": too_long_penalty_coeffs,  # NEW: too_long_penalty coefficients
+                "repeat_penalties": repeat_penalty_coeffs,  # Repeat penalty coefficients
+                "repeat_penalties_actual": repeat_penalties_actual,  # Actual repeat penalties applied
+                "similarities": similarities,  # Similarity values between original and rewrite
                 "length_ratios": length_ratios,  # For DAPO filter_groups
                 # Penalty info for external use (format/truncation penalties)
                 "penalty_mode": self.penalty_mode,  # NEW: "relative" or "absolute"
@@ -1056,6 +1128,11 @@ def compute_cot_rewriter_reward(
     save_fsf_dot_outputs: bool = False,  # Whether to save raw FSF DOT outputs to rollout_data
     fsf_reward_mode: str = 'direct',  # FSF reward mode: 'direct' or 'threshold'
     save_prompts: bool = False,  # Whether to save request prompts for student_model
+    # ========== Repeat Penalty Parameters ==========
+    similarity_threshold: float = 0.9,  # Threshold for repeat penalty (0.0-1.0). If similarity between
+                                        # original_cot and rewrite_cot exceeds this, apply penalty.
+    similarity_penalty: float = 0.5,  # Penalty coefficient for high similarity (default: 0.5).
+                                      # Applied when similarity > similarity_threshold.
     **kwargs,
 ) -> Dict[str, Any]:
     # Use alpha if provided (from config), otherwise use alpha_cog
@@ -1091,6 +1168,11 @@ def compute_cot_rewriter_reward(
         fsf_reward_scale: Scale factor for FSF reward (replaces lambda_logic, default: 1.0)
         fsf_micro_batch_size: Micro batch size for FSF inference to avoid OOM (default: 4)
         fsf_skip_group_on_parse_error: If True (default), skip entire group when any FSF parse fails
+        similarity_threshold: Threshold for repeat penalty (default: 0.9). If the similarity
+            between original_cot and rewrite_cot (computed using SequenceMatcher) exceeds
+            this value, a penalty is applied to discourage near-identical rewrites.
+        similarity_penalty: Penalty coefficient for high similarity (default: 0.5). Applied
+            when similarity > similarity_threshold, scaled by penalty_mode if "relative".
 
     Returns:
         Dictionary with:
@@ -1267,6 +1349,9 @@ def compute_cot_rewriter_reward(
         save_fsf_dot_outputs=save_fsf_dot_outputs,
         fsf_reward_mode=fsf_reward_mode,
         save_prompts=save_prompts,
+        # ========== Repeat Penalty Parameters ==========
+        similarity_threshold=similarity_threshold,
+        similarity_penalty=similarity_penalty,
     )
 
     # Compute rewards for all samples
@@ -1412,6 +1497,9 @@ def compute_cot_rewriter_reward(
             "too_long_penalties": too_long_penalties,  # Penalty coefficients (0-0.5)
             "too_short_penalties_actual": result.get("extra_info", {}).get("too_short_penalties_actual", [0.0] * batch_size),  # Actual penalties applied
             "too_long_penalties_actual": result.get("extra_info", {}).get("too_long_penalties_actual", [0.0] * batch_size),  # Actual penalties applied
+            "repeat_penalties": result.get("repeat_penalties", [0.0] * batch_size),  # Repeat penalty coefficients
+            "repeat_penalties_actual": result.get("extra_info", {}).get("repeat_penalties_actual", [0.0] * batch_size),  # Actual repeat penalties applied
+            "similarities": result.get("extra_info", {}).get("similarities", [0.0] * batch_size),  # Similarity values between original and rewrite
             "penalty_mode": penalty_mode_from_result,  # "relative" or "absolute"
             "saved_prompts": result.get("extra_info", {}).get("saved_prompts", None),  # Request prompts for debugging (if save_prompts=True)
             "fsf_reward_mode": fsf_reward_mode,  # FSF reward mode: 'direct' or 'threshold'
