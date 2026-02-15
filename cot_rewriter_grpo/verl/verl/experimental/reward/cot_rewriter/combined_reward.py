@@ -256,6 +256,10 @@ class CombinedRewardComputer:
         fsf_micro_batch_size: int = 4,  # Micro batch size for FSF inference (to avoid OOM)
         fsf_skip_group_on_parse_error: bool = True,  # Skip entire group if any FSF parsing fails
         save_fsf_dot_outputs: bool = False,  # Whether to save raw FSF DOT outputs to rollout_data
+        fsf_reward_mode: str = 'direct',  # FSF reward calculation mode: 'direct' or 'threshold'
+                                         # - 'direct': R_logic = -rewrite_fsf (default)
+                                         # - 'threshold': R_logic = -1 if fsf > 0 else 0
+        save_prompts: bool = False,  # Whether to save request prompts for student_model and fsf_judge
         **kwargs,  # Ignore deprecated params
     ):
         """
@@ -415,6 +419,8 @@ class CombinedRewardComputer:
         self.fsf_micro_batch_size = fsf_micro_batch_size  # Micro batch size for FSF inference
         self.fsf_skip_group_on_parse_error = fsf_skip_group_on_parse_error  # Skip group on parse error
         self.save_fsf_dot_outputs = save_fsf_dot_outputs  # Whether to save raw DOT outputs
+        self.fsf_reward_mode = fsf_reward_mode  # FSF reward calculation mode: 'direct' or 'threshold'
+        self.save_prompts = save_prompts  # Whether to save request prompts for debugging
         self.fsf_judge = None  # Created on-demand in compute_reward
 
     def compute_reward(
@@ -482,6 +488,9 @@ class CombinedRewardComputer:
         # Backward compatibility: also pass old param name if client expects it
         if hasattr(self.student_client, 'reward_only_use_logprob'):
             compute_kwargs["reward_only_use_logprob"] = not self.use_reward_delta  # Invert for old API
+        # Save prompts for debugging if requested
+        if self.save_prompts:
+            compute_kwargs["save_prompts"] = True
 
         cog_result = self.student_client.compute_cognitive_reward_batch(
             questions=questions,
@@ -524,6 +533,9 @@ class CombinedRewardComputer:
                     )
         else:
             r_cog = r_cog_raw
+
+        # Extract saved_prompts if available (for debugging)
+        saved_prompts = cog_result.get("saved_prompts", None) if self.save_prompts else None
 
         # Compute logic reward (if enabled)
         # FSF is computed on-demand with proper memory management
@@ -585,21 +597,36 @@ class CombinedRewardComputer:
             try:
                 # Compute rewrite FSF only (original_fsf is loaded from dataset)
                 logger.info(f"[FSF] Computing FSF for {len(rewrite_cots)} rewrite CoTs only "
-                           f"(original_fsf loaded from dataset, save_dot_outputs={self.save_fsf_dot_outputs})...")
+                           f"(original_fsf loaded from dataset, save_dot_outputs={self.save_fsf_dot_outputs}, save_prompts={self.save_prompts})...")
                 fsf_result = self.fsf_judge.compute_rewrite_fsf_only(
                     rewrite_cots=rewrite_cots,
                     return_dot_outputs=self.save_fsf_dot_outputs,
+                    save_prompts=self.save_prompts,
                 )
 
                 rewrite_fsfs = fsf_result["rewrite_fsfs"]
                 if self.save_fsf_dot_outputs:
                     rewrite_dot_outputs = fsf_result.get("rewrite_dot_outputs", [None] * batch_size)
 
+                # Merge FSF saved_prompts into the main saved_prompts dict
+                if self.save_prompts and "saved_prompts" in fsf_result:
+                    fsf_saved_prompts = fsf_result["saved_prompts"]
+                    if saved_prompts is None:
+                        saved_prompts = fsf_saved_prompts
+                    elif isinstance(fsf_saved_prompts, dict):
+                        # Merge FSF prompts into saved_prompts
+                        for key, values in fsf_saved_prompts.items():
+                            if key not in saved_prompts:
+                                saved_prompts[key] = values
+                            elif isinstance(saved_prompts.get(key), list) and isinstance(values, list):
+                                saved_prompts[key].extend(values)
+                    logger.info(f"[FSF] Merged fsf_saved_prompts keys: {list(fsf_saved_prompts.keys())}")
+
                 # Count samples with unparseable FSF
                 rewrite_failed = sum(1 for f in rewrite_fsfs if f is None)
                 fsf_parse_failed_count = rewrite_failed
 
-                # Compute logic rewards: R_logic = -rewrite_fsf
+                # Compute logic rewards based on fsf_reward_mode
                 # original_fsf is only used as observation/metric, not in reward calculation
                 # Lower rewrite_fsf = better (fewer failed steps) -> higher reward
                 r_logic = []
@@ -608,8 +635,14 @@ class CombinedRewardComputer:
                         # Parse failed, use 0 for logic reward
                         r_logic.append(0.0)
                     else:
-                        # R_logic = -rewrite_fsf (negative reward proportional to failed step fraction)
-                        r_logic.append(-rew_fsf)
+                        # Apply reward based on fsf_reward_mode
+                        if self.fsf_reward_mode == 'threshold':
+                            # R_logic = -1 if fsf > 0 else 0
+                            # Only apply penalty if there are any failed steps
+                            r_logic.append(-1.0 if rew_fsf > 0 else 0.0)
+                        else:  # 'direct' mode (default)
+                            # R_logic = -rewrite_fsf (negative reward proportional to failed step fraction)
+                            r_logic.append(-rew_fsf)
 
                 has_any_parse_failure = fsf_parse_failed_count > 0
 
@@ -670,6 +703,7 @@ class CombinedRewardComputer:
 
         # Get tokenizer from student_client for token length calculation
         tokenizer = getattr(self.student_client, 'tokenizer', None)
+        logger.info(f"[LENGTH_PENALTY_DEBUG] tokenizer available: {tokenizer is not None}, student_client type: {type(self.student_client).__name__}")
         if tokenizer is None:
             logger.warning("[LENGTH_PENALTY] Tokenizer not available, skipping length penalties")
         else:
@@ -749,6 +783,15 @@ class CombinedRewardComputer:
                 f"too_long: low={low_long}, high={high_long} (num_above_low={num_above_low_long}/{len(valid_ratios)}, num_above_high={num_above_high_long}/{len(valid_ratios)})"
             )
 
+        # Log summary of penalty coefficients for debugging
+        logger.info(
+            f"[PENALTY_SUMMARY] batch_size={batch_size}, "
+            f"too_short_penalty_coeffs (first 3): {too_short_penalty_coeffs[:3]}, "
+            f"too_long_penalty_coeffs (first 3): {too_long_penalty_coeffs[:3]}, "
+            f"too_short_penalties (first 3): {too_short_penalties[:3]}, "
+            f"too_long_penalties (first 3): {too_long_penalties[:3]}"
+        )
+
         # Compute base rewards: R_base = R_cog + lambda_useful * R_useful + fsf_reward_scale * R_logic
         # Note: R_useful is only included if use_useful_reward is True. fsf_reward_scale replaces lambda_logic.
         if self.use_useful_reward:
@@ -759,6 +802,8 @@ class CombinedRewardComputer:
                            for c, l in zip(r_cog, r_logic)]
 
         # Determine penalty scaling factor based on penalty_mode
+        # DEBUG: Log penalty_mode value to track unexpected "s" value
+        logger.info(f"[PENALTY_MODE_DEBUG] self.penalty_mode={repr(self.penalty_mode)}, type={type(self.penalty_mode)}")
         if self.penalty_mode == "relative":
             # Compute range of base_rewards for relative penalty scaling
             # The range is max - min, representing the spread of rewards within the group
@@ -804,7 +849,7 @@ class CombinedRewardComputer:
         # Combine rewards: R = R_base + too_short_penalty + too_long_penalty
         total_rewards = [b + s + l for b, s, l in zip(base_rewards, too_short_penalties_actual, too_long_penalties_actual)]
 
-        # Return penalty coefficients for use in format/truncation penalty calculation
+        # Return penalty coefficients AND actual penalty values for use in format/truncation penalty calculation
         # Store in extra_info for external use
         extra_info_penalty_coeffs = {
             "base_rewards": base_rewards,
@@ -812,6 +857,9 @@ class CombinedRewardComputer:
             "penalty_mode": self.penalty_mode,
             "too_short_penalty_coeffs": too_short_penalty_coeffs,
             "too_long_penalty_coeffs": too_long_penalty_coeffs,
+            # Actual penalty values applied (negative values)
+            "too_short_penalties_actual": too_short_penalties_actual,
+            "too_long_penalties_actual": too_long_penalties_actual,
         }
 
         # Log per-sample prompts with computed rewards
@@ -846,6 +894,10 @@ class CombinedRewardComputer:
             # Note: original_dot_outputs is omitted (original cot does not call FSF judge)
             "fsf_parse_failed_count": fsf_parse_failed_count,  # Number of samples with FSF parse failures
             "fsf_group_skipped": fsf_group_skipped,  # Whether FSF reward was skipped for entire group
+            # === TOP-LEVEL KEYS for compute_cot_rewriter_reward to access ===
+            "too_short_penalties": too_short_penalties,  # Penalty coefficients (0-0.5)
+            "too_long_penalties": too_long_penalties,  # Penalty coefficients (0-0.5)
+            # === NESTED extra_info ===
             "extra_info": {
                 "lambda_logic": self.lambda_logic,
                 "lambda_useful": self.lambda_useful,
@@ -862,6 +914,8 @@ class CombinedRewardComputer:
                 "pre_computed_original_fsfs": original_fsfs,  # Pre-computed FSF for original CoTs (from training data)
                 # === FSF DOT outputs (for saving to rollout_data/val_data) ===
                 "rewrite_dot_outputs": rewrite_dot_outputs,  # Raw DOT outputs for rewrite CoTs (if save_fsf_dot_outputs=True)
+                # === Saved prompts (for debugging) ===
+                "saved_prompts": saved_prompts,  # Request prompts for student_model (if save_prompts=True)
             }
         }
 
@@ -957,7 +1011,6 @@ def compute_cot_rewriter_reward(
     use_useful_reward: bool = True,  # Whether to use R_useful in reward calculation
     alpha_cog: float = 0.01,
     alpha: Optional[float] = None,  # Alias for alpha_cog (from config)
-    field_mapping: Optional[Dict[str, str]] = None,
     student_devices: Optional[List[str]] = None,
     reward_micro_batch_size: Optional[int] = None,
     gpu_batch_size: int = 8,
@@ -1001,6 +1054,8 @@ def compute_cot_rewriter_reward(
     fsf_micro_batch_size: int = 4,  # Micro batch size for FSF inference (avoid OOM)
     fsf_skip_group_on_parse_error: bool = True,  # Skip entire group on parse error
     save_fsf_dot_outputs: bool = False,  # Whether to save raw FSF DOT outputs to rollout_data
+    fsf_reward_mode: str = 'direct',  # FSF reward mode: 'direct' or 'threshold'
+    save_prompts: bool = False,  # Whether to save request prompts for student_model
     **kwargs,
 ) -> Dict[str, Any]:
     # Use alpha if provided (from config), otherwise use alpha_cog
@@ -1020,9 +1075,6 @@ def compute_cot_rewriter_reward(
         lambda_logic: Weight for logic reward
         use_logic_reward: Whether to use logic reward
         alpha_cog: Weight for min log prob term in cognitive reward (default: 0.01)
-        field_mapping: Optional dict to customize field names in data.
-            Keys: "prompt_key", "reward_model_key", "question_key",
-                  "original_cot_key", "ground_truth_key"
         student_devices: List of CUDA devices for Student (e.g., ["cuda:0", "cuda:1"])
         reward_micro_batch_size: Micro-batch size for reward computation
         gpu_batch_size: Batch size for GPU forward pass
@@ -1045,27 +1097,15 @@ def compute_cot_rewriter_reward(
             - reward_tensor: Token-level reward tensor [batch_size, seq_len]
             - reward_extra_info: Additional metrics for logging
     """
-    # Default field mapping
-    default_mapping = {
-        "prompt_key": "prompt",
-        "reward_model_key": "reward_model",
-        "question_key": "question",
-        "original_cot_key": "original_cot",
-        "ground_truth_key": "ground_truth",
-    }
+    # Fixed field names (standardized in rl_dataset_jsonl.py)
+    prompt_key = "prompt"
+    reward_model_key = "reward_model"
+    question_key = "question"
+    original_cot_key = "original_cot"
+    ground_truth_key = "ground_truth"
 
-    # Merge with user-provided mapping
-    if field_mapping:
-        default_mapping.update(field_mapping)
-
-    prompt_key = default_mapping["prompt_key"]
-    reward_model_key = default_mapping.get("reward_model_key", "reward_model")
-    question_key = default_mapping["question_key"]
-    original_cot_key = default_mapping["original_cot_key"]
-    ground_truth_key = default_mapping["ground_truth_key"]
-
-    # Handle case where reward_model_key is None or empty (flat structure)
-    use_flat_structure = not reward_model_key or reward_model_key == "null"
+    # Check if using flat structure (no reward_model wrapper)
+    use_flat_structure = False
 
     batch_size = data.batch["responses"].shape[0]
 
@@ -1225,6 +1265,8 @@ def compute_cot_rewriter_reward(
         fsf_micro_batch_size=fsf_micro_batch_size,
         fsf_skip_group_on_parse_error=fsf_skip_group_on_parse_error,
         save_fsf_dot_outputs=save_fsf_dot_outputs,
+        fsf_reward_mode=fsf_reward_mode,
+        save_prompts=save_prompts,
     )
 
     # Compute rewards for all samples
@@ -1367,8 +1409,12 @@ def compute_cot_rewriter_reward(
             "truncation_penalties": truncation_penalties,
             "format_penalties": format_penalties,
             "too_short_penalties": too_short_penalties,
-            "too_long_penalties": too_long_penalties,  # NEW: too_long_penalty values
-            "penalty_mode": penalty_mode_from_result,  # NEW: "relative" or "absolute"
+            "too_long_penalties": too_long_penalties,  # Penalty coefficients (0-0.5)
+            "too_short_penalties_actual": result.get("extra_info", {}).get("too_short_penalties_actual", [0.0] * batch_size),  # Actual penalties applied
+            "too_long_penalties_actual": result.get("extra_info", {}).get("too_long_penalties_actual", [0.0] * batch_size),  # Actual penalties applied
+            "penalty_mode": penalty_mode_from_result,  # "relative" or "absolute"
+            "saved_prompts": result.get("extra_info", {}).get("saved_prompts", None),  # Request prompts for debugging (if save_prompts=True)
+            "fsf_reward_mode": fsf_reward_mode,  # FSF reward mode: 'direct' or 'threshold'
             # DAPO filter_groups support: "truncated" flag (1 if truncated, 0 otherwise)
             "truncated": truncated_flags,
             # DAPO filter_groups support: "format_valid" flag (1 if valid, 0 if invalid)
@@ -1399,7 +1445,6 @@ def compute_cot_rewriter_reward(
 def compute_length_ratio_only(
     data: DataProto,
     tokenizer: Any,
-    field_mapping: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Any]:
     """
     Lightweight function that only computes length_ratio for filtering.
@@ -1409,7 +1454,6 @@ def compute_length_ratio_only(
     Args:
         data: VERL DataProto containing batch data
         tokenizer: Tokenizer for computing token lengths
-        field_mapping: Optional dict to customize field names in data
 
     Returns:
         Dictionary with:
@@ -1417,23 +1461,12 @@ def compute_length_ratio_only(
             - format_valid: List of format validity flags (1 if valid, 0 if invalid)
             - reward_extra_info: Additional metrics for logging
     """
-    # Default field mapping
-    default_mapping = {
-        "prompt_key": "prompt",
-        "reward_model_key": "reward_model",
-        "question_key": "question",
-        "original_cot_key": "original_cot",
-        "ground_truth_key": "ground_truth",
-    }
-    if field_mapping:
-        default_mapping.update(field_mapping)
+    # Fixed field names (standardized in rl_dataset_jsonl.py)
+    reward_model_key = "reward_model"
+    original_cot_key = "original_cot"
 
-    prompt_key = default_mapping["prompt_key"]
-    reward_model_key = default_mapping.get("reward_model_key", "reward_model")
-    original_cot_key = default_mapping["original_cot_key"]
-
-    # Handle case where reward_model_key is None or empty (flat structure)
-    use_flat_structure = not reward_model_key or reward_model_key == "null"
+    # Check if using flat structure (no reward_model wrapper)
+    use_flat_structure = False
 
     batch_size = data.batch["responses"].shape[0]
 

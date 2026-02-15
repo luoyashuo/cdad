@@ -11,5 +11,9 @@ source /data/luoys/projects/cdad/cot_rewriter_grpo/.venv/bin/activate
 # LOG
 /data/luoys/projects/cdad/cot_rewriter_grpo/logs/grpo/llama3_8b_grpo_8x80g.log
 # 问题
-/data/luoys/checkpoints/cdad/rollout_data/llama3_8b_grpo_8x80g_v6
-这个下面
+为什么保存的数据/data/luoys/checkpoints/cdad/rollout_data/llama3_8b_grpo_8x80g_v7/1.jsonl 第三行
+  "too_short_penalties": 0.0,
+  "too_long_penalties": 0.0,
+  但是  "length_ratio": 0.3328100470957614,
+  按理说应该吃到惩罚才对啊
+

@@ -769,6 +769,7 @@ class SGLangStudentRewardClient:
         alpha_cog: float = 0.01,
         use_reward_delta: Optional[bool] = None,
         reward_only_use_logprob: Optional[bool] = None,
+        save_prompts: bool = False,  # Whether to save prompts for debugging
         **kwargs,  # Accept extra args for compatibility
     ) -> Dict[str, Any]:
         """
@@ -849,6 +850,18 @@ class SGLangStudentRewardClient:
             no_cot_prompt, no_cot_ans_start = self._build_prompt_without_cot(questions[i], answers[i])
             no_cot_prompts.append(no_cot_prompt)
             no_cot_ans_starts.append(no_cot_ans_start)
+
+        # Save prompts for debugging if requested
+        # Store prompts in dict for later return
+        saved_prompts = {}
+        if save_prompts:
+            saved_prompts["rewrite_prompts"] = rewrite_prompts
+            saved_prompts["no_cot_prompts"] = no_cot_prompts
+            # For original prompts, map them back to original indices
+            original_prompts_full = [None] * batch_size
+            for idx, orig_prompt in zip(original_indices, original_prompts):
+                original_prompts_full[idx] = orig_prompt
+            saved_prompts["original_prompts"] = original_prompts_full
 
         prep_time = time.time() - start_time
 
@@ -1018,7 +1031,7 @@ class SGLangStudentRewardClient:
             all_token_log_probs.append(rewrite_result.get("token_log_probs", []))
             all_token_ids.append([])  # Token IDs not needed for reward
 
-        return {
+        result_dict = {
             "rewards": rewards,  # R_cog (formula 2: avg_prob(rewrite))
             "useful_rewards": useful_rewards,  # R_useful
             "rewrite_mean_log_probs": rewrite_mean_log_probs,
@@ -1033,6 +1046,12 @@ class SGLangStudentRewardClient:
             "token_log_probs": all_token_log_probs,
             "token_ids": all_token_ids,
         }
+
+        # Add saved prompts if requested
+        if save_prompts and saved_prompts:
+            result_dict["saved_prompts"] = saved_prompts
+
+        return result_dict
 
     def release_memory(self):
         """

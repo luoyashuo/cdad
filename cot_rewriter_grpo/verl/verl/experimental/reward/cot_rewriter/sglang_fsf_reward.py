@@ -264,7 +264,8 @@ Generate complete Graphviz DOT code in dot blocks."""
         reasonings: List[str],
         micro_batch_size: int = 4,
         return_dot_outputs: bool = False,  # Whether to return raw DOT outputs
-    ) -> List[Optional[float]] | Tuple[List[Optional[float]], List[Optional[str]]]:
+        save_prompts: bool = False,  # Whether to save request prompts
+    ) -> List[Optional[float]] | Tuple[List[Optional[float]], List[Optional[str]], Dict[str, List[str]]]:
         """
         Batch computation of FSF values with micro-batching to avoid OOM.
 
@@ -272,10 +273,12 @@ Generate complete Graphviz DOT code in dot blocks."""
             reasonings: List of reasoning texts to evaluate
             micro_batch_size: Max number of prompts per SGLang call (to control memory)
             return_dot_outputs: If True, return (fsf_values, dot_outputs) tuple
+            save_prompts: If True, also return saved prompts dict
 
         Returns:
-            If return_dot_outputs=False: List of FSF values (None for unparseable outputs)
-            If return_dot_outputs=True: Tuple of (fsf_values, dot_outputs)
+            If save_prompts=False and return_dot_outputs=False: List of FSF values (None for unparseable outputs)
+            If save_prompts=False and return_dot_outputs=True: Tuple of (fsf_values, dot_outputs)
+            If save_prompts=True: Tuple of (fsf_values, dot_outputs or None, saved_prompts dict)
         """
         # Initialize engine on first use
         self._init_engine()
@@ -288,6 +291,11 @@ Generate complete Graphviz DOT code in dot blocks."""
             reasoning_truncated = reasoning[:3000] if len(reasoning) > 3000 else reasoning
             prompt = self._build_fsf_prompt(reasoning_truncated)
             prompts.append(prompt)
+
+        # Save prompts for debugging if requested
+        saved_prompts = {}
+        if save_prompts:
+            saved_prompts["fsf_prompts"] = prompts
 
         # Process in micro-batches to avoid OOM
         fsf_values = []
@@ -324,7 +332,11 @@ Generate complete Graphviz DOT code in dot blocks."""
                 if return_dot_outputs:
                     dot_outputs.extend([None] * remaining)
 
-        if return_dot_outputs:
+        if save_prompts:
+            if return_dot_outputs:
+                return fsf_values, dot_outputs, saved_prompts
+            return fsf_values, None, saved_prompts
+        elif return_dot_outputs:
             return fsf_values, dot_outputs
         return fsf_values
 
@@ -592,6 +604,7 @@ class SGLangFSFClient:
         self,
         rewrite_cots: List[str],
         return_dot_outputs: bool = False,  # Whether to return raw DOT outputs
+        save_prompts: bool = False,  # Whether to save request prompts
     ) -> Dict[str, Any]:
         """
         Compute FSF for rewrite CoTs only (no original CoT computation).
@@ -601,11 +614,13 @@ class SGLangFSFClient:
         Args:
             rewrite_cots: List of rewritten CoT reasonings
             return_dot_outputs: If True, include raw DOT outputs in return
+            save_prompts: If True, include saved prompts in return
 
         Returns:
             Dict with:
                 - rewrite_fsfs: FSF values for rewrite CoTs
                 - rewrite_dot_outputs: (optional) Raw DOT outputs for rewrite CoTs
+                - saved_prompts: (optional) Dict with saved prompts if requested
         """
         self.initialize()
         self.resume_memory()
@@ -617,21 +632,36 @@ class SGLangFSFClient:
 
         # Compute rewrite FSFs
         logger.info(f"[SGLangFSFClient] Computing FSF for {len(rewrite_cots)} rewrite CoTs only "
-                    f"(micro_batch_size={self.micro_batch_size}, return_dot_outputs={return_dot_outputs})...")
+                    f"(micro_batch_size={self.micro_batch_size}, return_dot_outputs={return_dot_outputs}, save_prompts={save_prompts})...")
         rewrite_futures = []
         for worker_idx, chunk_cots in enumerate(rewrite_chunks):
             if chunk_cots:
                 future = self.workers[worker_idx].compute_fsf_batch.remote(
-                    chunk_cots, self.micro_batch_size, return_dot_outputs
+                    chunk_cots, self.micro_batch_size, return_dot_outputs, save_prompts
                 )
                 rewrite_futures.append((worker_idx, len(chunk_cots), future))
 
         # Aggregate rewrite results
         rewrite_fsfs = [None] * batch_size
         rewrite_dot_outputs = [None] * batch_size if return_dot_outputs else None
+        saved_prompts_out = None if save_prompts else None  # Aggregated saved prompts
         for worker_idx, chunk_size, future in rewrite_futures:
             chunk_results = ray.get(future)
-            if return_dot_outputs:
+            if save_prompts:
+                if return_dot_outputs:
+                    chunk_fsfs, chunk_dots, chunk_prompts = chunk_results
+                else:
+                    chunk_fsfs, _, chunk_prompts = chunk_results
+                    chunk_dots = None
+                # Merge saved prompts from each worker
+                if saved_prompts_out is None:
+                    saved_prompts_out = chunk_prompts
+                elif chunk_prompts is not None:
+                    for key, values in chunk_prompts.items():
+                        if key not in saved_prompts_out:
+                            saved_prompts_out[key] = []
+                        saved_prompts_out[key].extend(values)
+            elif return_dot_outputs:
                 chunk_fsfs, chunk_dots = chunk_results
             else:
                 chunk_fsfs = chunk_results
@@ -648,6 +678,8 @@ class SGLangFSFClient:
         }
         if return_dot_outputs:
             result["rewrite_dot_outputs"] = rewrite_dot_outputs
+        if save_prompts and saved_prompts_out is not None:
+            result["saved_prompts"] = saved_prompts_out
         return result
 
     def compute_logic_reward_batch(

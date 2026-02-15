@@ -664,6 +664,15 @@ class RayPPOTrainer:
             elif not hasattr(v, '__len__'):
                 # Scalar value (bool, int, float, str, etc.) - broadcast to all samples
                 base_data[k] = v
+            elif k == "saved_prompts" and isinstance(v, dict) and len(v) > 0:
+                # Special handling for saved_prompts: it's a dict of lists
+                # Flatten it into individual fields with "saved_prompts." prefix
+                for inner_key, inner_list in v.items():
+                    if isinstance(inner_list, (list, tuple)) and len(inner_list) == n:
+                        base_data[f"saved_prompts.{inner_key}"] = inner_list
+                    elif not hasattr(inner_list, '__len__'):
+                        # Scalar value - broadcast to all samples
+                        base_data[f"saved_prompts.{inner_key}"] = inner_list
 
         lines = []
         for i in range(n):
@@ -810,9 +819,15 @@ class RayPPOTrainer:
             reward_extra_infos_dict["reward"].extend(scores)
             print(f"len reward_extra_infos_dict['reward']: {len(reward_extra_infos_dict['reward'])}")
             if "reward_extra_info" in result:
-                for key, lst in result["reward_extra_info"].items():
-                    reward_extra_infos_dict[key].extend(lst)
-                    print(f"len reward_extra_infos_dict['{key}']: {len(reward_extra_infos_dict[key])}")
+                for key, val in result["reward_extra_info"].items():
+                    # Skip scalar metadata values (e.g., penalty_mode, base_reward_range)
+                    # Only collect per-sample list values
+                    if isinstance(val, list):
+                        reward_extra_infos_dict[key].extend(val)
+                        print(f"len reward_extra_infos_dict['{key}']: {len(reward_extra_infos_dict[key])}")
+                    else:
+                        # Scalar metadata - skip for validation (not per-sample data)
+                        print(f"[VALIDATION] Skipping scalar metadata '{key}': {val}")
 
             # collect num_turns of each prompt
             if "__num_turns__" in test_batch.non_tensor_batch:
@@ -1447,7 +1462,7 @@ class RayPPOTrainer:
                             global_config_keys = {"penalty_mode", "base_reward_range", "lambda_logic", "lambda_useful",
                                               "too_short_threshold_low", "too_short_threshold_high",
                                               "too_long_threshold_low", "too_long_threshold_high",
-                                              "fsf_reward_scale", "fsf_temperature", "fsf_top_k", "fsf_top_p",
+                                              "fsf_reward_scale", "fsf_reward_mode", "fsf_temperature", "fsf_top_k", "fsf_top_p",
                                               "use_logic_reward", "use_useful_reward", "alpha_cog",
                                               "use_tiered_reward", "tier_step", "tier_reward",
                                               "reward_mode", "use_reward_delta", "truncation_penalty",
@@ -1538,6 +1553,7 @@ class RayPPOTrainer:
                                 "logic_rewards", "total_rewards", "original_fsfs", "rewrite_fsfs",
                                 # Penalty fields
                                 "truncation_penalties", "format_penalties", "too_short_penalties", "too_long_penalties",
+                                "too_short_penalties_actual", "too_long_penalties_actual",  # Actual penalties applied
                                 # DAPO filter_groups flags
                                 "truncated", "format_valid", "length_ratio",
                                 "reward_deltas",  # NEW: rewrite-original diff
@@ -1546,6 +1562,8 @@ class RayPPOTrainer:
                                 # FSF DOT outputs (raw FSF outputs for debugging/analysis)
                                 # Note: original_dot_outputs is always None (original_cot FSF is pre-computed in dataset)
                                 "rewrite_dot_outputs",
+                                # Saved prompts for debugging (student_model and fsf_judge requests)
+                                "saved_prompts",
                             ]
                             for field in reward_fields:
                                 if field in batch.non_tensor_batch and field not in reward_extra_infos_dict:
@@ -2111,6 +2129,7 @@ class RayDAPOTrainer(RayPPOTrainer):
                                 "logic_rewards", "total_rewards", "original_fsfs", "rewrite_fsfs",
                                 # Penalty fields
                                 "truncation_penalties", "format_penalties", "too_short_penalties", "too_long_penalties",
+                                "too_short_penalties_actual", "too_long_penalties_actual",  # Actual penalties applied
                                 # DAPO filter_groups flags
                                 "truncated", "format_valid", "length_ratio",
                                 "reward_deltas",  # NEW: rewrite-original diff
@@ -2119,6 +2138,8 @@ class RayDAPOTrainer(RayPPOTrainer):
                                 # FSF DOT outputs (raw FSF outputs for debugging/analysis)
                                 # Note: original_dot_outputs is always None (original_cot FSF is pre-computed in dataset)
                                 "rewrite_dot_outputs",
+                                # Saved prompts for debugging (student_model and fsf_judge requests)
+                                "saved_prompts",
                             ]
                             for field in reward_fields:
                                 if field in batch.non_tensor_batch:

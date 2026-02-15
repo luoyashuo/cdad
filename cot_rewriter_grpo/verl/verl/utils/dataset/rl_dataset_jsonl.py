@@ -272,21 +272,11 @@ class RLHFDatasetJSONL(RLHFDataset):
         # These will be accessible in the reward function via data.non_tensor_batch
         reward_model = row_dict["reward_model"]
 
-        # Map ground truth (solution field)
-        if "solution" in row_dict:
-            reward_model["ground_truth"] = row_dict["solution"]
-
-        # Map original CoT (thought field)
-        if "thought" in row_dict:
-            reward_model["original_cot"] = row_dict["thought"]
-
-        # Map question
-        if "question" in row_dict:
-            reward_model["question"] = row_dict["question"]
-
-        # Map FSF score if present
-        if "fsf" in row_dict:
-            reward_model["fsf"] = row_dict["fsf"]
+        # Hardcoded field mapping (no if checks)
+        reward_model["ground_truth"] = row_dict.get("solution", "")
+        reward_model["original_cot"] = row_dict.get("original_thought", "")
+        reward_model["question"] = row_dict.get("question", "")
+        reward_model["fsf"] = row_dict.get("fsf", 0.0)
 
         # Set data_source if not present (required by VERL)
         if "data_source" not in row_dict:

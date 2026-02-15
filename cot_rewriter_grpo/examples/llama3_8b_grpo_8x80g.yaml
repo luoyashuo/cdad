@@ -9,7 +9,7 @@ defaults:
 # ========== 基础训练配置 ==========
 trainer:
   project_name: cot_rewriter_grpo
-  experiment_name: llama3_8b_grpo_8x80g_v6
+  experiment_name: llama3_8b_grpo_8x80g_v7
   total_epochs: 1
   total_training_steps: 500
   save_freq: 50
@@ -30,7 +30,7 @@ data:
   train_files: ${oc.env:DATA_BASE_DIR}/omnithought_rv_optimal_cot_rewrite_v2/train.jsonl
   val_files: ${oc.env:DATA_BASE_DIR}/omnithought_rv_optimal_cot_rewrite_v2/val.jsonl
   train_batch_size: 1
-  val_batch_size: 1
+  val_batch_size: 4
   gen_batch_size: 1
   max_prompt_length: 4600
   max_response_length: 10000
@@ -228,10 +228,14 @@ custom_reward_function:
     fsf_max_new_tokens: 8000
     fsf_gpu_memory_utilization: 0.4
     fsf_max_model_len: 12000
-    fsf_reward_scale: 4            # FSF 奖励缩放因子
+    fsf_reward_scale: 0.5          # FSF 奖励缩放因子
     fsf_micro_batch_size: 1           # FSF 推理微批次大小 (控制显存，默认4)
     fsf_skip_group_on_parse_error: true  # DOT解析失败时跳过整个group (默认true)
     save_fsf_dot_outputs: true        # 保存 FSF DOT 输出到 rollout_data
+    save_prompts: true                 # 是否保存 student_model 和 fsf_judge 的请求 prompt (用于调试)
+    fsf_reward_mode: "threshold"          # FSF 奖励计算模式: "direct" (默认) 或 "threshold"
+                                      # - "direct": R_logic = -rewrite_fsf (与失败分支成正比的负奖励)
+                                      # - "threshold": R_logic = -1 if fsf > 0 else 0 (有失败分支时的固定惩罚)
     # ==================== Useful 奖励配置 (R_useful) ====================
     # 评估 rewrite 相对于 original 的有用性
     use_useful_reward: false          # 是否启用 useful 奖励
