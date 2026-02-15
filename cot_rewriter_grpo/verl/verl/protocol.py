@@ -338,6 +338,9 @@ class DataProto:
                     f"data in the non_tensor_batch must be a numpy.array with dtype=object, but for "
                     f"{key=}, got {type(val)=}"
                 )
+                # 0-dimensional arrays (scalars) are valid and replicated across chunks
+                if val.ndim == 0:
+                    continue
                 assert val.shape[0] == batch_size, (
                     f"key {key} length {len(val)} is not equal to batch size {batch_size}"
                 )
@@ -711,13 +714,21 @@ class DataProto:
         non_tensor_batch_lst = [{} for _ in range(chunks)]
         for key, val in self.non_tensor_batch.items():
             assert isinstance(val, np.ndarray)
-            if bsz_in_batch is not None:
+            # Handle 0-dimensional arrays (scalars) by converting to 1-dimensional
+            if val.ndim == 0:
+                # 0-dimensional array (scalar) - replicate across all chunks
+                for i in range(chunks):
+                    non_tensor_batch_lst[i][key] = val
+            elif bsz_in_batch is not None:
                 non_tensor_lst = np.array_split(val, chunk_indices.tolist())
+                assert len(non_tensor_lst) == chunks
+                for i in range(chunks):
+                    non_tensor_batch_lst[i][key] = non_tensor_lst[i]
             else:
                 non_tensor_lst = np.array_split(val, chunks)
-            assert len(non_tensor_lst) == chunks
-            for i in range(chunks):
-                non_tensor_batch_lst[i][key] = non_tensor_lst[i]
+                assert len(non_tensor_lst) == chunks
+                for i in range(chunks):
+                    non_tensor_batch_lst[i][key] = non_tensor_lst[i]
 
         output = []
         for i in range(chunks):
