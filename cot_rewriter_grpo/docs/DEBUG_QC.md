@@ -11,4 +11,8 @@ source /data/luoys/projects/cdad/cot_rewriter_grpo/.venv/bin/activate
 # LOG
 /data/luoys/projects/cdad/cot_rewriter_grpo/logs/grpo/llama3_8b_grpo_8x80g.log
 # 问题
-我希望计算fsf的时候，增加一个配置参数r_logic_repeat_n，来保证reward的稳定性，代表计算多次次R_logic，然后取平均值，减少llm judge的波动
+system\n\nCutting Knowledge Date: December 2023\
+我看目前rollout_data中
+/data/luoys/checkpoints/cdad/rollout_data/llama3_8b_grpo_8x80g_top2000/45.jsonl
+input中包含了除了数据集（/data/luoys/data/cdad/omnithought_rv_optimal_cot_rewrite_top2000/train.jsonl）中的system prompt,还多了一段话system\n\nCutting Knowledge Date: December 2023\； 
+这是为什么？怎么把这段话丢弃？另外fsf model是不是也有类似的问题？

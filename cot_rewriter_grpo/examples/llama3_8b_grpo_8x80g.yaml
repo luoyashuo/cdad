@@ -9,7 +9,7 @@ defaults:
 # ========== 基础训练配置 ==========
 trainer:
   project_name: cot_rewriter_grpo
-  experiment_name: llama3_8b_grpo_8x80g_top2000
+  experiment_name: llama3_8b_grpo_8x80g_top2000_v2
   total_epochs: 1
   total_training_steps: 500
   save_freq: 20
@@ -27,8 +27,8 @@ trainer:
 
 # ========== 数据配置 ==========
 data:
-  train_files: ${oc.env:DATA_BASE_DIR}/omnithought_rv_optimal_cot_rewrite_top2000/train.jsonl
-  val_files: ${oc.env:DATA_BASE_DIR}/omnithought_rv_optimal_cot_rewrite_top2000/val.jsonl
+  train_files: ${oc.env:DATA_BASE_DIR}/omnithought_rv_optimal_cot_rewrite_top2000_v2/train.jsonl
+  val_files: ${oc.env:DATA_BASE_DIR}/omnithought_rv_optimal_cot_rewrite_top2000_v2/val.jsonl
   train_batch_size: 1
   val_batch_size: 4
   gen_batch_size: 1
@@ -64,15 +64,15 @@ actor_rollout_ref:
       loss_mode: vanilla  # GRPO 算法
     clip_ratio: 0.2
     clip_ratio_low: 0.2
-    clip_ratio_high: 0.35
-    entropy_coeff: 0.0005 # 小一点，太大了不收敛
-    entropy_coeff_lower_bound: 0.075
+    clip_ratio_high: 0.28
+    entropy_coeff: 0.0 # 小一点，太大了不收敛
+    entropy_coeff_lower_bound: 0.0
     grad_clip: 1.0
     ppo_mini_batch_size: 1
     ppo_micro_batch_size_per_gpu: 1
     use_kl_in_reward: false
     use_kl_loss: true
-    kl_loss_coef: 0.005
+    kl_loss_coef: 0.01
     kl_loss_type: low_var_kl
     entropy_from_logits_with_chunking: true
     fsdp_config:
@@ -104,7 +104,7 @@ actor_rollout_ref:
     load_format: auto
     log_prob_micro_batch_size_per_gpu: 1
     n: 8
-    temperature: 0.6
+    temperature: 0.8
     top_k: 20
     top_p: 0.95
     presence_penalty: 1.0
@@ -228,19 +228,19 @@ custom_reward_function:
     # 使用 FSF (Free-Form Solver Feedback) 模型评估逻辑质量
     use_logic_reward: true             # 是否启用逻辑奖励
     fsf_model_path: /data/luoys/checkpoints/cdad/fsf_reward/qwen3_4b_fsf_grm
-    fsf_tensor_parallel_size: 4
-    fsf_temperature: 0.6
+    fsf_tensor_parallel_size: 4        # 降低TP以适配4卡环境 (Actor TP=4, FSF需要共享)
+    fsf_temperature: 0.4
     fsf_top_k: 20
     fsf_top_p: 0.95
     fsf_max_new_tokens: 8000
-    fsf_gpu_memory_utilization: 0.4
+    fsf_gpu_memory_utilization: 0.3    # 降低显存利用率以避免OOM (0.4->0.3)
     fsf_max_model_len: 12000
-    fsf_reward_scale: 0.5          # FSF 奖励缩放因子
+    fsf_reward_scale: 4          # FSF 奖励缩放因子
     fsf_micro_batch_size: 1           # FSF 推理微批次大小 (控制显存，默认4)
     fsf_skip_group_on_parse_error: true  # DOT解析失败时跳过整个group (默认true)
     save_fsf_dot_outputs: true        # 保存 FSF DOT 输出到 rollout_data
     save_prompts: true                 # 是否保存 student_model 和 fsf_judge 的请求 prompt (用于调试)
-    r_logic_repeat_n: 3               # FSF 重复计算次数，多次计算取平均以减少 LLM judge 波动 (默认1)
+    r_logic_repeat_n: 3               # FSF 重复计算次数 (已修复多次调用问题，现在可以安全使用3)
     fsf_reward_mode: "threshold"          # FSF 奖励计算模式: "direct" (默认) 或 "threshold"
                                       # - "direct": R_logic = -rewrite_fsf (与失败分支成正比的负奖励)
                                       # - "threshold": R_logic = -1 if fsf > 0 else 0 (有失败分支时的固定惩罚)

@@ -629,52 +629,80 @@ class CombinedRewardComputer:
             try:
                 # Compute rewrite FSF only (original_fsf is loaded from dataset)
                 # Support repeated sampling for more stable R_logic
+                # OPTIMIZATION: Instead of calling FSF N times, expand the batch and call once
                 repeat_n = self.r_logic_repeat_n
+
+                # Expand rewrite_cots by repeat_n: [cot0, cot0, cot0, cot1, cot1, cot1, ...]
+                # This allows computing all repeated samples in a single batch call
+                expanded_rewrite_cots = []
+                sample_to_expanded_map = []  # Maps (sample_idx, run_idx) -> expanded_idx
+                expanded_idx = 0
+                for sample_idx in range(len(rewrite_cots)):
+                    for run_idx in range(repeat_n):
+                        expanded_rewrite_cots.append(rewrite_cots[sample_idx])
+                        sample_to_expanded_map.append((sample_idx, run_idx))
+                        expanded_idx += 1
+
                 if repeat_n > 1:
                     logger.info(f"[FSF] Computing FSF for {len(rewrite_cots)} rewrite CoTs with repeat_n={repeat_n} "
-                               f"(averaging {repeat_n} independent samples for stability, save_dot_outputs={self.save_fsf_dot_outputs}, save_prompts={self.save_prompts})...")
+                               f"(expanded to {len(expanded_rewrite_cots)} total requests in single batch, "
+                               f"save_dot_outputs={self.save_fsf_dot_outputs}, save_prompts={self.save_prompts})...")
                 else:
                     logger.info(f"[FSF] Computing FSF for {len(rewrite_cots)} rewrite CoTs only "
                                f"(original_fsf loaded from dataset, save_dot_outputs={self.save_fsf_dot_outputs}, save_prompts={self.save_prompts})...")
 
-                # Accumulate FSF values across multiple runs for averaging
+                # Single batch call for all repeated samples
+                fsf_result = self.fsf_judge.compute_rewrite_fsf_only(
+                    rewrite_cots=expanded_rewrite_cots,
+                    return_dot_outputs=self.save_fsf_dot_outputs,
+                    save_prompts=self.save_prompts,
+                )
+
+                expanded_rewrite_fsfs = fsf_result["rewrite_fsfs"]
+
+                # Extract DOT outputs if needed
+                if self.save_fsf_dot_outputs:
+                    expanded_dot_outputs = fsf_result.get("rewrite_dot_outputs", [None] * len(expanded_rewrite_cots))
+
+                # Extract saved prompts if needed
+                if self.save_prompts and "saved_prompts" in fsf_result:
+                    saved_prompts = fsf_result["saved_prompts"]
+                    logger.info(f"[FSF] Received saved_prompts keys: {list(saved_prompts.keys())}")
+
+                # Reorganize results: group FSF values by original sample index
                 rewrite_fsf_accumulator = [[] for _ in range(batch_size)]
-                rewrite_dot_outputs_all_runs = []  # Store DOT outputs from all runs (only for last run if save_fsf_dot_outputs)
+                for expanded_idx, fsf_val in enumerate(expanded_rewrite_fsfs):
+                    sample_idx, run_idx = sample_to_expanded_map[expanded_idx]
+                    if fsf_val is not None:
+                        rewrite_fsf_accumulator[sample_idx].append(fsf_val)
 
-                for run_idx in range(repeat_n):
-                    if repeat_n > 1:
-                        logger.info(f"[FSF] Run {run_idx + 1}/{repeat_n}...")
+                # Reorganize DOT outputs: save all runs' outputs as a list for each sample
+                # When r_logic_repeat_n > 1, collect all DOT outputs for each sample
+                # When r_logic_repeat_n == 1, save single output (for backward compatibility)
+                rewrite_dot_outputs = [None] * batch_size
+                if self.save_fsf_dot_outputs:
+                    # Initialize lists for each sample
+                    rewrite_dot_outputs_lists = [[] for _ in range(batch_size)]
+                    for expanded_idx, dot_output in enumerate(expanded_dot_outputs):
+                        sample_idx, run_idx = sample_to_expanded_map[expanded_idx]
+                        # Collect all runs' outputs
+                        rewrite_dot_outputs_lists[sample_idx].append(dot_output)
 
-                    fsf_result = self.fsf_judge.compute_rewrite_fsf_only(
-                        rewrite_cots=rewrite_cots,
-                        return_dot_outputs=self.save_fsf_dot_outputs or (run_idx == repeat_n - 1),  # Save DOT from last run
-                        save_prompts=self.save_prompts and (run_idx == 0),  # Save prompts only on first run
-                    )
-
-                    run_rewrite_fsfs = fsf_result["rewrite_fsfs"]
-
-                    # Accumulate FSF values for each sample
-                    for i, fsf_val in enumerate(run_rewrite_fsfs):
-                        if fsf_val is not None:
-                            rewrite_fsf_accumulator[i].append(fsf_val)
-
-                    # Store DOT outputs from the last run (or first if saving prompts)
-                    if self.save_fsf_dot_outputs and (run_idx == repeat_n - 1):
-                        rewrite_dot_outputs = fsf_result.get("rewrite_dot_outputs", [None] * batch_size)
-
-                    # Merge FSF saved_prompts into the main saved_prompts dict (only on first run)
-                    if self.save_prompts and (run_idx == 0) and "saved_prompts" in fsf_result:
-                        fsf_saved_prompts = fsf_result["saved_prompts"]
-                        if saved_prompts is None:
-                            saved_prompts = fsf_saved_prompts
-                        elif isinstance(fsf_saved_prompts, dict):
-                            # Merge FSF prompts into saved_prompts
-                            for key, values in fsf_saved_prompts.items():
-                                if key not in saved_prompts:
-                                    saved_prompts[key] = values
-                                elif isinstance(saved_prompts.get(key), list) and isinstance(values, list):
-                                    saved_prompts[key].extend(values)
-                        logger.info(f"[FSF] Merged fsf_saved_prompts keys: {list(fsf_saved_prompts.keys())}")
+                    # Convert to final format:
+                    # - If repeat_n > 1: store as list of all runs' outputs
+                    # - If repeat_n == 1: store as single value (backward compatibility)
+                    for sample_idx in range(batch_size):
+                        if repeat_n > 1:
+                            # Store all runs as a list
+                            rewrite_dot_outputs[sample_idx] = rewrite_dot_outputs_lists[sample_idx]
+                            if sample_idx < 3 and rewrite_dot_outputs_lists[sample_idx]:
+                                logger.info(
+                                    f"[FSF] Sample {sample_idx}: Collected {len(rewrite_dot_outputs_lists[sample_idx])} DOT outputs "
+                                    f"(repeat_n={repeat_n}, saved as list to rewrite_dot_outputs)"
+                                )
+                        else:
+                            # Store single value for backward compatibility
+                            rewrite_dot_outputs[sample_idx] = rewrite_dot_outputs_lists[sample_idx][0] if rewrite_dot_outputs_lists[sample_idx] else None
 
                 # Compute average FSF for each sample
                 rewrite_fsfs = []

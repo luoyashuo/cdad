@@ -27,8 +27,8 @@ export PROJECT_BASE_DIR="${PROJECT_ROOT}"
 # DEFAULT_CONFIG="qwen3_4b_grpo_2x80g_vllm_rollout_sglang_reward"
 
 
-# DEFAULT_GPUS="0,1,2,3,4,5,6,7"
-DEFAULT_GPUS="0,1,2,3"
+DEFAULT_GPUS="0,1,2,3,4,5,6,7"
+# DEFAULT_GPUS="0,1,2,3"
 DEFAULT_CONFIG="llama3_8b_grpo_8x80g"
 # 解析参数
 GPUS="${1:-$DEFAULT_GPUS}"
