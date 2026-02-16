@@ -189,6 +189,12 @@ def parse_arguments():
         default=DEFAULT_BETA,
         help=f"P1 和 P2 的权重系数 β（默认: {DEFAULT_BETA}，用于 combined 策略）"
     )
+    parser.add_argument(
+        "--fsf-topk",
+        type=int,
+        default=None,
+        help="按照 FSF 倒序选择至多 topk 条数据，然后再划分训测集（默认: 不限制）"
+    )
 
     return parser.parse_args()
 
@@ -503,7 +509,7 @@ def convert_to_sharegpt(item: Dict[str, Any], selector: str) -> Dict[str, Any]:
         selector: 选择器字段名
 
     Returns:
-        sharegpt 格式的数据项
+        sharegpt 格式的数据项（包含 _fsf 字段用于后续排序）
     """
     question = item.get("question", "")
     selected_data = item.get(selector, {})
@@ -513,6 +519,10 @@ def convert_to_sharegpt(item: Dict[str, Any], selector: str) -> Dict[str, Any]:
 
     # 构建 assistant 的内容：thought + solution
     assistant_content = f"{thought}\n\n{solution}".strip()
+
+    # 提取 FSF 用于后续排序
+    reasoning_graph = selected_data.get("reasoning_graph", [])
+    fsf = reasoning_graph[0].get("fsf", 0.0) if reasoning_graph else 0.0
 
     # 构建 sharegpt 格式
     sharegpt_item = {
@@ -525,7 +535,8 @@ def convert_to_sharegpt(item: Dict[str, Any], selector: str) -> Dict[str, Any]:
                 "role": "assistant",
                 "content": assistant_content
             }
-        ]
+        ],
+        "_fsf": fsf  # 临时保存 FSF 用于后续排序
     }
 
     return sharegpt_item
@@ -555,7 +566,7 @@ def convert_to_sharegpt_with_strategy(
         fsf_lowest: 是否选择 FSF 最低的
 
     Returns:
-        sharegpt 格式的数据项，如果没有候选则返回 None
+        sharegpt 格式的数据项（包含 _fsf 字段用于后续排序），如果没有候选则返回 None
     """
     question = item.get("question", "")
 
@@ -570,6 +581,10 @@ def convert_to_sharegpt_with_strategy(
     # 提取 thought 和 full_response
     full_response = selected_thought.get("full_response", "").strip()
 
+    # 提取 FSF 用于后续排序
+    reasoning_graph = selected_thought.get("reasoning_graph", [])
+    fsf = reasoning_graph[0].get("fsf", 0.0) if reasoning_graph else 0.0
+
     # 构建 sharegpt 格式
     sharegpt_item = {
         "conversations": [
@@ -581,7 +596,8 @@ def convert_to_sharegpt_with_strategy(
                 "role": "assistant",
                 "content": full_response
             }
-        ]
+        ],
+        "_fsf": fsf  # 临时保存 FSF 用于后续排序
     }
 
     return sharegpt_item
@@ -676,6 +692,8 @@ def main():
             logger.info(f"   📊 μ_CD (模型能力阈值): {args.mu_cd}")
             logger.info(f"   📊 β (P1/P2 权重): {args.beta}")
         logger.info(f"   📊 FSF 最低优先: {args.fsf_lowest}")
+    if args.fsf_topk:
+        logger.info(f"   📊 FSF Top-K 选择: {args.fsf_topk} 条（按 FSF 倒序）")
 
     logger.info(f"📁 输出目录: {args.output}")
     logger.info(f"📝 dataset_info: {args.dataset_info}")
@@ -764,6 +782,22 @@ def main():
     logger.info(f"✅ 转换完成，共 {len(sharegpt_data)} 条数据")
     if skipped_count > 0:
         logger.info(f"⚠️  跳过 {skipped_count} 条数据（无符合条件的候选 CoT）")
+
+    # 如果指定了 fsf_topk，按照 FSF 倒序排序并选择 topk 条
+    if args.fsf_topk is not None and args.fsf_topk > 0:
+        logger.info(f"📊 按照 FSF 倒序选择 top-{args.fsf_topk} 条数据...")
+        # 按 FSF 倒序排序
+        sharegpt_data.sort(key=lambda x: x.get("_fsf", 0.0), reverse=True)
+        # 选择 topk 条
+        original_count = len(sharegpt_data)
+        sharegpt_data = sharegpt_data[:args.fsf_topk]
+        logger.info(f"✅ 从 {original_count} 条中选择 top-{args.fsf_topk} 条（FSF 最高的）")
+        logger.info(f"   最高 FSF: {sharegpt_data[0].get('_fsf', 0.0):.4f}")
+        logger.info(f"   最低 FSF: {sharegpt_data[-1].get('_fsf', 0.0):.4f}")
+
+    # 移除临时的 _fsf 字段
+    for item in sharegpt_data:
+        item.pop("_fsf", None)
 
     # 随机打乱并拆分训练集/验证集
     logger.info("🔀 拆分训练集和验证集...")
@@ -931,6 +965,47 @@ python build_sharegpt_dataset.py \
        /data-share/yeesuanAI08/lihaitao/luoys/data/cdad/omnithought_code_all/train_merge_level1.jsonl \
     -s selected_by_lowest_fsf \
     -o /data-share/yeesuanAI08/lihaitao/luoys/data/cdad/omnithought_level1_fsf \
+    --train-ratio 0.99 \
+    -r ../LlamaFactory/data/dataset_info.json
+"""
+
+# --- 使用 Top-K 选择（按照 FSF 倒序选择）---
+
+# 8. RV Optimal + FSF Top-K 2000 条（FSF 最高的 2000 条）
+"""
+python build_sharegpt_dataset.py \
+    -i /data/luoys/data/cdad/omnithought_math_all/train_merge_level1.jsonl \
+       /data/luoys/data/cdad/omnithought_code_all/train_merge_level1.jsonl \
+    -s rv_optimal \
+    --rv_min 3 --rv_max 5 \
+    --fsf-topk 2000 \
+    -o /data/luoys/data/cdad/omnithought_rv_optimal_top2000 \
+    --train-ratio 0.99 \
+    -r ../LlamaFactory/data/dataset_info.json
+"""
+
+# 9. Combined + FSF Top-K 5000 条
+"""
+python build_sharegpt_dataset.py \
+    -i /data/luoys/data/cdad/omnithought_math_all/train_merge_level1.jsonl \
+       /data/luoys/data/cdad/omnithought_code_all/train_merge_level1.jsonl \
+    -s combined \
+    --cd_min 0 --cd_max 6 \
+    --rv_min 3 --rv_max 5 \
+    --mu_cd 6 \
+    --beta 0.5 \
+    --fsf-topk 5000 \
+    -o /data/luoys/data/cdad/omnithought_combined_top5000 \
+    --train-ratio 0.99 \
+    -r ../LlamaFactory/data/dataset_info.json
+    
+python build_sharegpt_dataset.py \
+    -i /data/luoys/data/cdad/omnithought_math_all/train_merge_level1.jsonl \
+        /data/luoys/data/cdad/omnithought_code_all/train_merge_level1.jsonl \
+    -s rv_optimal \
+    --rv_min 3 --rv_max 5 \
+    --fsf-topk 2000 \
+    -o /data/luoys/data/cdad/omnithought_rv_optimal_top2000 \
     --train-ratio 0.99 \
     -r ../LlamaFactory/data/dataset_info.json
 """

@@ -11,10 +11,10 @@ This script:
 Output format:
     {
         "question": "...",
-        "thought": "...",        # from rv_optimal
-        "solution": "...",       # from original source
-        "system_prompt": "...",  # system instruction
-        "user_prompt": "..."     # user input with problem and original reasoning
+        "original_thought": "...",  # from original source (matched with rv_optimal think)
+        "solution": "...",          # from original source
+        "system_prompt": "...",     # system instruction
+        "user_prompt": "..."        # user input with problem and original reasoning
     }
 """
 
@@ -58,8 +58,17 @@ def build_prompt(question: str, thought: str) -> Tuple[str, str]:
         (system_prompt, user_prompt) 元组
     """
     system_prompt = """\
-The 'Original Reasoning Process' demonstrates a valid derivation path. Using this as a reference, rewrite the reasoning in your own words to produce an improved version.
-Directly output the rewritten reasoning strictly enclosed within <rewrite_reasoning> </rewrite_reasoning> tags. Output nothing else."""
+You are an expert in math and code. The 'Original Reasoning Process' provides a raw derivation that leads to a correct solution. Your task is to extract the correct path and present it clearly.
+
+Follow these guidelines:
+1. **Refine and Bridge**: Retain the core logic, including essential self-reflections and verification steps. Supplement logical leaps and clarify complex steps to ensure a smooth, coherent flow.
+2. **Filter Invalid Paths**: Remove derivation branches within the 'Original Reasoning' that do not lead to the final answer (e.g., failed attempts, incorrect directions, or dead ends). Keep only the effective reasoning path.
+3. **Avoid Literal Repetition**: Rephrase the content in your own words rather than simply duplicating the text of the original process.
+
+**Output Rules:**
+- Directly output the rewritten reasoning strictly enclosed within <rewrite_reasoning> </rewrite_reasoning> tags.
+- Do NOT mention that you are rewriting another reasoning process."""
+
     user_prompt = f"""\
 ## Problem
 {question}
@@ -123,16 +132,17 @@ def _load_single_rv_file(args: Tuple[str, int]) -> List[Dict[str, Any]]:
     return entries
 
 
-def _load_single_original_file(args: Tuple[str, int]) -> Dict[str, Tuple[float, Dict[str, Any]]]:
+def _load_single_original_file(args: Tuple[str, int]) -> Dict[str, List[Dict[str, Any]]]:
     """
     加载单个原始数据文件（用于多进程）
-    返回该文件中的 question -> (fsf, reasoning_item) 映射
+    返回该文件中的 question -> list of reasoning_items 映射
+    保留所有 reasoning 项，后续根据 think 内容匹配
 
     Args:
         args: (file_path, worker_id) 元组
 
     Returns:
-        question -> (fsf, reasoning_item) 的字典
+        question -> list of reasoning_item 的字典
     """
     file_path, worker_id = args
     mapping = {}
@@ -156,28 +166,57 @@ def _load_single_original_file(args: Tuple[str, int]) -> Dict[str, Tuple[float, 
                 if not reasoning_list or not isinstance(reasoning_list, list):
                     continue
 
-                # 遍历所有 reasoning，为每个 question 保留 FSF 最高的
+                # 保留所有有效的 reasoning 项
+                if question not in mapping:
+                    mapping[question] = []
+                
                 for reasoning_item in reasoning_list:
                     thought = reasoning_item.get("thought", "")
-                    if not thought:
-                        continue
-
-                    fsf = get_fsf(reasoning_item)
-
-                    if question in mapping:
-                        existing_fsf, _ = mapping[question]
-                        # 比较 FSF，保留高的
-                        if fsf > existing_fsf:
-                            mapping[question] = (fsf, reasoning_item)
-                    else:
-                        mapping[question] = (fsf, reasoning_item)
+                    if thought:
+                        mapping[question].append(reasoning_item)
     except Exception as e:
         print(f"[Worker {worker_id}] Error loading {file_path}: {e}")
 
     return mapping
 
 
-def _process_single_chunk(args: Tuple[List[Dict[str, Any]], Dict[str, Dict[str, Any]], Dict, int]) -> Dict[str, Any]:
+def find_matching_think(think: str, reasoning_list: List[Dict[str, Any]], question: str = "") -> Dict[str, Any]:
+    """
+    在 reasoning_list 中找到与 think 内容完全匹配的 reasoning_item
+    
+    Args:
+        think: rv_optimal 中的 think 内容
+        reasoning_list: 该 question 对应的所有 reasoning 项
+        question: 问题文本（用于异常信息）
+        
+    Returns:
+        匹配的 reasoning_item
+        
+    Raises:
+        ValueError: 如果没有找到完全匹配的 reasoning_item
+    """
+    if not reasoning_list:
+        raise ValueError(f"No reasoning items found for question: {question[:100]}...")
+    
+    think_stripped = think.strip()
+    
+    # 完全匹配
+    for item in reasoning_list:
+        thought = item.get("thought", "").strip()
+        if thought == think_stripped:
+            return item
+    
+    # 未找到匹配，抛出异常
+    available_thoughts = [item.get("thought", "")[:200] + "..." for item in reasoning_list[:3]]
+    raise ValueError(
+        f"No exact match found for think content.\n"
+        f"Question: {question[:100]}...\n"
+        f"Think (first 200 chars): {think_stripped[:200]}...\n"
+        f"Available thoughts (first 3): {available_thoughts}"
+    )
+
+
+def _process_single_chunk(args: Tuple[List[Dict[str, Any]], Dict[str, List[Dict[str, Any]]], Dict, int]) -> Dict[str, Any]:
     """
     处理单个数据块（用于多进程）
 
@@ -212,42 +251,48 @@ def _process_single_chunk(args: Tuple[List[Dict[str, Any]], Dict[str, Dict[str, 
         question = rv_entry["question"]
         think = rv_entry["think"]
 
-        # 在原始数据中查找匹配的 question
-        reasoning_item = original_mapping.get(question)
+        # 在原始数据中查找该 question 的所有 reasoning 项
+        reasoning_list = original_mapping.get(question)
 
-        if reasoning_item is None:
+        if reasoning_list is None:
             no_match_count += 1
-        else:
-            matched_count += 1
+            continue
+        
+        # 找到与 think 内容匹配的 reasoning_item（完全匹配，否则抛出异常）
+        try:
+            reasoning_item = find_matching_think(think, reasoning_list, question)
+        except ValueError as e:
+            raise ValueError(f"Failed to match think for entry at chunk {chunk_id}: {e}")
+        
+        matched_count += 1
 
-            # 从 reasoning_item 中获取 original_thought 和 solution
-            original_thought = reasoning_item.get("thought", "")
-            solution = reasoning_item.get("solution", "")
-            fsf = get_fsf(reasoning_item)
+        # 从 reasoning_item 中获取 original_thought 和 solution
+        original_thought = reasoning_item.get("thought", "")
+        solution = reasoning_item.get("solution", "")
+        fsf = get_fsf(reasoning_item)
 
-            # 构建 system_prompt 和 user_prompt（使用原始数据的 thought）
-            system_prompt, user_prompt = build_prompt(question, original_thought)
+        # 构建 system_prompt 和 user_prompt（使用原始数据的 thought）
+        system_prompt, user_prompt = build_prompt(question, original_thought)
 
-            # 检查 user_prompt token 长度
-            if tokenizer is not None and max_problem_tokens is not None:
-                try:
-                    prompt_token_count = len(tokenizer.encode(user_prompt))
-                    if prompt_token_count > max_problem_tokens:
-                        skipped_count += 1
-                        continue
-                except Exception:
-                    pass  # tokenization 失败时跳过长度检查
+        # 检查 user_prompt token 长度
+        if tokenizer is not None and max_problem_tokens is not None:
+            try:
+                prompt_token_count = len(tokenizer.encode(user_prompt))
+                if prompt_token_count > max_problem_tokens:
+                    skipped_count += 1
+                    continue
+            except Exception:
+                pass  # tokenization 失败时跳过长度检查
 
-            entry = {
-                "question": question,
-                "thought": think,  # rv_optimal 中的精简 thought
-                "original_thought": original_thought,  # 原始数据的完整 thought
-                "solution": solution,
-                "system_prompt": system_prompt,
-                "user_prompt": user_prompt,
-                "fsf": fsf
-            }
-            result_entries.append(entry)
+        entry = {
+            "question": question,
+            "original_thought": original_thought,  # 原始数据的完整 thought（与 rv_optimal 的 think 匹配）
+            "solution": solution,
+            "system_prompt": system_prompt,
+            "user_prompt": user_prompt,
+            "fsf": fsf
+        }
+        result_entries.append(entry)
 
     return {
         "entries": result_entries,
@@ -297,17 +342,17 @@ def load_rv_optimal_data_mp(
 def load_original_data_mp(
     file_paths: List[str],
     num_workers: Optional[int] = None
-) -> Dict[str, Dict[str, Any]]:
+) -> Dict[str, List[Dict[str, Any]]]:
     """
-    多进程加载原始数据，建立 question -> reasoning数据的映射
-    对于同一个 question，保留 FSF 最高的 reasoning 项
+    多进程加载原始数据，建立 question -> list of reasoning_items 的映射
+    保留所有 reasoning 项，后续根据 think 内容匹配
 
     Args:
         file_paths: 原始 JSONL 文件路径列表
         num_workers: 进程数，None 表示使用 CPU 核心数
 
     Returns:
-        question -> reasoning 数据项的字典（保留 FSF 最高的）
+        question -> list of reasoning 数据项的字典
     """
     if num_workers is None:
         num_workers = min(cpu_count(), len(file_paths))
@@ -321,34 +366,27 @@ def load_original_data_mp(
     with Pool(processes=num_workers) as pool:
         results = pool.map(_load_single_original_file, args_list)
 
-    # 合并结果，处理跨文件的 FSF 冲突
+    # 合并结果，合并同一 question 的 reasoning 列表
     merged_mapping = {}
     duplicate_count = 0
-    replaced_by_higher_fsf = 0
 
     for file_mapping in results:
-        for question, (fsf, reasoning_item) in file_mapping.items():
+        for question, reasoning_list in file_mapping.items():
             if question in merged_mapping:
                 duplicate_count += 1
-                existing_fsf, _ = merged_mapping[question]
-                if fsf > existing_fsf:
-                    merged_mapping[question] = (fsf, reasoning_item)
-                    replaced_by_higher_fsf += 1
+                merged_mapping[question].extend(reasoning_list)
             else:
-                merged_mapping[question] = (fsf, reasoning_item)
+                merged_mapping[question] = reasoning_list
 
-    # 提取 reasoning_item，去掉 fsf 包装
-    result = {q: item[1] for q, item in merged_mapping.items()}
+    print(f"  Loaded {len(merged_mapping)} unique questions from {len(file_paths)} file(s)")
+    print(f"  Questions with multiple reasonings: {duplicate_count}")
 
-    print(f"  Loaded {len(result)} unique questions from {len(file_paths)} file(s)")
-    print(f"  Duplicate reasoning items: {duplicate_count}, Replaced by higher FSF: {replaced_by_higher_fsf}")
-
-    return result
+    return merged_mapping
 
 
 def process_rv_optimal_with_original_mp(
     rv_entries: List[Dict[str, Any]],
-    original_mapping: Dict[str, Dict[str, Any]],
+    original_mapping: Dict[str, List[Dict[str, Any]]],
     tokenizer_path: Optional[str] = None,
     max_problem_tokens: Optional[int] = None,
     num_workers: Optional[int] = None,
@@ -429,13 +467,13 @@ def print_statistics(entries: List[Dict[str, Any]], name: str = "Dataset"):
         print(f"\n{name}: No entries")
         return
 
-    # 计算平均 thought 和 solution 长度
-    avg_thought_len = sum(len(e.get("thought", "")) for e in entries) / total
+    # 计算平均 original_thought 和 solution 长度
+    avg_thought_len = sum(len(e.get("original_thought", "")) for e in entries) / total
     avg_solution_len = sum(len(e.get("solution", "")) for e in entries) / total
 
     print(f"\n{name} Statistics:")
     print(f"  Total entries: {total}")
-    print(f"  Avg thought length: {avg_thought_len:.0f} chars")
+    print(f"  Avg original_thought length: {avg_thought_len:.0f} chars")
     print(f"  Avg solution length: {avg_solution_len:.0f} chars")
 
     # 如果包含 FSF 信息，打印 FSF 统计
@@ -475,6 +513,30 @@ def split_train_val(
     return train_entries, val_entries
 
 
+def select_top_fsf_entries(
+    entries: List[Dict[str, Any]], top_k: int
+) -> List[Dict[str, Any]]:
+    """
+    筛选出 FSF 值最高的 top_k 条数据
+
+    Args:
+        entries: 所有数据条目
+        top_k: 筛选的数量
+
+    Returns:
+        FSF 最高的 top_k 条数据
+    """
+    if len(entries) <= top_k:
+        print(f"  Entries count ({len(entries)}) <= top_k ({top_k}), using all entries")
+        return entries
+
+    # 按 FSF 降序排序
+    sorted_entries = sorted(entries, key=lambda x: x.get("fsf", 0.0), reverse=True)
+    top_entries = sorted_entries[:top_k]
+
+    return top_entries
+
+
 def get_default_config() -> Dict[str, Any]:
     """获取默认配置"""
     return {
@@ -493,6 +555,7 @@ def get_default_config() -> Dict[str, Any]:
         "random_seed": 42,
         "num_workers": None,  # None 表示使用所有 CPU 核心
         "chunk_size": 1000,
+        "top_fsf_k": 2000,  # 筛选 FSF 最高的 top_k 条数据（RL 不需要太多数据）
     }
 
 
@@ -521,6 +584,7 @@ def main(config: Optional[Dict[str, Any]] = None):
     random_seed = config.get("random_seed", 42)
     num_workers = config.get("num_workers")
     chunk_size = config.get("chunk_size", 1000)
+    top_fsf_k = config.get("top_fsf_k", 2000)
 
     print("=" * 60)
     print("COT Rewrite Dataset Builder (Multi-Process)")
@@ -534,6 +598,7 @@ def main(config: Optional[Dict[str, Any]] = None):
     print(f"  RANDOM_SEED:      {random_seed}")
     print(f"  NUM_WORKERS:      {num_workers or 'auto'}")
     print(f"  CHUNK_SIZE:       {chunk_size}")
+    print(f"  TOP_FSF_K:        {top_fsf_k}")
 
     # Step 1: 加载原始数据，建立映射（多进程）
     print("\n" + "-" * 60)
@@ -563,23 +628,31 @@ def main(config: Optional[Dict[str, Any]] = None):
         debug=True  # 启用调试模式
     )
 
-    # Step 4: 划分 train/val
+    # Step 4: 筛选 FSF 最高的 top_k 条数据
     print("\n" + "-" * 60)
-    print("Step 4: Splitting train/val...")
+    print("Step 4: Selecting top FSF entries...")
     print("-" * 60)
 
-    print(f"Total entries: {len(output_entries)}")
+    print(f"Total entries before filtering: {len(output_entries)}")
+    filtered_entries = select_top_fsf_entries(output_entries, top_fsf_k)
+    print(f"Selected top {len(filtered_entries)} entries by FSF")
+    print_statistics(filtered_entries, "Filtered Dataset (Top FSF)")
+
+    # Step 5: 划分 train/val
+    print("\n" + "-" * 60)
+    print("Step 5: Splitting train/val...")
+    print("-" * 60)
 
     final_train, final_val = split_train_val(
-        output_entries, train_ratio, random_seed
+        filtered_entries, train_ratio, random_seed
     )
 
     print_statistics(final_train, "Train Set")
     print_statistics(final_val, "Validation Set")
 
-    # Step 5: 保存数据
+    # Step 6: 保存数据
     print("\n" + "-" * 60)
-    print("Step 5: Saving data...")
+    print("Step 6: Saving data...")
     print("-" * 60)
 
     output_path = Path(output_dir)
@@ -595,9 +668,9 @@ def main(config: Optional[Dict[str, Any]] = None):
     print(f"  Train: {train_path.name} ({len(final_train)} entries)")
     print(f"  Val:   {val_path.name} ({len(final_val)} entries)")
 
-    # Step 6: 保存配置和统计信息
+    # Step 7: 保存配置和统计信息
     print("\n" + "-" * 60)
-    print("Step 6: Saving config and logs...")
+    print("Step 7: Saving config and logs...")
     print("-" * 60)
 
     # 保存配置
@@ -614,6 +687,8 @@ def main(config: Optional[Dict[str, Any]] = None):
             "total_rv_optimal": len(rv_entries),
             "total_original": len(original_mapping),
             "matched": len(output_entries),
+            "filtered": len(filtered_entries),
+            "top_fsf_k": top_fsf_k,
             "train_count": len(final_train),
             "val_count": len(final_val),
         },
@@ -637,6 +712,8 @@ if __name__ == "__main__":
     parser.add_argument("--output-dir", type=str, help="Output directory")
     parser.add_argument("--num-workers", type=int, help="Number of worker processes (default: auto)")
     parser.add_argument("--chunk-size", type=int, default=1000, help="Chunk size for processing (default: 1000)")
+    parser.add_argument("--top-fsf-k", type=int, default=2000, help="Select top K entries by FSF (default: 2000)")
+    parser.add_argument("--train-ratio", type=float, default=0.999, help="Train/val split ratio (default: 0.999)")
     args = parser.parse_args()
 
     config = None
@@ -657,6 +734,8 @@ if __name__ == "__main__":
         if args.num_workers:
             config["num_workers"] = args.num_workers
         config["chunk_size"] = args.chunk_size
+        config["top_fsf_k"] = args.top_fsf_k
+        config["train_ratio"] = args.train_ratio
 
     main(config)
 
@@ -675,11 +754,13 @@ python3 build_cot_rewrite_from_sharegpt.py \
 
 # 指定 worker 数量
 python3 build_cot_rewrite_from_sharegpt.py \
-    --rv-optimal /data/luoys/data/cdad/omnithought_rv_optimal/train.jsonl \
+    --rv-optimal /data/luoys/data/cdad/omnithought_rv_optimal_top2000/train.jsonl \
     --original /data/luoys/data/cdad/omnithought_math_all/train_merge_level1.jsonl \
         /data/luoys/data/cdad/omnithought_code_all/train_merge_level1.jsonl \
-    --output-dir /data/luoys/data/cdad/omnithought_rv_optimal_cot_rewrite_v2 \
+    --output-dir /data/luoys/data/cdad/omnithought_rv_optimal_cot_rewrite_top2000_v2 \
     --num-workers 8 \
+    --top-fsf-k 2000 \
+    --train-ratio 0.99 \
     --chunk-size 2000
 
 """
