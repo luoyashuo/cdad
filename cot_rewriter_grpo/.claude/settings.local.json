@@ -57,7 +57,8 @@
       "Bash(git -C /data/luoys/projects/cdad/cot_rewriter_grpo add:*)",
       "Bash(git -C /data/luoys/projects/cdad/cot_rewriter_grpo commit -m \"$\\(cat <<''EOF''\nfix: handle 0-dimensional arrays in check_consistency\n\nThe chunk method was recently updated to handle 0-dimensional arrays\n\\(scalars\\) by replicating them across chunks, but check_consistency\nwas not updated to handle this case. This caused an IndexError when\naccessing val.shape[0] on 0-dimensional arrays.\n\n🤖 Generated with [Claude Code]\\(https://claude.com/claude-code\\)\n\nCo-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>\nEOF\n\\)\")",
       "Bash(xargs ls:*)",
-      "Bash(awk:*)"
+      "Bash(awk:*)",
+      "Bash(mkdir:*)"
     ]
   }
 }

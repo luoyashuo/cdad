@@ -220,6 +220,7 @@ class CombinedRewardComputer:
         student_max_num_seqs: int = 1,  # limit concurrent sequences (vLLM only)
         student_tensor_parallel_size: int = 1,  # TP size for Student Model (1=disable)
         student_logprob_last_n_tokens: Optional[int] = None,  # SGLang: only compute last N tokens
+        ppl_on_full_response: bool = False,  # If True, compute PPL on full response (Q+CoT+A)
         too_short_threshold: float = 0.5,  # Deprecated: use too_short_threshold_low/high instead
         too_short_threshold_low: float = 0.4,  # Lower threshold for too_short_penalty
         too_short_threshold_high: float = 0.8,  # Upper threshold for too_short_penalty
@@ -292,6 +293,8 @@ class CombinedRewardComputer:
             student_max_num_seqs: Maximum concurrent sequences in vLLM (lower saves memory, vLLM only)
             student_tensor_parallel_size: Tensor parallelism size for Student Model (default: 1)
             student_logprob_last_n_tokens: SGLang only - only compute last N tokens' logprobs to save memory
+            ppl_on_full_response: If True, compute PPL on full response (Q+CoT+A).
+                If False (default), compute PPL on answer portion only.
             too_short_threshold: Deprecated. Use too_short_threshold_low/high instead.
             too_short_threshold_low: Lower threshold for too_short_penalty (default: 0.4). When
                 rewrite_ratio < low, penalty is at maximum. Between low and high, penalty scales linearly.
@@ -401,6 +404,7 @@ class CombinedRewardComputer:
                 micro_batch_size=student_micro_batch_size,
                 logprob_last_n_tokens=student_logprob_last_n_tokens,
                 reward_mode=reward_mode,
+                ppl_on_full_response=ppl_on_full_response,
             )
         else:
             from verl.experimental.reward.cot_rewriter.student_reward import VLLMStudentRewardClient
@@ -1095,6 +1099,7 @@ def compute_cot_rewriter_reward(
     student_max_num_seqs: int = 1,  # limit concurrent sequences in vLLM
     student_tensor_parallel_size: int = 1,  # TP size for Student Model
     student_logprob_last_n_tokens: Optional[int] = None,  # SGLang: only compute last N tokens
+    ppl_on_full_response: bool = False,  # If True, compute PPL on full response (Q+CoT+A)
     truncation_penalty: float = 0.5,  # Penalty for truncated responses (configured as positive)
     format_penalty: float = 0.5,  # Penalty for format violations (configured as positive)
     too_short_threshold: float = 0.5,  # Deprecated: use too_short_threshold_low/high instead
@@ -1321,6 +1326,7 @@ def compute_cot_rewriter_reward(
         student_max_num_seqs=student_max_num_seqs,
         student_tensor_parallel_size=student_tensor_parallel_size,
         student_logprob_last_n_tokens=student_logprob_last_n_tokens,
+        ppl_on_full_response=ppl_on_full_response,
         too_short_threshold=too_short_threshold,
         too_short_threshold_low=too_short_threshold_low,
         too_short_threshold_high=too_short_threshold_high,

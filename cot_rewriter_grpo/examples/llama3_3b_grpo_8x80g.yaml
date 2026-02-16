@@ -19,7 +19,7 @@ trainer:
   log_freq: 10
   max_actor_ckpt_to_keep: 3
   default_local_dir: ${oc.env:CHECKPOINT_BASE_DIR}/cot_rewriter_grpo/${trainer.experiment_name}
-  n_gpus_per_node: 8
+  n_gpus_per_node: 4
   nnodes: 1
   logger: [swanlab, console]
   rollout_data_dir: ${oc.env:CHECKPOINT_BASE_DIR}/rollout_data/${trainer.experiment_name}
@@ -194,7 +194,7 @@ custom_reward_function:
       max_resp_len: 10000             # 最大响应长度
     # ==================== Student Model 配置 (认知奖励 R_cog) ====================
     # 使用 student model 计算回答困惑度作为认知奖励
-    student_model_path: /data/luoys/checkpoints/cdad/warmup/qwen3_1_7b_base_sft_rv_optimal_warmup/checkpoint-10974
+    student_model_path: ${oc.env:MODEL_BASE_DIR}/Qwen/Qwen3-1.7B-Base
     student_tensor_parallel_size: 2
     student_max_model_len: 12000
     student_micro_batch_size: 1

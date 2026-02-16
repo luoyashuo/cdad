@@ -53,6 +53,7 @@ class SGLangWorkerActor:
         logprob_last_n_tokens: Optional[int] = None,  # 只计算最后 N 个 token 的 logprobs
         base_port: int = 30000,  # Base port for this worker (different per worker to avoid conflicts)
         reward_mode: str = "ppl",  # "ppl" or "logprob": Reward calculation mode
+        ppl_on_full_response: bool = False,  # If True, compute PPL on full response (Q+CoT+A)
     ):
         import os
         import subprocess
@@ -66,6 +67,7 @@ class SGLangWorkerActor:
         self.gpu_ids = gpu_ids
         self.tensor_parallel_size = tensor_parallel_size
         self.logprob_last_n_tokens = logprob_last_n_tokens
+        self.ppl_on_full_response = ppl_on_full_response
         self._base_port = base_port  # Store base port for SGLang Engine
         worker_name = f"SGLangWorker-{gpu_ids}"
 
@@ -230,11 +232,14 @@ class SGLangWorkerActor:
             # 但实际上 SGLang 需要至少生成 1 个 token 来获取 prompt_logprobs
             batch_outputs = []
             for prompt, ans_start in zip(batch_prompts, batch_ans_starts):
-                # IMPORTANT: Set logprob_start_len=ans_start to ONLY get answer portion logprobs
-                # SGLang's input_token_logprobs only includes tokens from logprob_start_len onwards
-                # We only need answer tokens, not question and CoT tokens
-                logprob_start_len = ans_start
-                
+                # IMPORTANT: Set logprob_start_len based on ppl_on_full_response
+                # - If ppl_on_full_response=False (default): logprob_start_len=ans_start
+                #   SGLang's input_token_logprobs only includes tokens from logprob_start_len onwards
+                #   We only get answer tokens, not question and CoT tokens
+                # - If ppl_on_full_response=True: logprob_start_len=0
+                #   We get logprobs for the entire response (Q+CoT+A)
+                logprob_start_len = 0 if self.ppl_on_full_response else ans_start
+
                 # 调用 SGLang engine
                 # 注意：SGLang 的 generate 返回的是一个 dict (single prompt) 或 list
                 outputs = self.engine.generate(
@@ -439,6 +444,7 @@ class SGLangStudentRewardClient:
         use_reward_delta: bool = True,  # If True (default), R_cog = rewrite - original (delta).
                                       # If False, R_cog = rewrite only (absolute value).
         reward_only_use_logprob: bool = None,  # Deprecated: use use_reward_delta instead
+        ppl_on_full_response: bool = False,  # If True, compute PPL on full response (Q+CoT+A)
     ):
         """
         Initialize Multi-GPU SGLang Student Reward Client with Ray actors.
@@ -459,6 +465,8 @@ class SGLangStudentRewardClient:
             use_reward_delta: If True (default), R_cog = value(rewrite) - value(original) (delta).
                 If False, R_cog = value(rewrite) only (absolute value).
             reward_only_use_logprob: (Deprecated) Use use_reward_delta instead
+            ppl_on_full_response: If True, compute PPL on full response (Q+CoT+A).
+                If False (default), compute PPL on answer portion only.
         """
 
         self.model_path = model_path
@@ -469,6 +477,7 @@ class SGLangStudentRewardClient:
         self.micro_batch_size = micro_batch_size
         self.logprob_last_n_tokens = logprob_last_n_tokens
         self.reward_mode = reward_mode
+        self.ppl_on_full_response = ppl_on_full_response
 
         # Handle reward_only_use_logprob deprecation and map to use_reward_delta
         # reward_only_use_logprob has INVERTED logic compared to use_reward_delta
@@ -648,6 +657,7 @@ class SGLangStudentRewardClient:
                 logprob_last_n_tokens=self.logprob_last_n_tokens,
                 base_port=base_port,  # Unique base port per worker
                 reward_mode=self.reward_mode,
+                ppl_on_full_response=self.ppl_on_full_response,
             )
             self.workers.append(worker)
             logger.info(f"[SGLangStudentReward] Created worker {group_idx} on GPUs {gpu_group} with base_port={base_port}")

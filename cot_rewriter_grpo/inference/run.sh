@@ -1,0 +1,1 @@
+CUDA_VISIBLE_DEVICES=4,5,6,7 python inference/rewrite_dataset.py --config inference/rewrite_config_example.yaml
