@@ -47,7 +47,8 @@ class VLLMWorkerActor:
         max_model_len: int = 8192,
         micro_batch_size: int = 4,
         max_num_seqs: int = 1,
-        reward_mode: str = "ppl",  # "ppl" or "logprob": Reward calculation mode
+        reward_mode: str = "ppl",  # "ppl", "logprob", or "ppl_ratio": Reward calculation mode
+        ppl_ratio_ceiling: float = 0.95,  # Ceiling for ppl_ratio mode: R_cog = min(ppl_original/ppl_rewrite, ceiling)
     ):
         import os
         import subprocess
@@ -123,6 +124,7 @@ class VLLMWorkerActor:
         )
         llm_elapsed = time.time() - llm_start
         self.micro_batch_size = micro_batch_size
+        self.ppl_ratio_ceiling = ppl_ratio_ceiling
 
     def compute_logprobs(
         self,
@@ -245,7 +247,8 @@ class VLLMStudentRewardClient:
         devices: Optional[List[str]] = None,
         micro_batch_size: int = 4,
         max_num_seqs: int = 1,
-        reward_mode: str = "ppl",  # "ppl" or "logprob": Reward calculation mode
+        reward_mode: str = "ppl",  # "ppl", "logprob", or "ppl_ratio": Reward calculation mode
+        ppl_ratio_ceiling: float = 0.95,  # Ceiling for ppl_ratio mode: R_cog = min(ppl_original/ppl_rewrite, ceiling)
         use_reward_delta: bool = True,  # If True (default), R_cog = rewrite - original (delta).
                                       # If False, R_cog = rewrite only (absolute value).
         reward_only_use_logprob: bool = None,  # Deprecated: use use_reward_delta instead
@@ -265,10 +268,15 @@ class VLLMStudentRewardClient:
             devices: List of CUDA devices (e.g., ["cuda:0", "cuda:1", "cuda:2", "cuda:3"])
             micro_batch_size: Batch size for each micro-batch to avoid OOM
             max_num_seqs: Maximum concurrent sequences in vLLM scheduler
-            reward_mode: Reward calculation mode - "ppl" or "logprob"
+            reward_mode: Reward calculation mode - "ppl", "logprob", or "ppl_ratio"
+                - "ppl": R_cog = avg_prob(rewrite) (absolute quality)
+                - "logprob": R_cog = answer_log_prob(rewrite) - answer_log_prob(original)
+                - "ppl_ratio": R_cog = min(ppl_original / ppl_rewrite, ceiling)
             use_reward_delta: If True (default), R_cog = value(rewrite) - value(original) (delta).
                 If False, R_cog = value(rewrite) only (absolute value).
             reward_only_use_logprob: (Deprecated) Use use_reward_delta instead.
+            ppl_ratio_ceiling: Ceiling for ppl_ratio mode (default: 0.95).
+                When ppl_ratio mode is enabled, R_cog = min(ppl_original / ppl_rewrite, ppl_ratio_ceiling).
         """
 
         self.model_path = model_path
@@ -279,6 +287,7 @@ class VLLMStudentRewardClient:
         self.micro_batch_size = micro_batch_size
         self.max_num_seqs = max_num_seqs
         self.reward_mode = reward_mode
+        self.ppl_ratio_ceiling = ppl_ratio_ceiling
 
         # Handle reward_only_use_logprob deprecation and map to use_reward_delta
         # reward_only_use_logprob has INVERTED logic compared to use_reward_delta
@@ -400,6 +409,7 @@ class VLLMStudentRewardClient:
                 micro_batch_size=self.micro_batch_size,
                 max_num_seqs=self.max_num_seqs,
                 reward_mode=self.reward_mode,
+                ppl_ratio_ceiling=self.ppl_ratio_ceiling,
             )
             self.workers.append(worker)
 
@@ -670,7 +680,32 @@ class VLLMStudentRewardClient:
             # R_cog = value(rewrite) - value(original) (if use_reward_delta=True)
             # OR R_cog = value(rewrite) only (if use_reward_delta=False)
             # 根据 reward_mode 选择计算方式
-            if self.reward_mode == "ppl":
+            if self.reward_mode == "ppl_ratio":
+                # PPL Ratio 模式: R_cog = min(ppl_original / ppl_rewrite, ceiling)
+                # 其中 ppl = 1 / avg_prob = exp(-mean_log_prob)
+                import math
+                rewrite_ppl = math.exp(-rewrite_mean)  # PPL(rewrite) = exp(-mean_log_prob)
+
+                # 计算公式1作为观测值（用于日志）
+                if original_mean > -100:
+                    original_ppl = math.exp(-original_mean)  # PPL(original)
+                    if original_ppl < 1e-10:
+                        ppl_ratio = 0.0
+                    else:
+                        ppl_ratio = original_ppl / rewrite_ppl
+                    # 应用天花板
+                    reward = min(ppl_ratio, self.ppl_ratio_ceiling)
+                    relative_improvement_rate = ppl_ratio - 1.0  # 用于日志
+                    original_ppls.append(original_ppl)
+                else:
+                    # 如果没有 original，reward = 0
+                    reward = 0.0
+                    relative_improvement_rate = 0.0
+                    original_ppls.append(float('nan'))
+
+                rewrite_ppls.append(rewrite_ppl)
+                relative_improvement_rates.append(relative_improvement_rate)
+            elif self.reward_mode == "ppl":
                 # PPL 模式: 使用公式2 (绝对质量)
                 # R_cog = avg_prob(rewrite) = 1 / PPL(rewrite)
                 # 同时计算公式1 (相对改进率) 作为观测值

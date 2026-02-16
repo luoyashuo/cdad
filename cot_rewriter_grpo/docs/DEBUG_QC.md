@@ -11,4 +11,4 @@ source /data/luoys/projects/cdad/cot_rewriter_grpo/.venv/bin/activate
 # LOG
 /data/luoys/projects/cdad/cot_rewriter_grpo/logs/grpo/llama3_8b_grpo_8x80g.log
 # 问题
-我希望修改R_cog的计算方式，不是仅仅对answer部分去计算ppl,而是对整个response计算ppl，在配置项中增加一个参数，用来控制是否对整个response计算ppl
+我希望计算fsf的时候，增加一个配置参数r_logic_repeat_n，来保证reward的稳定性，代表计算多次次R_logic，然后取平均值，减少llm judge的波动

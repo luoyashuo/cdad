@@ -244,6 +244,7 @@ class CombinedRewardComputer:
                                       # Deprecated alias: reward_only_use_logprob (inverted logic!)
         reward_only_use_logprob: bool = None,  # Deprecated: use use_reward_delta instead
                                                 # True = use absolute value (no delta), False = use delta
+        ppl_ratio_ceiling: float = 0.95,  # Ceiling for ppl_ratio mode: R_cog = min(ppl_original/ppl_rewrite, ceiling)
         # ========== FSF Reward Configuration ==========
         # FSF reward using build_cot_rewrite_from_sharegpt.py message format
         # GPU devices are auto-detected based on fsf_tensor_parallel_size
@@ -262,6 +263,9 @@ class CombinedRewardComputer:
                                          # - 'direct': R_logic = -rewrite_fsf (default)
                                          # - 'threshold': R_logic = -1 if fsf > 0 else 0
         save_prompts: bool = False,  # Whether to save request prompts for student_model and fsf_judge
+        r_logic_repeat_n: int = 1,  # Number of times to repeat FSF calculation for R_logic (default: 1).
+                                     # Higher values (e.g., 3) reduce LLM judge volatility by averaging multiple samples.
+                                     # R_logic is computed as the average of n independent FSF calculations.
         # ========== Repeat Penalty Configuration ==========
         similarity_threshold: float = 0.9,  # Threshold for repeat penalty (0.0-1.0). If similarity between
                                             # original_cot and rewrite_cot exceeds this, apply penalty.
@@ -313,12 +317,14 @@ class CombinedRewardComputer:
             tier_step: 区间大小，每个阶梯的 R_cog 区间 (default: 0.05).
             tier_reward: 每阶梯奖励值，第一阶梯得 tier_reward，第二阶梯得 2*tier_reward (default: 0.1).
             reward_mode: Reward calculation mode (default: "ppl").
-                - "ppl": R_cog = (avg_prob(rewrite) - avg_prob(original)) / avg_prob(original)
-                  where avg_prob = exp(mean_log_prob), PPL = 1/avg_prob = exp(-mean_log_prob)
-                  Equivalent: R_cog = (PPL(original) - PPL(rewrite)) / PPL(original)
-                            = 1 - PPL(rewrite) / PPL(original)
+                - "ppl": R_cog = avg_prob(rewrite) = 1 / PPL(rewrite) (absolute quality)
+                - "ppl_ratio": R_cog = min(PPL(original) / PPL(rewrite), ceiling)
+                  where PPL = exp(-mean_log_prob), ceiling is controlled by ppl_ratio_ceiling (default: 0.95)
                 - "logprob": R_cog = answer_log_prob(rewrite) - answer_log_prob(original),
                   where answer_log_prob = mean(token_log_probs) + alpha_cog * min(token_log_probs)
+            ppl_ratio_ceiling: Ceiling for ppl_ratio mode (default: 0.95). When reward_mode="ppl_ratio",
+                R_cog = min(PPL(original) / PPL(rewrite), ppl_ratio_ceiling). This prevents the reward
+                from growing too large when PPL(rewrite) is much smaller than PPL(original).
             use_reward_delta: If True (default), R_cog = value(rewrite) - value(original), computing
                 the improvement delta. If False, R_cog = value(rewrite) only (absolute value).
                 For "ppl" mode: delta = (avg_prob(rewrite) - avg_prob(original)) / avg_prob(original)
@@ -338,6 +344,9 @@ class CombinedRewardComputer:
                 Lower values reduce memory but increase computation time.
             fsf_skip_group_on_parse_error: If True (default), skip FSF reward for entire group
                 when any sample fails to parse. If False, use 0.0 for failed samples.
+            r_logic_repeat_n: Number of times to repeat FSF calculation for R_logic (default: 1).
+                Higher values (e.g., 3) reduce LLM judge volatility by averaging multiple samples.
+                R_logic is computed as the average of n independent FSF calculations.
             similarity_threshold: Threshold for repeat penalty (default: 0.9). If the similarity
                 between original_cot and rewrite_cot (computed using SequenceMatcher) exceeds
                 this value, a penalty is applied to discourage near-identical rewrites.
@@ -373,6 +382,7 @@ class CombinedRewardComputer:
         self.tier_step = tier_step
         self.tier_reward = tier_reward
         self.reward_mode = reward_mode
+        self.ppl_ratio_ceiling = ppl_ratio_ceiling
 
         # Handle reward_only_use_logprob deprecation and map to use_reward_delta
         # reward_only_use_logprob has INVERTED logic compared to use_reward_delta
@@ -405,6 +415,7 @@ class CombinedRewardComputer:
                 logprob_last_n_tokens=student_logprob_last_n_tokens,
                 reward_mode=reward_mode,
                 ppl_on_full_response=ppl_on_full_response,
+                ppl_ratio_ceiling=ppl_ratio_ceiling,
             )
         else:
             from verl.experimental.reward.cot_rewriter.student_reward import VLLMStudentRewardClient
@@ -417,6 +428,7 @@ class CombinedRewardComputer:
                 micro_batch_size=student_micro_batch_size,
                 max_num_seqs=student_max_num_seqs,
                 reward_mode=reward_mode,
+                ppl_ratio_ceiling=ppl_ratio_ceiling,
             )
 
         # ========== Initialize FSF Reward ==========
@@ -436,6 +448,7 @@ class CombinedRewardComputer:
         self.save_fsf_dot_outputs = save_fsf_dot_outputs  # Whether to save raw DOT outputs
         self.fsf_reward_mode = fsf_reward_mode  # FSF reward calculation mode: 'direct' or 'threshold'
         self.save_prompts = save_prompts  # Whether to save request prompts for debugging
+        self.r_logic_repeat_n = r_logic_repeat_n  # Number of times to repeat FSF calculation for averaging
         self.fsf_judge = None  # Created on-demand in compute_reward
 
         # ========== Repeat Penalty Parameters ==========
@@ -615,33 +628,68 @@ class CombinedRewardComputer:
 
             try:
                 # Compute rewrite FSF only (original_fsf is loaded from dataset)
-                logger.info(f"[FSF] Computing FSF for {len(rewrite_cots)} rewrite CoTs only "
-                           f"(original_fsf loaded from dataset, save_dot_outputs={self.save_fsf_dot_outputs}, save_prompts={self.save_prompts})...")
-                fsf_result = self.fsf_judge.compute_rewrite_fsf_only(
-                    rewrite_cots=rewrite_cots,
-                    return_dot_outputs=self.save_fsf_dot_outputs,
-                    save_prompts=self.save_prompts,
-                )
+                # Support repeated sampling for more stable R_logic
+                repeat_n = self.r_logic_repeat_n
+                if repeat_n > 1:
+                    logger.info(f"[FSF] Computing FSF for {len(rewrite_cots)} rewrite CoTs with repeat_n={repeat_n} "
+                               f"(averaging {repeat_n} independent samples for stability, save_dot_outputs={self.save_fsf_dot_outputs}, save_prompts={self.save_prompts})...")
+                else:
+                    logger.info(f"[FSF] Computing FSF for {len(rewrite_cots)} rewrite CoTs only "
+                               f"(original_fsf loaded from dataset, save_dot_outputs={self.save_fsf_dot_outputs}, save_prompts={self.save_prompts})...")
 
-                rewrite_fsfs = fsf_result["rewrite_fsfs"]
-                if self.save_fsf_dot_outputs:
-                    rewrite_dot_outputs = fsf_result.get("rewrite_dot_outputs", [None] * batch_size)
+                # Accumulate FSF values across multiple runs for averaging
+                rewrite_fsf_accumulator = [[] for _ in range(batch_size)]
+                rewrite_dot_outputs_all_runs = []  # Store DOT outputs from all runs (only for last run if save_fsf_dot_outputs)
 
-                # Merge FSF saved_prompts into the main saved_prompts dict
-                if self.save_prompts and "saved_prompts" in fsf_result:
-                    fsf_saved_prompts = fsf_result["saved_prompts"]
-                    if saved_prompts is None:
-                        saved_prompts = fsf_saved_prompts
-                    elif isinstance(fsf_saved_prompts, dict):
-                        # Merge FSF prompts into saved_prompts
-                        for key, values in fsf_saved_prompts.items():
-                            if key not in saved_prompts:
-                                saved_prompts[key] = values
-                            elif isinstance(saved_prompts.get(key), list) and isinstance(values, list):
-                                saved_prompts[key].extend(values)
-                    logger.info(f"[FSF] Merged fsf_saved_prompts keys: {list(fsf_saved_prompts.keys())}")
+                for run_idx in range(repeat_n):
+                    if repeat_n > 1:
+                        logger.info(f"[FSF] Run {run_idx + 1}/{repeat_n}...")
 
-                # Count samples with unparseable FSF
+                    fsf_result = self.fsf_judge.compute_rewrite_fsf_only(
+                        rewrite_cots=rewrite_cots,
+                        return_dot_outputs=self.save_fsf_dot_outputs or (run_idx == repeat_n - 1),  # Save DOT from last run
+                        save_prompts=self.save_prompts and (run_idx == 0),  # Save prompts only on first run
+                    )
+
+                    run_rewrite_fsfs = fsf_result["rewrite_fsfs"]
+
+                    # Accumulate FSF values for each sample
+                    for i, fsf_val in enumerate(run_rewrite_fsfs):
+                        if fsf_val is not None:
+                            rewrite_fsf_accumulator[i].append(fsf_val)
+
+                    # Store DOT outputs from the last run (or first if saving prompts)
+                    if self.save_fsf_dot_outputs and (run_idx == repeat_n - 1):
+                        rewrite_dot_outputs = fsf_result.get("rewrite_dot_outputs", [None] * batch_size)
+
+                    # Merge FSF saved_prompts into the main saved_prompts dict (only on first run)
+                    if self.save_prompts and (run_idx == 0) and "saved_prompts" in fsf_result:
+                        fsf_saved_prompts = fsf_result["saved_prompts"]
+                        if saved_prompts is None:
+                            saved_prompts = fsf_saved_prompts
+                        elif isinstance(fsf_saved_prompts, dict):
+                            # Merge FSF prompts into saved_prompts
+                            for key, values in fsf_saved_prompts.items():
+                                if key not in saved_prompts:
+                                    saved_prompts[key] = values
+                                elif isinstance(saved_prompts.get(key), list) and isinstance(values, list):
+                                    saved_prompts[key].extend(values)
+                        logger.info(f"[FSF] Merged fsf_saved_prompts keys: {list(fsf_saved_prompts.keys())}")
+
+                # Compute average FSF for each sample
+                rewrite_fsfs = []
+                for i, fsf_list in enumerate(rewrite_fsf_accumulator):
+                    if len(fsf_list) == 0:
+                        # All runs failed for this sample
+                        rewrite_fsfs.append(None)
+                    else:
+                        # Average the FSF values across runs
+                        avg_fsf = sum(fsf_list) / len(fsf_list)
+                        rewrite_fsfs.append(avg_fsf)
+                        if repeat_n > 1 and i < 3:  # Log first few samples
+                            logger.info(f"[FSF] Sample {i}: FSF averaged over {len(fsf_list)} runs = {avg_fsf:.4f} (values: {fsf_list})")
+
+                # Count samples with unparseable FSF (all runs failed)
                 rewrite_failed = sum(1 for f in rewrite_fsfs if f is None)
                 fsf_parse_failed_count = rewrite_failed
 
@@ -651,7 +699,7 @@ class CombinedRewardComputer:
                 r_logic = []
                 for orig_fsf, rew_fsf in zip(original_fsfs, rewrite_fsfs):
                     if rew_fsf is None:
-                        # Parse failed, use 0 for logic reward
+                        # Parse failed (all runs failed), use 0 for logic reward
                         r_logic.append(0.0)
                     else:
                         # Apply reward based on fsf_reward_mode
@@ -1113,7 +1161,8 @@ def compute_cot_rewriter_reward(
     use_tiered_reward: bool = True,  # Whether to use tiered (step-wise) reward for R_cog
     tier_step: float = 0.05,  # 区间大小：每个阶梯的 R_cog 范围
     tier_reward: float = 0.1,  # 每阶梯奖励值：第一阶梯得 tier_reward，第二阶梯得 2*tier_reward
-    reward_mode: str = "ppl",  # "ppl" or "logprob": Reward calculation mode
+    reward_mode: str = "ppl",  # "ppl", "ppl_ratio", or "logprob": Reward calculation mode
+    ppl_ratio_ceiling: float = 0.95,  # Ceiling for ppl_ratio mode: R_cog = min(ppl_original/ppl_rewrite, ceiling)
     use_reward_delta: bool = True,  # If True (default), compute delta (rewrite - original).
                                        # If False, use absolute value.
                                        # Deprecated alias: reward_only_use_logprob (inverted logic!)
@@ -1133,6 +1182,8 @@ def compute_cot_rewriter_reward(
     save_fsf_dot_outputs: bool = False,  # Whether to save raw FSF DOT outputs to rollout_data
     fsf_reward_mode: str = 'direct',  # FSF reward mode: 'direct' or 'threshold'
     save_prompts: bool = False,  # Whether to save request prompts for student_model
+    r_logic_repeat_n: int = 1,  # Number of times to repeat FSF calculation for R_logic (default: 1).
+                                # Higher values (e.g., 3) reduce LLM judge volatility by averaging multiple samples.
     # ========== Repeat Penalty Parameters ==========
     similarity_threshold: float = 0.9,  # Threshold for repeat penalty (0.0-1.0). If similarity between
                                         # original_cot and rewrite_cot exceeds this, apply penalty.
@@ -1173,6 +1224,9 @@ def compute_cot_rewriter_reward(
         fsf_reward_scale: Scale factor for FSF reward (replaces lambda_logic, default: 1.0)
         fsf_micro_batch_size: Micro batch size for FSF inference to avoid OOM (default: 4)
         fsf_skip_group_on_parse_error: If True (default), skip entire group when any FSF parse fails
+        r_logic_repeat_n: Number of times to repeat FSF calculation for R_logic (default: 1).
+            Higher values (e.g., 3) reduce LLM judge volatility by averaging multiple samples.
+            R_logic is computed as the average of n independent FSF calculations.
         similarity_threshold: Threshold for repeat penalty (default: 0.9). If the similarity
             between original_cot and rewrite_cot (computed using SequenceMatcher) exceeds
             this value, a penalty is applied to discourage near-identical rewrites.
@@ -1339,6 +1393,7 @@ def compute_cot_rewriter_reward(
         tier_step=tier_step,
         tier_reward=tier_reward,
         reward_mode=reward_mode,
+        ppl_ratio_ceiling=ppl_ratio_ceiling,
         use_reward_delta=use_reward_delta,
         reward_only_use_logprob=reward_only_use_logprob,  # For backward compatibility
         # ========== FSF Parameters ==========
@@ -1355,6 +1410,7 @@ def compute_cot_rewriter_reward(
         save_fsf_dot_outputs=save_fsf_dot_outputs,
         fsf_reward_mode=fsf_reward_mode,
         save_prompts=save_prompts,
+        r_logic_repeat_n=r_logic_repeat_n,
         # ========== Repeat Penalty Parameters ==========
         similarity_threshold=similarity_threshold,
         similarity_penalty=similarity_penalty,

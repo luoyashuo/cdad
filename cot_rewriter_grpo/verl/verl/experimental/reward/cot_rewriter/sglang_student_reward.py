@@ -52,7 +52,8 @@ class SGLangWorkerActor:
         micro_batch_size: int = 4,
         logprob_last_n_tokens: Optional[int] = None,  # 只计算最后 N 个 token 的 logprobs
         base_port: int = 30000,  # Base port for this worker (different per worker to avoid conflicts)
-        reward_mode: str = "ppl",  # "ppl" or "logprob": Reward calculation mode
+        reward_mode: str = "ppl",  # "ppl", "ppl_ratio", or "logprob": Reward calculation mode
+        ppl_ratio_ceiling: float = 0.95,  # Ceiling for ppl_ratio mode: R_cog = min(ppl_original/ppl_rewrite, ceiling)
         ppl_on_full_response: bool = False,  # If True, compute PPL on full response (Q+CoT+A)
     ):
         import os
@@ -68,6 +69,7 @@ class SGLangWorkerActor:
         self.tensor_parallel_size = tensor_parallel_size
         self.logprob_last_n_tokens = logprob_last_n_tokens
         self.ppl_on_full_response = ppl_on_full_response
+        self.ppl_ratio_ceiling = ppl_ratio_ceiling
         self._base_port = base_port  # Store base port for SGLang Engine
         worker_name = f"SGLangWorker-{gpu_ids}"
 
@@ -440,7 +442,8 @@ class SGLangStudentRewardClient:
         devices: Optional[List[str]] = None,
         micro_batch_size: int = 4,
         logprob_last_n_tokens: Optional[int] = None,  # 只计算最后 N 个 token 的 logprobs
-        reward_mode: str = "ppl",  # "ppl" or "logprob": Reward calculation mode
+        reward_mode: str = "ppl",  # "ppl", "ppl_ratio", or "logprob": Reward calculation mode
+        ppl_ratio_ceiling: float = 0.95,  # Ceiling for ppl_ratio mode: R_cog = min(ppl_original/ppl_rewrite, ceiling)
         use_reward_delta: bool = True,  # If True (default), R_cog = rewrite - original (delta).
                                       # If False, R_cog = rewrite only (absolute value).
         reward_only_use_logprob: bool = None,  # Deprecated: use use_reward_delta instead
@@ -461,7 +464,9 @@ class SGLangStudentRewardClient:
             devices: List of CUDA devices (e.g., ["cuda:0", "cuda:1", "cuda:2", "cuda:3"])
             micro_batch_size: Batch size for each micro-batch to avoid OOM
             logprob_last_n_tokens: 只计算 answer 部分最后 N 个 token 的 logprobs，节省显存
-            reward_mode: Reward calculation mode - "ppl" or "logprob"
+            reward_mode: Reward calculation mode - "ppl", "ppl_ratio", or "logprob"
+            ppl_ratio_ceiling: Ceiling for ppl_ratio mode (default: 0.95).
+                When ppl_ratio mode is enabled, R_cog = min(ppl_original / ppl_rewrite, ppl_ratio_ceiling).
             use_reward_delta: If True (default), R_cog = value(rewrite) - value(original) (delta).
                 If False, R_cog = value(rewrite) only (absolute value).
             reward_only_use_logprob: (Deprecated) Use use_reward_delta instead
@@ -477,6 +482,7 @@ class SGLangStudentRewardClient:
         self.micro_batch_size = micro_batch_size
         self.logprob_last_n_tokens = logprob_last_n_tokens
         self.reward_mode = reward_mode
+        self.ppl_ratio_ceiling = ppl_ratio_ceiling
         self.ppl_on_full_response = ppl_on_full_response
 
         # Handle reward_only_use_logprob deprecation and map to use_reward_delta
@@ -657,6 +663,7 @@ class SGLangStudentRewardClient:
                 logprob_last_n_tokens=self.logprob_last_n_tokens,
                 base_port=base_port,  # Unique base port per worker
                 reward_mode=self.reward_mode,
+                ppl_ratio_ceiling=self.ppl_ratio_ceiling,
                 ppl_on_full_response=self.ppl_on_full_response,
             )
             self.workers.append(worker)
@@ -982,7 +989,32 @@ class SGLangStudentRewardClient:
             # R_cog = value(rewrite) - value(original) (if use_reward_delta=True)
             # OR R_cog = value(rewrite) only (if use_reward_delta=False)
             # 根据 reward_mode 选择计算方式
-            if self.reward_mode == "ppl":
+            if self.reward_mode == "ppl_ratio":
+                # PPL Ratio 模式: R_cog = min(ppl_original / ppl_rewrite, ceiling)
+                # 其中 ppl = 1 / avg_prob = exp(-mean_log_prob)
+                import math
+                rewrite_ppl = math.exp(-rewrite_mean)  # PPL(rewrite) = exp(-mean_log_prob)
+
+                # 计算公式1作为观测值（用于日志）
+                if original_mean > -100:
+                    original_ppl = math.exp(-original_mean)  # PPL(original)
+                    if original_ppl < 1e-10:
+                        ppl_ratio = 0.0
+                    else:
+                        ppl_ratio = original_ppl / rewrite_ppl
+                    # 应用天花板
+                    reward = min(ppl_ratio, self.ppl_ratio_ceiling)
+                    relative_improvement_rate = ppl_ratio - 1.0  # 用于日志
+                    original_ppls.append(original_ppl)
+                else:
+                    # 如果没有 original，reward = 0
+                    reward = 0.0
+                    relative_improvement_rate = 0.0
+                    original_ppls.append(float('nan'))
+
+                rewrite_ppls.append(rewrite_ppl)
+                relative_improvement_rates.append(relative_improvement_rate)
+            elif self.reward_mode == "ppl":
                 # PPL 模式: 使用公式2 (绝对质量)
                 # R_cog = avg_prob(rewrite) = 1 / PPL(rewrite)
                 # 同时计算公式1 (相对改进率) 作为观测值

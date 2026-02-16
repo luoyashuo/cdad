@@ -205,8 +205,12 @@ custom_reward_function:
     vllm_gpu_memory_utilization: 0.3  # vLLM 显存利用率
     cleanup_after_compute: true       # 计算后清理缓存
     # 认知奖励模式
-    reward_mode: ppl                  # 奖励模式: ppl (困惑度)
-    ppl_on_full_response: true       # 是否对整个 response 计算 PPL (Q+CoT+A)
+    reward_mode: ppl_ratio            # 奖励模式: ppl_ratio (PPL比率，带天花板)
+                                      # - ppl: R_cog = avg_prob(rewrite) = 1 / PPL(rewrite)
+                                      # - ppl_ratio: R_cog = min(PPL(original) / PPL(rewrite), ceiling)
+                                      # - logprob: R_cog = answer_log_prob(rewrite) - answer_log_prob(original)
+    ppl_ratio_ceiling: 0.98          # PPL比率天花板，防止奖励过大 (默认0.95)
+    ppl_on_full_response: false       # 是否对整个 response 计算 PPL (Q+CoT+A)
                                         # true: 对整个 response 计算 PPL
                                         # false: 只对 answer 部分计算 PPL (默认)
     print_samples: 2                  # 打印样本数
@@ -236,6 +240,7 @@ custom_reward_function:
     fsf_skip_group_on_parse_error: true  # DOT解析失败时跳过整个group (默认true)
     save_fsf_dot_outputs: true        # 保存 FSF DOT 输出到 rollout_data
     save_prompts: true                 # 是否保存 student_model 和 fsf_judge 的请求 prompt (用于调试)
+    r_logic_repeat_n: 3               # FSF 重复计算次数，多次计算取平均以减少 LLM judge 波动 (默认1)
     fsf_reward_mode: "threshold"          # FSF 奖励计算模式: "direct" (默认) 或 "threshold"
                                       # - "direct": R_logic = -rewrite_fsf (与失败分支成正比的负奖励)
                                       # - "threshold": R_logic = -1 if fsf > 0 else 0 (有失败分支时的固定惩罚)
@@ -257,7 +262,7 @@ custom_reward_function:
     format_penalty: 0.5               # 格式错误惩罚值
     # 过短惩罚阈值
     too_short_threshold_low: 0.2      # 过短下限阈值 (相比 original)
-    too_short_threshold_high: 0.5     # 过短上限阈值
+    too_short_threshold_high: 0.4     # 过短上限阈值
     too_short_max_penalty: 0.5        # 最大过短惩罚
     # 过长惩罚阈值
     too_long_threshold_low: 2.0      # 过长下限阈值 (相比 original)
