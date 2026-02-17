@@ -11,4 +11,4 @@ source /data/luoys/projects/cdad/cot_rewriter_grpo/.venv/bin/activate
 # LOG
 /data/luoys/projects/cdad/cot_rewriter_grpo/logs/grpo/llama3_8b_grpo_8x80g.log
 # 问题
-目前repeat_penalties_actual是怎么计算的
+我想要增加一些format error的控制，应该修改哪里？

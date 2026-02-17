@@ -87,10 +87,26 @@ def extract_rewrite_reasoning(text: str) -> Tuple[str, bool, str]:
 
     # Check for nested tags
     has_nested = False
+    error_reason = ""
     if has_exact_tags and starts_with_open_tag and ends_with_close_tag:
         content = stripped_text[len(open_tag):-len(close_tag)]
         has_nested = open_tag in content or close_tag in content
-        if not has_nested:
+        # 增加一些发现的Format Error
+        mention_rewrite_error = False
+        content_prefix = content.strip()[:60].lower()
+        if content_prefix.startswith("refin"):
+            mention_rewrite_error = True
+            error_reason = "mention_refine_in_reasoning"
+        elif "rewrit" in content_prefix:
+            mention_rewrite_error = True
+            error_reason = "mention_rewrite_in_reasoning"
+        elif "reasoning process" in content_prefix:
+            mention_rewrite_error = True
+            error_reason = "mention_reasoning_process_in_reasoning"
+        elif "bridge" in content_prefix or "clari" in content_prefix or 'deriv' in content_prefix:
+            mention_rewrite_error = True
+            error_reason = "mention_bridge_or_clari_in_reasoning"
+        if not has_nested and not mention_rewrite_error:
             # Strict format valid
             return content.strip(), True, "ok"
 
@@ -101,7 +117,7 @@ def extract_rewrite_reasoning(text: str) -> Tuple[str, bool, str]:
     # - "<rewrite_reasoning>content</rewrite_reasoning> some text"
     # - multiple tags (takes first match)
 
-    error_reason = ""
+    
     if open_tag_count == 0:
         error_reason = "missing_open_tag"
     elif close_tag_count == 0:
@@ -117,7 +133,7 @@ def extract_rewrite_reasoning(text: str) -> Tuple[str, bool, str]:
     elif has_nested:
         error_reason = "nested_tags_detected"
     else:
-        error_reason = "unknown_format_error"
+        pass
 
     # Fallback extraction: strip whitespace, then remove tags from ends
     fallback_content = (
