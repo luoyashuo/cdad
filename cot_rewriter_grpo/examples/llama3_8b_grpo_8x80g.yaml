@@ -9,7 +9,7 @@ defaults:
 # ========== 基础训练配置 ==========
 trainer:
   project_name: cot_rewriter_grpo
-  experiment_name: llama3_8b_grpo_8x80g_top2000_v2
+  experiment_name: llama3_8b_grpo_8x80g_top2000_v4
   total_epochs: 1
   total_training_steps: 500
   save_freq: 20
@@ -19,7 +19,7 @@ trainer:
   log_freq: 10
   max_actor_ckpt_to_keep: 3
   default_local_dir: ${oc.env:CHECKPOINT_BASE_DIR}/cot_rewriter_grpo/${trainer.experiment_name}
-  n_gpus_per_node: 4
+  n_gpus_per_node: 8
   nnodes: 1
   logger: [swanlab, console]
   rollout_data_dir: ${oc.env:CHECKPOINT_BASE_DIR}/rollout_data/${trainer.experiment_name}
@@ -104,7 +104,7 @@ actor_rollout_ref:
     load_format: auto
     log_prob_micro_batch_size_per_gpu: 1
     n: 8
-    temperature: 0.8
+    temperature: 0.9
     top_k: 20
     top_p: 0.95
     presence_penalty: 1.0
@@ -205,10 +205,12 @@ custom_reward_function:
     vllm_gpu_memory_utilization: 0.3  # vLLM 显存利用率
     cleanup_after_compute: true       # 计算后清理缓存
     # 认知奖励模式
-    reward_mode: ppl_ratio            # 奖励模式: ppl_ratio (PPL比率，带天花板)
+    reward_mode: cot_effect_ratio            # 奖励模式: cot_effect_ratio (COT效果比率，带天花板)
                                       # - ppl: R_cog = avg_prob(rewrite) = 1 / PPL(rewrite)
                                       # - ppl_ratio: R_cog = min(PPL(original) / PPL(rewrite), ceiling)
                                       # - logprob: R_cog = answer_log_prob(rewrite) - answer_log_prob(original)
+                                      # - cot_effect_ratio: R_cog = min(cot_effect(rewrite_cot) / cot_effect(original_cot), ceiling)
+    cot_effect_ratio_ceiling: 0.9
     ppl_ratio_ceiling: 0.98          # PPL比率天花板，防止奖励过大 (默认0.95)
     ppl_on_full_response: false       # 是否对整个 response 计算 PPL (Q+CoT+A)
                                         # true: 对整个 response 计算 PPL
@@ -235,7 +237,7 @@ custom_reward_function:
     fsf_max_new_tokens: 8000
     fsf_gpu_memory_utilization: 0.3    # 降低显存利用率以避免OOM (0.4->0.3)
     fsf_max_model_len: 12000
-    fsf_reward_scale: 4          # FSF 奖励缩放因子
+    fsf_reward_scale: 0.5          # FSF 奖励缩放因子
     fsf_micro_batch_size: 1           # FSF 推理微批次大小 (控制显存，默认4)
     fsf_skip_group_on_parse_error: true  # DOT解析失败时跳过整个group (默认true)
     save_fsf_dot_outputs: true        # 保存 FSF DOT 输出到 rollout_data
@@ -244,6 +246,9 @@ custom_reward_function:
     fsf_reward_mode: "threshold"          # FSF 奖励计算模式: "direct" (默认) 或 "threshold"
                                       # - "direct": R_logic = -rewrite_fsf (与失败分支成正比的负奖励)
                                       # - "threshold": R_logic = -1 if fsf > 0 else 0 (有失败分支时的固定惩罚)
+    fsf_penalty_mode: "absolute"      # FSF 惩罚模式: "absolute" (默认) 或 "relative"
+                                      # - "absolute": R_logic = -rewrite_fsf (与失败分支成正比的负奖励)
+                                      # - "relative": R_logic = -rewrite_fsf / max(rewrite_fsf, 1.0) (归一化后与失败分支成正比的负奖励), 目标是让模型在保证改写正确的前提下平稳学习, 实践发现relative会导致惩罚在一个相似的group内部非常小，起不到纠正作用
     # ==================== Useful 奖励配置 (R_useful) ====================
     # 评估 rewrite 相对于 original 的有用性
     use_useful_reward: false          # 是否启用 useful 奖励
@@ -256,7 +261,7 @@ custom_reward_function:
       original_cot_key: original_cot  # 原始 CoT 字段名
       ground_truth_key: ground_truth  # 正确答案字段名
     # ==================== 长度惩罚配置 ====================
-    similarity_threshold: 0.9    # 相似度阈值
+    similarity_threshold: 0.5   # 采用很低的相似度阈值，不许大量copy原文
     similarity_penalty: 1.0      # 惩罚系数
     truncation_penalty: 0.5           # 截断惩罚值
     format_penalty: 0.5               # 格式错误惩罚值

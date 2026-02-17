@@ -52,8 +52,9 @@ class SGLangWorkerActor:
         micro_batch_size: int = 4,
         logprob_last_n_tokens: Optional[int] = None,  # 只计算最后 N 个 token 的 logprobs
         base_port: int = 30000,  # Base port for this worker (different per worker to avoid conflicts)
-        reward_mode: str = "ppl",  # "ppl", "ppl_ratio", or "logprob": Reward calculation mode
-        ppl_ratio_ceiling: float = 0.95,  # Ceiling for ppl_ratio mode: R_cog = min(ppl_original/ppl_rewrite, ceiling)
+        reward_mode: str = "ppl",  # "ppl", "ppl_ratio", "cot_effect_ratio", or "logprob": Reward calculation mode
+        ppl_ratio_ceiling: float = 0.95,  # Ceiling for ppl_ratio mode: R_cog = min(ratio, ceiling)
+        cot_effect_ratio_ceiling: float = 0.95,  # Ceiling for cot_effect_ratio mode: R_cog = min(ratio, ceiling)
         ppl_on_full_response: bool = False,  # If True, compute PPL on full response (Q+CoT+A)
     ):
         import os
@@ -70,6 +71,7 @@ class SGLangWorkerActor:
         self.logprob_last_n_tokens = logprob_last_n_tokens
         self.ppl_on_full_response = ppl_on_full_response
         self.ppl_ratio_ceiling = ppl_ratio_ceiling
+        self.cot_effect_ratio_ceiling = cot_effect_ratio_ceiling
         self._base_port = base_port  # Store base port for SGLang Engine
         worker_name = f"SGLangWorker-{gpu_ids}"
 
@@ -442,8 +444,9 @@ class SGLangStudentRewardClient:
         devices: Optional[List[str]] = None,
         micro_batch_size: int = 4,
         logprob_last_n_tokens: Optional[int] = None,  # 只计算最后 N 个 token 的 logprobs
-        reward_mode: str = "ppl",  # "ppl", "ppl_ratio", or "logprob": Reward calculation mode
-        ppl_ratio_ceiling: float = 0.95,  # Ceiling for ppl_ratio mode: R_cog = min(ppl_original/ppl_rewrite, ceiling)
+        reward_mode: str = "ppl",  # "ppl", "ppl_ratio", "cot_effect_ratio", or "logprob": Reward calculation mode
+        ppl_ratio_ceiling: float = 0.95,  # Ceiling for ppl_ratio mode: R_cog = min(ratio, ceiling)
+        cot_effect_ratio_ceiling: float = 0.95,  # Ceiling for cot_effect_ratio mode: R_cog = min(ratio, ceiling)
         use_reward_delta: bool = True,  # If True (default), R_cog = rewrite - original (delta).
                                       # If False, R_cog = rewrite only (absolute value).
         reward_only_use_logprob: bool = None,  # Deprecated: use use_reward_delta instead
@@ -464,9 +467,12 @@ class SGLangStudentRewardClient:
             devices: List of CUDA devices (e.g., ["cuda:0", "cuda:1", "cuda:2", "cuda:3"])
             micro_batch_size: Batch size for each micro-batch to avoid OOM
             logprob_last_n_tokens: 只计算 answer 部分最后 N 个 token 的 logprobs，节省显存
-            reward_mode: Reward calculation mode - "ppl", "ppl_ratio", or "logprob"
+            reward_mode: Reward calculation mode - "ppl", "ppl_ratio", "cot_effect_ratio", or "logprob"
             ppl_ratio_ceiling: Ceiling for ppl_ratio mode (default: 0.95).
-                When ppl_ratio mode is enabled, R_cog = min(ppl_original / ppl_rewrite, ppl_ratio_ceiling).
+                When ppl_ratio mode: R_cog = min(ppl_original / ppl_rewrite, ppl_ratio_ceiling).
+            cot_effect_ratio_ceiling: Ceiling for cot_effect_ratio mode (default: 0.95).
+                When cot_effect_ratio mode: R_cog = min(cot_effect(rewrite) / cot_effect(original), cot_effect_ratio_ceiling).
+                where cot_effect(cot) = 1/ppl(Q,CoT,A) - 1/ppl(Q,A) = avg_prob(Q,CoT,A) - avg_prob(Q,A)
             use_reward_delta: If True (default), R_cog = value(rewrite) - value(original) (delta).
                 If False, R_cog = value(rewrite) only (absolute value).
             reward_only_use_logprob: (Deprecated) Use use_reward_delta instead
@@ -483,6 +489,7 @@ class SGLangStudentRewardClient:
         self.logprob_last_n_tokens = logprob_last_n_tokens
         self.reward_mode = reward_mode
         self.ppl_ratio_ceiling = ppl_ratio_ceiling
+        self.cot_effect_ratio_ceiling = cot_effect_ratio_ceiling
         self.ppl_on_full_response = ppl_on_full_response
 
         # Handle reward_only_use_logprob deprecation and map to use_reward_delta
@@ -664,6 +671,7 @@ class SGLangStudentRewardClient:
                 base_port=base_port,  # Unique base port per worker
                 reward_mode=self.reward_mode,
                 ppl_ratio_ceiling=self.ppl_ratio_ceiling,
+                cot_effect_ratio_ceiling=self.cot_effect_ratio_ceiling,
                 ppl_on_full_response=self.ppl_on_full_response,
             )
             self.workers.append(worker)
@@ -1044,6 +1052,48 @@ class SGLangStudentRewardClient:
                     original_ppls.append(1.0 / original_avg_prob if original_avg_prob > 0 else float('inf'))
                 else:
                     original_ppls.append(float('nan'))
+            elif self.reward_mode == "cot_effect_ratio":
+                # CoT Effect Ratio 模式
+                # cot_effect(cot) = 1/ppl(Q,CoT,A) - 1/ppl(Q,A) = avg_prob(Q,CoT,A) - avg_prob(Q,A)
+                # R_cog = min(cot_effect(rewrite) / cot_effect(original), ceiling)
+                import math
+
+                # avg_prob = exp(mean_log_prob)
+                rewrite_avg_prob = math.exp(rewrite_mean)  # avg_prob(Q, rewrite_CoT, A)
+                no_cot_avg_prob = math.exp(no_cot_mean)     # avg_prob(Q, A) - baseline without CoT
+
+                # CoT effect for rewrite: how much does CoT help vs baseline
+                cot_effect_rewrite = rewrite_avg_prob - no_cot_avg_prob
+
+                if original_mean > -100:
+                    original_avg_prob = math.exp(original_mean)  # avg_prob(Q, original_CoT, A)
+
+                    # CoT effect for original: how much did original CoT help vs baseline
+                    cot_effect_original = original_avg_prob - no_cot_avg_prob
+
+                    # Handle edge case: if cot_effect_original is too small or non-positive
+                    if cot_effect_original < 1e-10:
+                        # Original CoT had little to no effect, return ceiling value (max reward)
+                        cot_effect_ratio = self.cot_effect_ratio_ceiling
+                        relative_improvement_rate = self.cot_effect_ratio_ceiling - 1.0
+                    else:
+                        # Normal case: compute the ratio
+                        # cot_effect_ratio > 1 means rewrite is more helpful than original
+                        cot_effect_ratio = cot_effect_rewrite / cot_effect_original
+                        # Apply ceiling
+                        cot_effect_ratio = min(cot_effect_ratio, self.cot_effect_ratio_ceiling)
+                        relative_improvement_rate = cot_effect_ratio - 1.0
+
+                    reward = cot_effect_ratio
+                    original_ppls.append(1.0 / original_avg_prob if original_avg_prob > 0 else float('inf'))
+                else:
+                    # No original CoT available, reward = 0
+                    reward = 0.0
+                    relative_improvement_rate = 0.0
+                    original_ppls.append(float('nan'))
+
+                rewrite_ppls.append(1.0 / rewrite_avg_prob if rewrite_avg_prob > 0 else float('inf'))
+                relative_improvement_rates.append(relative_improvement_rate)
             else:  # "logprob" 模式
                 # Logprob 模式: R_cog = answer_log_prob(rewrite) - answer_log_prob(original)
                 # 其中 answer_log_prob = mean(token_log_probs) + alpha_cog * min(token_log_probs)

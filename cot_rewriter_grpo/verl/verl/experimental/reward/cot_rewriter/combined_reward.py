@@ -229,12 +229,12 @@ class CombinedRewardComputer:
         too_long_threshold_high: float = 2.0,  # Upper threshold for too_long_penalty
         too_long_max_penalty: float = 0.5,  # Maximum penalty for too long outputs
         penalty_mode: str = "relative",  # "relative" or "absolute": How to apply penalties
-                                        # - "relative": penalty = coefficient * base_reward_range
+                                        # - "relative": penalty = coefficient * r_cog_range
                                         # - "absolute": penalty = coefficient (fixed value)
         use_tiered_reward: bool = True,  # Whether to use tiered reward for R_cog
         tier_step: float = 0.05,  # 区间大小：每个阶梯的 R_cog 范围
         tier_reward: float = 0.1,  # 每阶梯奖励值：第一阶梯得 tier_reward，第二阶梯得 2*tier_reward
-        reward_mode: str = "ppl",  # "ppl" or "logprob": Reward calculation mode
+        reward_mode: str = "ppl",  # "ppl", "ppl_ratio", "cot_effect_ratio", or "logprob": Reward calculation mode
                                    # - "ppl": R_cog = avg_prob(rewrite) = 1 / PPL(rewrite) [formula 2: absolute quality]
                                    #           Also logs formula 1: avg_prob(rewrite)/avg_prob(original) - 1 as observation
                                    #           where avg_prob = exp(mean_log_prob), PPL = 1/avg_prob
@@ -245,6 +245,7 @@ class CombinedRewardComputer:
         reward_only_use_logprob: bool = None,  # Deprecated: use use_reward_delta instead
                                                 # True = use absolute value (no delta), False = use delta
         ppl_ratio_ceiling: float = 0.95,  # Ceiling for ppl_ratio mode: R_cog = min(ppl_original/ppl_rewrite, ceiling)
+        cot_effect_ratio_ceiling: float = 0.95,  # Ceiling for cot_effect_ratio mode: R_cog = min(ratio, ceiling)
         # ========== FSF Reward Configuration ==========
         # FSF reward using build_cot_rewrite_from_sharegpt.py message format
         # GPU devices are auto-detected based on fsf_tensor_parallel_size
@@ -262,6 +263,9 @@ class CombinedRewardComputer:
         fsf_reward_mode: str = 'direct',  # FSF reward calculation mode: 'direct' or 'threshold'
                                          # - 'direct': R_logic = -rewrite_fsf (default)
                                          # - 'threshold': R_logic = -1 if fsf > 0 else 0
+        fsf_penalty_mode: str = 'absolute',  # FSF penalty mode: 'absolute' or 'relative'
+                                            # - 'absolute': fsf_reward_scale is used directly (default)
+                                            # - 'relative': fsf_reward_scale is multiplied by r_cog range
         save_prompts: bool = False,  # Whether to save request prompts for student_model and fsf_judge
         r_logic_repeat_n: int = 1,  # Number of times to repeat FSF calculation for R_logic (default: 1).
                                      # Higher values (e.g., 3) reduce LLM judge volatility by averaging multiple samples.
@@ -311,7 +315,7 @@ class CombinedRewardComputer:
                 rewrite_ratio < low, no penalty is applied.
             too_long_max_penalty: Maximum penalty for too long outputs (default: 0.5).
             penalty_mode: How to apply penalty values (default: "relative").
-                - "relative": penalty = coefficient * base_reward_range (scales with reward spread)
+                - "relative": penalty = coefficient * r_cog_range (scales with cognitive reward spread)
                 - "absolute": penalty = coefficient (fixed value, independent of rewards)
             use_tiered_reward: Whether to use tiered (step-wise) reward for R_cog (default: True).
             tier_step: 区间大小，每个阶梯的 R_cog 区间 (default: 0.05).
@@ -383,6 +387,7 @@ class CombinedRewardComputer:
         self.tier_reward = tier_reward
         self.reward_mode = reward_mode
         self.ppl_ratio_ceiling = ppl_ratio_ceiling
+        self.cot_effect_ratio_ceiling = cot_effect_ratio_ceiling
 
         # Handle reward_only_use_logprob deprecation and map to use_reward_delta
         # reward_only_use_logprob has INVERTED logic compared to use_reward_delta
@@ -416,6 +421,7 @@ class CombinedRewardComputer:
                 reward_mode=reward_mode,
                 ppl_on_full_response=ppl_on_full_response,
                 ppl_ratio_ceiling=ppl_ratio_ceiling,
+                cot_effect_ratio_ceiling=cot_effect_ratio_ceiling,
             )
         else:
             from verl.experimental.reward.cot_rewriter.student_reward import VLLMStudentRewardClient
@@ -429,6 +435,7 @@ class CombinedRewardComputer:
                 max_num_seqs=student_max_num_seqs,
                 reward_mode=reward_mode,
                 ppl_ratio_ceiling=ppl_ratio_ceiling,
+                cot_effect_ratio_ceiling=cot_effect_ratio_ceiling,
             )
 
         # ========== Initialize FSF Reward ==========
@@ -447,6 +454,7 @@ class CombinedRewardComputer:
         self.fsf_skip_group_on_parse_error = fsf_skip_group_on_parse_error  # Skip group on parse error
         self.save_fsf_dot_outputs = save_fsf_dot_outputs  # Whether to save raw DOT outputs
         self.fsf_reward_mode = fsf_reward_mode  # FSF reward calculation mode: 'direct' or 'threshold'
+        self.fsf_penalty_mode = fsf_penalty_mode  # FSF penalty mode: 'absolute' or 'relative'
         self.save_prompts = save_prompts  # Whether to save request prompts for debugging
         self.r_logic_repeat_n = r_logic_repeat_n  # Number of times to repeat FSF calculation for averaging
         self.fsf_judge = None  # Created on-demand in compute_reward
@@ -887,33 +895,49 @@ class CombinedRewardComputer:
             f"too_long_penalties (first 3): {too_long_penalties[:3]}"
         )
 
-        # Compute base rewards: R_base = R_cog + lambda_useful * R_useful + fsf_reward_scale * R_logic
-        # Note: R_useful is only included if use_useful_reward is True. fsf_reward_scale replaces lambda_logic.
+        # Compute r_cog_range (used for both FSF and length penalty scaling in relative mode)
+        r_cog_range = max(r_cog) - min(r_cog) if len(r_cog) > 1 else 1.0
+        r_cog_range = max(r_cog_range, 1e-6)  # Avoid zero or extremely small ranges
+        logger.info(
+            f"[R_COG_RANGE] r_cog_range={r_cog_range:.4f} (min={min(r_cog):.4f}, max={max(r_cog):.4f})"
+        )
+
+        # Compute FSF reward scale based on fsf_penalty_mode
+        # If fsf_penalty_mode == "relative", scale fsf_reward_scale by r_cog range
+        if self.fsf_penalty_mode == "relative":
+            fsf_scale = self.fsf_reward_scale * r_cog_range
+            logger.info(
+                f"[FSF_PENALTY_MODE] relative, fsf_reward_scale={self.fsf_reward_scale:.4f}, "
+                f"actual_fsf_scale={fsf_scale:.4f}"
+            )
+        else:  # fsf_penalty_mode == "absolute" (default)
+            fsf_scale = self.fsf_reward_scale
+            logger.info(
+                f"[FSF_PENALTY_MODE] absolute, fsf_reward_scale={self.fsf_reward_scale:.4f}"
+            )
+
+        # Compute base rewards: R_base = R_cog + lambda_useful * R_useful + fsf_scale * R_logic
+        # Note: R_useful is only included if use_useful_reward is True. fsf_scale is computed based on fsf_penalty_mode.
         if self.use_useful_reward:
-            base_rewards = [c + self.lambda_useful * u + self.fsf_reward_scale * l
+            base_rewards = [c + self.lambda_useful * u + fsf_scale * l
                            for c, u, l in zip(r_cog, r_useful, r_logic)]
         else:
-            base_rewards = [c + self.fsf_reward_scale * l
+            base_rewards = [c + fsf_scale * l
                            for c, l in zip(r_cog, r_logic)]
 
         # Determine penalty scaling factor based on penalty_mode
         # DEBUG: Log penalty_mode value to track unexpected "s" value
         logger.info(f"[PENALTY_MODE_DEBUG] self.penalty_mode={repr(self.penalty_mode)}, type={type(self.penalty_mode)}")
         if self.penalty_mode == "relative":
-            # Compute range of base_rewards for relative penalty scaling
-            # The range is max - min, representing the spread of rewards within the group
-            base_reward_range = max(base_rewards) - min(base_rewards) if len(base_rewards) > 1 else 1.0
-            # Avoid zero or extremely small ranges
-            base_reward_range = max(base_reward_range, 1e-6)
-
+            # Use r_cog_range for relative penalty scaling
+            penalty_scale = r_cog_range
             logger.info(
                 f"[PENALTY_MODE] relative, batch_size={batch_size}, "
-                f"base_reward_range={base_reward_range:.4f} (min={min(base_rewards):.4f}, max={max(base_rewards):.4f})"
+                f"penalty_scale=r_cog_range={penalty_scale:.4f}"
             )
         else:  # penalty_mode == "absolute"
             # Use absolute penalties (coefficient is the actual penalty value)
-            base_reward_range = 1.0  # No scaling
-
+            penalty_scale = 1.0  # No scaling
             logger.info(
                 f"[PENALTY_MODE] absolute, batch_size={batch_size}, "
                 f"penalties applied as fixed values (no scaling)"
@@ -925,20 +949,20 @@ class CombinedRewardComputer:
         too_short_penalties_actual = [0.0] * batch_size
         too_long_penalties_actual = [0.0] * batch_size
         for i in range(batch_size):
-            too_short_penalties_actual[i] = -too_short_penalty_coeffs[i] * base_reward_range
+            too_short_penalties_actual[i] = -too_short_penalty_coeffs[i] * penalty_scale
             too_short_penalties[i] = too_short_penalty_coeffs[i]  # Log coefficient
             if too_short_penalty_coeffs[i] != 0:
                 logger.info(
                     f"[TOO_SHORT_PENALTY] Sample {i}: "
-                    f"penalty_coeff={too_short_penalty_coeffs[i]:.4f} * {base_reward_range:.4f} = {too_short_penalties_actual[i]:.4f} ({self.penalty_mode})"
+                    f"penalty_coeff={too_short_penalty_coeffs[i]:.4f} * {penalty_scale:.4f} = {too_short_penalties_actual[i]:.4f} ({self.penalty_mode})"
                 )
 
-            too_long_penalties_actual[i] = -too_long_penalty_coeffs[i] * base_reward_range
+            too_long_penalties_actual[i] = -too_long_penalty_coeffs[i] * penalty_scale
             too_long_penalties[i] = too_long_penalty_coeffs[i]  # Log coefficient
             if too_long_penalty_coeffs[i] != 0:
                 logger.info(
                     f"[TOO_LONG_PENALTY] Sample {i}: "
-                    f"penalty_coeff={too_long_penalty_coeffs[i]:.4f} * {base_reward_range:.4f} = {too_long_penalties_actual[i]:.4f} ({self.penalty_mode})"
+                    f"penalty_coeff={too_long_penalty_coeffs[i]:.4f} * {penalty_scale:.4f} = {too_long_penalties_actual[i]:.4f} ({self.penalty_mode})"
                 )
 
         # ========== Compute Repeat Penalty ==========
@@ -963,10 +987,7 @@ class CombinedRewardComputer:
                 # Apply penalty if similarity exceeds threshold
                 if similarity > self.similarity_threshold:
                     repeat_penalty_coeffs[i] = self.similarity_penalty
-                    if self.penalty_mode == "relative":
-                        repeat_penalties_actual[i] = -self.similarity_penalty * base_reward_range
-                    else:  # absolute
-                        repeat_penalties_actual[i] = -self.similarity_penalty
+                    repeat_penalties_actual[i] = -self.similarity_penalty * penalty_scale
 
                     if i < 3:  # Log first few samples
                         logger.info(
@@ -997,7 +1018,8 @@ class CombinedRewardComputer:
         # Store in extra_info for external use
         extra_info_penalty_coeffs = {
             "base_rewards": base_rewards,
-            "base_reward_range": base_reward_range,
+            "r_cog_range": r_cog_range,
+            "penalty_scale": penalty_scale,
             "penalty_mode": self.penalty_mode,
             "too_short_penalty_coeffs": too_short_penalty_coeffs,
             "too_long_penalty_coeffs": too_long_penalty_coeffs,
@@ -1059,9 +1081,10 @@ class CombinedRewardComputer:
                 "similarities": similarities,  # Similarity values between original and rewrite
                 "length_ratios": length_ratios,  # For DAPO filter_groups
                 # Penalty info for external use (format/truncation penalties)
-                "penalty_mode": self.penalty_mode,  # NEW: "relative" or "absolute"
+                "penalty_mode": self.penalty_mode,  # "relative" or "absolute"
                 "base_rewards": base_rewards,
-                "base_reward_range": base_reward_range,
+                "r_cog_range": r_cog_range,  # Range of cognitive rewards
+                "penalty_scale": penalty_scale,  # Actual scaling factor used for penalties
                 # === DEBUG: Pre-computed FSF from training data ===
                 "pre_computed_original_fsfs": original_fsfs,  # Pre-computed FSF for original CoTs (from training data)
                 # === FSF DOT outputs (for saving to rollout_data/val_data) ===
@@ -1189,8 +1212,9 @@ def compute_cot_rewriter_reward(
     use_tiered_reward: bool = True,  # Whether to use tiered (step-wise) reward for R_cog
     tier_step: float = 0.05,  # 区间大小：每个阶梯的 R_cog 范围
     tier_reward: float = 0.1,  # 每阶梯奖励值：第一阶梯得 tier_reward，第二阶梯得 2*tier_reward
-    reward_mode: str = "ppl",  # "ppl", "ppl_ratio", or "logprob": Reward calculation mode
-    ppl_ratio_ceiling: float = 0.95,  # Ceiling for ppl_ratio mode: R_cog = min(ppl_original/ppl_rewrite, ceiling)
+    reward_mode: str = "ppl",  # "ppl", "ppl_ratio", "cot_effect_ratio", or "logprob": Reward calculation mode
+    ppl_ratio_ceiling: float = 0.95,  # Ceiling for ppl_ratio mode: R_cog = min(ratio, ceiling)
+    cot_effect_ratio_ceiling: float = 0.95,  # Ceiling for cot_effect_ratio mode: R_cog = min(ratio, ceiling)
     use_reward_delta: bool = True,  # If True (default), compute delta (rewrite - original).
                                        # If False, use absolute value.
                                        # Deprecated alias: reward_only_use_logprob (inverted logic!)
@@ -1209,6 +1233,9 @@ def compute_cot_rewriter_reward(
     fsf_skip_group_on_parse_error: bool = True,  # Skip entire group on parse error
     save_fsf_dot_outputs: bool = False,  # Whether to save raw FSF DOT outputs to rollout_data
     fsf_reward_mode: str = 'direct',  # FSF reward mode: 'direct' or 'threshold'
+    fsf_penalty_mode: str = 'absolute',  # FSF penalty mode: 'absolute' or 'relative'
+                                      # - 'absolute': fsf_reward_scale is used directly (default)
+                                      # - 'relative': fsf_reward_scale is multiplied by r_cog range
     save_prompts: bool = False,  # Whether to save request prompts for student_model
     r_logic_repeat_n: int = 1,  # Number of times to repeat FSF calculation for R_logic (default: 1).
                                 # Higher values (e.g., 3) reduce LLM judge volatility by averaging multiple samples.
@@ -1422,6 +1449,7 @@ def compute_cot_rewriter_reward(
         tier_reward=tier_reward,
         reward_mode=reward_mode,
         ppl_ratio_ceiling=ppl_ratio_ceiling,
+        cot_effect_ratio_ceiling=cot_effect_ratio_ceiling,
         use_reward_delta=use_reward_delta,
         reward_only_use_logprob=reward_only_use_logprob,  # For backward compatibility
         # ========== FSF Parameters ==========
@@ -1437,6 +1465,7 @@ def compute_cot_rewriter_reward(
         fsf_skip_group_on_parse_error=fsf_skip_group_on_parse_error,
         save_fsf_dot_outputs=save_fsf_dot_outputs,
         fsf_reward_mode=fsf_reward_mode,
+        fsf_penalty_mode=fsf_penalty_mode,
         save_prompts=save_prompts,
         r_logic_repeat_n=r_logic_repeat_n,
         # ========== Repeat Penalty Parameters ==========
@@ -1477,7 +1506,7 @@ def compute_cot_rewriter_reward(
     too_long_penalty_coeffs = result["extra_info"].get("too_long_penalty_coeffs", [0.0] * batch_size)
     length_ratios = result["extra_info"].get("length_ratios", [0.0] * batch_size)
     base_rewards = result["extra_info"].get("base_rewards", [0.0] * batch_size)
-    base_reward_range = result["extra_info"].get("base_reward_range", 1.0)
+    penalty_scale = result["extra_info"].get("penalty_scale", 1.0)
 
     # Apply penalties based on penalty_mode
     # 1. Truncation penalty: if rollout result was truncated (finish_reason == "length")
@@ -1491,11 +1520,11 @@ def compute_cot_rewriter_reward(
     truncated_flags = [0] * batch_size  # Track truncated flags for DAPO filter_groups
 
     for i in range(batch_size):
-        # Truncation penalty: penalty = truncation_penalty_coeff * base_reward_range (if relative) or truncation_penalty_coeff (if absolute)
+        # Truncation penalty: penalty = truncation_penalty_coeff * penalty_scale (if relative) or truncation_penalty_coeff (if absolute)
         if i < len(finish_reasons) and finish_reasons[i] == "length":
             if penalty_mode_from_result == "relative":
-                trunc_penalty = -truncation_penalty * base_reward_range
-                penalty_log_msg = f"penalty={truncation_penalty} * {base_reward_range:.4f} = {trunc_penalty:.4f} (relative)"
+                trunc_penalty = -truncation_penalty * penalty_scale
+                penalty_log_msg = f"penalty={truncation_penalty} * {penalty_scale:.4f} = {trunc_penalty:.4f} (relative)"
             else:  # absolute
                 trunc_penalty = -truncation_penalty
                 penalty_log_msg = f"penalty={truncation_penalty:.4f} (absolute)"
@@ -1507,12 +1536,12 @@ def compute_cot_rewriter_reward(
                 f"{penalty_log_msg}"
             )
 
-        # Format penalty: penalty = format_penalty_coeff * base_reward_range (if relative) or format_penalty_coeff (if absolute)
+        # Format penalty: penalty = format_penalty_coeff * penalty_scale (if relative) or format_penalty_coeff (if absolute)
         # Note: format_valid_flags is already computed above
         if format_valid_flags[i] == 0:
             if penalty_mode_from_result == "relative":
-                fmt_penalty = -format_penalty * base_reward_range
-                penalty_log_msg = f"penalty={format_penalty} * {base_reward_range:.4f} = {fmt_penalty:.4f} (relative)"
+                fmt_penalty = -format_penalty * penalty_scale
+                penalty_log_msg = f"penalty={format_penalty} * {penalty_scale:.4f} = {fmt_penalty:.4f} (relative)"
             else:  # absolute
                 fmt_penalty = -format_penalty
                 penalty_log_msg = f"penalty={format_penalty:.4f} (absolute)"

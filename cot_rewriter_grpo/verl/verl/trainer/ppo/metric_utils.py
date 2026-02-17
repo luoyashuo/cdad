@@ -392,8 +392,16 @@ def process_validation_metrics(
     for data_source, prompt2var2vals in data_src2prompt2var2vals.items():
         for prompt, var2vals in prompt2var2vals.items():
             for var_name, var_vals in var2vals.items():
-                if isinstance(var_vals[0], str):
+                # Skip non-numeric types: strings, lists containing strings, None, etc.
+                first_val = var_vals[0]
+                if first_val is None:
                     continue
+                if isinstance(first_val, str):
+                    continue
+                if isinstance(first_val, list):
+                    # List of strings or mixed content - skip
+                    if len(first_val) > 0 and isinstance(first_val[0], str):
+                        continue
 
                 metric = {}
                 n_resps = len(var_vals)
