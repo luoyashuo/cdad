@@ -94,16 +94,13 @@ def extract_rewrite_reasoning(text: str) -> Tuple[str, bool, str]:
         # 增加一些发现的Format Error
         mention_rewrite_error = False
         content_prefix = content.strip()[:60].lower()
-        if content_prefix.startswith("refin"):
-            mention_rewrite_error = True
-            error_reason = "mention_refine_in_reasoning"
-        elif "rewrit" in content_prefix:
+        if "rewrit" in content_prefix:
             mention_rewrite_error = True
             error_reason = "mention_rewrite_in_reasoning"
-        elif "reasoning process" in content_prefix:
+        elif "process" in content_prefix or "reasoning" in content_prefix:
             mention_rewrite_error = True
             error_reason = "mention_reasoning_process_in_reasoning"
-        elif "bridge" in content_prefix or "clari" in content_prefix or 'deriv' in content_prefix:
+        elif "bridge" in content_prefix or "clari" in content_prefix or 'deriv' in content_prefix or "refin" in content_prefix:
             mention_rewrite_error = True
             error_reason = "mention_bridge_or_clari_in_reasoning"
         if not has_nested and not mention_rewrite_error:

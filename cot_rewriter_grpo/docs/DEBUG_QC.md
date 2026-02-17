@@ -11,4 +11,4 @@ source /data/luoys/projects/cdad/cot_rewriter_grpo/.venv/bin/activate
 # LOG
 /data/luoys/projects/cdad/cot_rewriter_grpo/logs/grpo/llama3_8b_grpo_8x80g.log
 # 问题
-我想要增加一些format error的控制，应该修改哪里？
+我想知道fsf_judge_model是否可以开启presence_penalty=1.0这个参数

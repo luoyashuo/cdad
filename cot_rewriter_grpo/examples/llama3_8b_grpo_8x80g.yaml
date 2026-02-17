@@ -72,7 +72,7 @@ actor_rollout_ref:
     ppo_micro_batch_size_per_gpu: 1
     use_kl_in_reward: false
     use_kl_loss: true
-    kl_loss_coef: 0.01
+    kl_loss_coef: 0.001
     kl_loss_type: low_var_kl
     entropy_from_logits_with_chunking: true
     fsdp_config:
@@ -210,7 +210,7 @@ custom_reward_function:
                                       # - ppl_ratio: R_cog = min(PPL(original) / PPL(rewrite), ceiling)
                                       # - logprob: R_cog = answer_log_prob(rewrite) - answer_log_prob(original)
                                       # - cot_effect_ratio: R_cog = min(cot_effect(rewrite_cot) / cot_effect(original_cot), ceiling)
-    cot_effect_ratio_ceiling: 0.9
+    cot_effect_ratio_ceiling: 0.95 # 80 iter后有机会达到 0.9 因此调大些
     ppl_ratio_ceiling: 0.98          # PPL比率天花板，防止奖励过大 (默认0.95)
     ppl_on_full_response: false       # 是否对整个 response 计算 PPL (Q+CoT+A)
                                         # true: 对整个 response 计算 PPL

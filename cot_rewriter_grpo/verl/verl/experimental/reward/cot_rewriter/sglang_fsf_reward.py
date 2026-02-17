@@ -311,6 +311,7 @@ Generate complete Graphviz DOT code in dot blocks."""
                         "temperature": self.temperature,
                         "top_k": self.top_k,
                         "top_p": self.top_p,
+                        "presence_penalty": 1.0,
                     },
                 )
 
