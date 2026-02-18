@@ -1445,7 +1445,7 @@ def step_compute_cot_effect(
     采用类似 RayRewriteClient 的异步并行方式，将所有任务分配给多个 Ray actors 处理，
     以提高 GPU 利用率。
     
-    支持断点续传（使用唯一 ID）
+    支持断点续传（使用唯一 ID），支持增量保存
     """
     if config.skip_ppl_compute:
         print("\n  [Skip] CoT Effect computation skipped")
@@ -1478,6 +1478,7 @@ def step_compute_cot_effect(
     print(f"  Total samples: {len(samples)}")
     print(f"  Already processed: {len(processed_ids)}")
     print(f"  Remaining: {len(samples_to_process)}")
+    print(f"  Process batch size: {config.process_batch_size}")
 
     if not samples_to_process:
         print("  No samples to process.")
@@ -1536,6 +1537,16 @@ def step_compute_cot_effect(
     # SGLangStudentRewardClient.compute_cognitive_reward_batch 内部会将 batch 分发给所有 actors
     BATCH_SIZE = 64  # 每批处理 64 个 rewrite，确保所有 actors 都有足够的工作
     
+    # 增量保存相关变量
+    is_resuming = len(processed_ids) > 0  # 首次写入后，后续都应该是追加模式
+    completed_ids = list(processed_ids)  # 已完成的样本ID列表
+    write_batch = []  # 待写入的样本缓冲区
+    sample_task_counts = {s['id']: 0 for s in samples_to_process}  # 每个样本已完成的任务数
+    sample_total_tasks = {}  # 每个样本的总任务数
+    for s in samples_to_process:
+        valid_rewrites = sum(1 for r in s.get('rewrite_results', []) if r.get('rewrite_reasoning'))
+        sample_total_tasks[s['id']] = valid_rewrites
+    
     completed_tasks = 0
     failed_tasks = 0
     
@@ -1566,6 +1577,7 @@ def step_compute_cot_effect(
                 for i, task in enumerate(batch_tasks):
                     sample = task['sample']
                     r_idx = task['r_idx']
+                    sample_id = sample.get('id')
                     
                     if i < len(cot_effect_ratios):
                         ratio = cot_effect_ratios[i]
@@ -1579,6 +1591,25 @@ def step_compute_cot_effect(
                         sample['rewrite_results'][r_idx]['ppl_relative_improvement'] = -float('inf')
                         failed_tasks += 1
                     
+                    # 更新样本任务计数
+                    sample_task_counts[sample_id] += 1
+                    
+                    # 检查样本是否完成（所有 rewrite 都处理完）
+                    if sample_task_counts[sample_id] == sample_total_tasks[sample_id]:
+                        # 处理该样本中没有有效 rewrite 的 result（标记为默认值）
+                        for result in sample.get('rewrite_results', []):
+                            if not result.get('rewrite_reasoning'):
+                                result['cot_effect_ratio'] = 0.0
+                                result['ppl_relative_improvement'] = -float('inf')
+                            elif 'cot_effect_ratio' not in result:
+                                # 有 rewrite_reasoning 但没有计算结果
+                                result['cot_effect_ratio'] = 0.0
+                                result['ppl_relative_improvement'] = -float('inf')
+                        
+                        write_batch.append(sample_id)
+                        completed_ids.append(sample_id)
+                        id_to_processed_sample[sample_id] = sample
+                    
                     pbar.update(1)
                     
             except Exception as e:
@@ -1587,43 +1618,51 @@ def step_compute_cot_effect(
                 for task in batch_tasks:
                     sample = task['sample']
                     r_idx = task['r_idx']
+                    sample_id = sample.get('id')
                     sample['rewrite_results'][r_idx]['cot_effect_ratio'] = 0.0
                     sample['rewrite_results'][r_idx]['ppl_relative_improvement'] = -float('inf')
                     failed_tasks += 1
+                    
+                    # 更新样本任务计数
+                    sample_task_counts[sample_id] += 1
+                    
+                    # 检查样本是否完成
+                    if sample_task_counts[sample_id] == sample_total_tasks[sample_id]:
+                        for result in sample.get('rewrite_results', []):
+                            if not result.get('rewrite_reasoning'):
+                                result['cot_effect_ratio'] = 0.0
+                                result['ppl_relative_improvement'] = -float('inf')
+                            elif 'cot_effect_ratio' not in result:
+                                result['cot_effect_ratio'] = 0.0
+                                result['ppl_relative_improvement'] = -float('inf')
+                        
+                        write_batch.append(sample_id)
+                        completed_ids.append(sample_id)
+                        id_to_processed_sample[sample_id] = sample
+                    
                     pbar.update(1)
             
             # 更新进度条
             pbar.set_postfix({
                 'completed': f'{completed_tasks}/{total_tasks}',
                 'failed': failed_tasks,
+                'saved': len(completed_ids),
             })
-
-    # 处理没有有效 rewrite 的样本（标记为默认值）
-    for sample in samples_to_process:
-        sample_id = sample.get('id')
-        has_valid_rewrite = False
-        
-        for r_idx, result in enumerate(sample.get('rewrite_results', [])):
-            if result.get('rewrite_reasoning'):
-                has_valid_rewrite = True
-                # 如果之前没有设置 cot_effect_ratio，设置为默认值
-                if 'cot_effect_ratio' not in result:
-                    result['cot_effect_ratio'] = 0.0
-                    result['ppl_relative_improvement'] = -float('inf')
-            else:
-                result['cot_effect_ratio'] = 0.0
-                result['ppl_relative_improvement'] = -float('inf')
-        
-        # 保存到映射
-        id_to_processed_sample[sample_id] = sample
-
-    # 批量保存所有处理完的样本
-    print(f"\n  Saving {len(samples_to_process)} samples to checkpoint...")
-    save_jsonl(samples_to_process, ckpt_path, append=True)
-
-    # 更新进度
-    with open(progress_path, 'w') as f:
-        json.dump({'processed_ids': list(id_to_processed_sample.keys())}, f)
+            
+            # 增量保存：当达到 batch size 或所有任务完成时
+            if len(write_batch) >= config.process_batch_size or completed_tasks + failed_tasks == total_tasks:
+                if write_batch:
+                    batch_write_results = [id_to_processed_sample[sid] for sid in write_batch]
+                    save_jsonl(batch_write_results, ckpt_path, append=is_resuming)
+                    is_resuming = True  # 首次写入后，后续都应该是追加模式
+                    
+                    # 更新进度
+                    if progress_path:
+                        with open(progress_path, 'w') as f:
+                            json.dump({'completed_ids': completed_ids}, f)
+                    
+                    pbar.write(f"  Saved batch of {len(write_batch)} samples ({len(completed_ids)}/{len(samples_to_process) + len(processed_ids)} completed)")
+                    write_batch.clear()
 
     # 输出 CoT Effect Ratio 分布统计
     if all_cot_effect_ratios:
@@ -1672,7 +1711,7 @@ def step_compute_fsf(
     采用类似 RayRewriteClient 的异步并行方式，将所有任务分配给多个 Ray actors 处理，
     以提高 GPU 利用率。每个 actor 独立处理分配给它的所有 FSF 计算任务。
     
-    支持断点续传（使用唯一 ID）
+    支持断点续传（使用唯一 ID），支持增量保存
     """
     if config.skip_fsf_compute:
         print("\n  [Skip] FSF computation skipped")
@@ -1704,6 +1743,7 @@ def step_compute_fsf(
     print(f"  Total samples: {len(samples)}")
     print(f"  Already processed: {len(processed_ids)}")
     print(f"  Remaining: {len(samples_to_process)}")
+    print(f"  Process batch size: {config.process_batch_size}")
 
     if not samples_to_process:
         print("  No samples to process.")
@@ -1753,58 +1793,113 @@ def step_compute_fsf(
         fsf_client.shutdown()
         return samples_to_process
 
-    # 将任务分配给各个 actors (round-robin)
-    actor_tasks = [[] for _ in range(num_actors)]
-    for i, task in enumerate(all_tasks):
-        actor_tasks[i % num_actors].append(task)
-
-    # 统计每个 actor 的任务数
-    for i, tasks in enumerate(actor_tasks):
-        print(f"    Actor {i}: {len(tasks)} tasks")
-
-    # 使用异步方式提交任务到所有 actors
-    # 每个 actor 处理其分配到的所有任务
-    pending_refs = []
+    # 将任务按 micro_batch_size 分成小批次，以便实时获取结果
+    # 使用类似 rewrite_model 的异步流式处理方式
+    MICRO_BATCH_SIZE = config.sglang_micro_batch_size * 4  # 每个小批次的任务数
     
-    # 提交所有任务到对应的 actors
-    for actor_idx, tasks in enumerate(actor_tasks):
-        if not tasks:
-            continue
-            
-        # 提取这批任务的输入
-        questions = [t['question'] for t in tasks]
-        original_cots = [t['original_thought'] for t in tasks]
-        rewrite_cots = [t['rewrite_reasoning'] for t in tasks]
-        
-        # 调用 actor 的 compute_logic_reward_batch 方法
-        # 注意：这里我们直接使用 actor，但 compute_logic_reward_batch 是客户端方法
-        # 所以我们需要调用 compute_fsf_batch 两次（一次 original，一次 rewrite）
-        ref_original = fsf_client.workers[actor_idx].compute_fsf_batch.remote(
-            original_cots,
-            config.sglang_micro_batch_size,
-        )
-        ref_rewrite = fsf_client.workers[actor_idx].compute_fsf_batch.remote(
-            rewrite_cots,
-            config.sglang_micro_batch_size,
-        )
-        pending_refs.append((actor_idx, ref_original, ref_rewrite, tasks))
+    # 准备所有小批次任务
+    all_batches = []
+    for i in range(0, len(all_tasks), MICRO_BATCH_SIZE):
+        batch = all_tasks[i:i + MICRO_BATCH_SIZE]
+        all_batches.append(batch)
+    
+    print(f"  Total batches to process: {len(all_batches)} (batch size: {MICRO_BATCH_SIZE})")
 
+    # 增量保存相关变量
+    is_resuming = len(processed_ids) > 0  # 首次写入后，后续都应该是追加模式
+    completed_ids = list(processed_ids)  # 已完成的样本ID列表
+    write_batch = []  # 待写入的样本缓冲区
+    sample_task_counts = {s['id']: 0 for s in samples_to_process}  # 每个样本已完成的任务数
+    sample_total_tasks = {}  # 每个样本的总任务数
+    for s in samples_to_process:
+        valid_rewrites = sum(1 for r in s.get('rewrite_results', []) if r.get('rewrite_reasoning') and (s.get('original_thought') or s.get('thought', '')))
+        sample_total_tasks[s['id']] = valid_rewrites
+    
     # 收集结果
     completed_tasks = 0
     failed_tasks = 0
     results_by_sample = {}  # sample_id -> {r_idx: (original_fsf, rewrite_fsf)}
-    samples_to_save = []  # 待保存的样本缓冲区
     
-    # 使用 position=0, leave=True 避免被 Ray 日志干扰
-    with tqdm(total=total_tasks, desc="FSF Compute", unit="task", dynamic_ncols=True, position=0, leave=True) as pbar:
-        for actor_idx, ref_original, ref_rewrite, tasks in pending_refs:
-            try:
-                # 获取该 actor 的结果
-                original_fsfs = ray.get(ref_original)
-                rewrite_fsfs = ray.get(ref_rewrite)
+    # 使用异步方式提交和处理任务
+    batch_idx = 0
+    max_concurrent_batches = num_actors * 2  # 同时处理的最大批次数
+    
+    # 使用 ray.wait 实现真正的异步处理
+    # 跟踪每个批次的状态: [ref_original, ref_rewrite, batch_tasks, original_fsfs, rewrite_fsfs]
+    batch_states = {}  # batch_idx -> [ref_original, ref_rewrite, batch_tasks, original_fsfs, rewrite_fsfs]
+    
+    with tqdm(total=total_tasks, desc="FSF Compute", unit="task", dynamic_ncols=True) as pbar:
+        # 初始提交第一批任务
+        while batch_idx < min(max_concurrent_batches, len(all_batches)):
+            batch_tasks = all_batches[batch_idx]
+            actor_idx = batch_idx % num_actors
+            
+            # 提取这批任务的输入
+            original_cots = [t['original_thought'] for t in batch_tasks]
+            rewrite_cots = [t['rewrite_reasoning'] for t in batch_tasks]
+            
+            # 调用 actor 的 compute_fsf_batch
+            ref_original = fsf_client.workers[actor_idx].compute_fsf_batch.remote(
+                original_cots, config.sglang_micro_batch_size)
+            ref_rewrite = fsf_client.workers[actor_idx].compute_fsf_batch.remote(
+                rewrite_cots, config.sglang_micro_batch_size)
+            
+            batch_states[batch_idx] = [ref_original, ref_rewrite, batch_tasks, None, None]
+            batch_idx += 1
+        
+        # 处理结果并提交新任务
+        while batch_states:
+            # 提取所有 ObjectRef 用于 ray.wait
+            all_refs = []
+            for state in batch_states.values():
+                if state[3] is None:  # original not done
+                    all_refs.append(state[0])
+                if state[4] is None:  # rewrite not done
+                    all_refs.append(state[1])
+            
+            if not all_refs:
+                break
+            
+            # 等待任意一个任务完成
+            ready_refs, _ = ray.wait(all_refs, num_returns=1, timeout=0.1)
+            
+            if not ready_refs:
+                continue
+            
+            ready_ref = ready_refs[0]
+            
+            # 找到完成的批次并更新状态
+            completed_batches = []
+            for bidx, state in list(batch_states.items()):
+                ref_original, ref_rewrite, batch_tasks, orig_fsfs, rew_fsfs = state
                 
-                # 分发结果回样本
-                for task_idx, task in enumerate(tasks):
+                if ready_ref == ref_original:
+                    try:
+                        state[3] = ray.get(ref_original)  # original done
+                    except Exception:
+                        state[3] = []  # mark as failed
+                elif ready_ref == ref_rewrite:
+                    try:
+                        state[4] = ray.get(ref_rewrite)  # rewrite done
+                    except Exception:
+                        state[4] = []  # mark as failed
+                
+                # 检查该批次是否两个结果都完成了
+                if state[3] is not None and state[4] is not None:
+                    completed_batches.append(bidx)
+            
+            # 处理完成的批次
+            for bidx in completed_batches:
+                state = batch_states.pop(bidx)
+                _, _, batch_tasks, original_fsfs, rewrite_fsfs = state
+                
+                if original_fsfs is None:
+                    original_fsfs = []
+                if rewrite_fsfs is None:
+                    rewrite_fsfs = []
+                
+                # 处理该批次的结果
+                for task_idx, task in enumerate(batch_tasks):
                     sample = task['sample']
                     r_idx = task['r_idx']
                     sample_id = sample.get('id')
@@ -1826,52 +1921,95 @@ def step_compute_fsf(
                     else:
                         failed_tasks += 1
                     
-                    pbar.update(1)
+                    # 更新样本任务计数
+                    sample_task_counts[sample_id] += 1
                     
-            except Exception as e:
-                print(f"\n  [Error] Actor {actor_idx} failed: {e}")
-                # 标记这批任务为失败
-                for task in tasks:
-                    sample = task['sample']
-                    r_idx = task['r_idx']
-                    sample_id = sample.get('id')
-                    if sample_id not in results_by_sample:
-                        results_by_sample[sample_id] = {}
-                    results_by_sample[sample_id][r_idx] = (None, None)
-                    failed_tasks += 1
+                    # 检查样本是否完成
+                    if sample_task_counts[sample_id] == sample_total_tasks[sample_id]:
+                        results_for_sample = results_by_sample.get(sample_id, {})
+                        for r_idx_result, result in enumerate(sample.get('rewrite_results', [])):
+                            if r_idx_result in results_for_sample:
+                                orig_fsf, rew_fsf = results_for_sample[r_idx_result]
+                                result['original_fsf'] = orig_fsf
+                                result['fsf'] = rew_fsf
+                            else:
+                                result['original_fsf'] = None
+                                result['fsf'] = None
+                        
+                        write_batch.append(sample_id)
+                        completed_ids.append(sample_id)
+                        id_to_processed_sample[sample_id] = sample
+                    
                     pbar.update(1)
-
-            # 更新进度条
-            pbar.set_postfix({
-                'completed': f'{completed_tasks}/{total_tasks}',
-                'failed': failed_tasks,
-            })
-
-    # 将结果写回样本
+                
+                # 更新进度条
+                pbar.set_postfix({
+                    'completed': f'{completed_tasks}/{total_tasks}',
+                    'failed': failed_tasks,
+                    'saved': len(completed_ids),
+                })
+                
+                # 增量保存：当达到 batch size 时立即保存
+                while len(write_batch) >= config.process_batch_size:
+                    batch_to_save = write_batch[:config.process_batch_size]
+                    batch_write_results = [id_to_processed_sample[sid] for sid in batch_to_save]
+                    save_jsonl(batch_write_results, ckpt_path, append=is_resuming)
+                    is_resuming = True
+                    
+                    # 更新进度
+                    if progress_path:
+                        with open(progress_path, 'w') as f:
+                            json.dump({'completed_ids': completed_ids}, f)
+                    
+                    pbar.write(f"  Saved batch of {len(batch_to_save)} samples ({len(completed_ids)}/{len(samples_to_process) + len(processed_ids)} completed)")
+                    write_batch = write_batch[config.process_batch_size:]
+                
+                # 提交新任务
+                if batch_idx < len(all_batches):
+                    new_batch_tasks = all_batches[batch_idx]
+                    actor_idx = batch_idx % num_actors
+                    
+                    original_cots = [t['original_thought'] for t in new_batch_tasks]
+                    rewrite_cots = [t['rewrite_reasoning'] for t in new_batch_tasks]
+                    
+                    ref_original = fsf_client.workers[actor_idx].compute_fsf_batch.remote(
+                        original_cots, config.sglang_micro_batch_size)
+                    ref_rewrite = fsf_client.workers[actor_idx].compute_fsf_batch.remote(
+                        rewrite_cots, config.sglang_micro_batch_size)
+                    
+                    batch_states[batch_idx] = [ref_original, ref_rewrite, new_batch_tasks, None, None]
+                    batch_idx += 1
+    
+    # 处理剩余未保存的样本（包括没有有效 rewrite 的样本）
     for sample in samples_to_process:
         sample_id = sample.get('id')
-        results_for_sample = results_by_sample.get(sample_id, {})
-        
-        for r_idx, result in enumerate(sample.get('rewrite_results', [])):
-            if r_idx in results_for_sample:
-                original_fsf, rewrite_fsf = results_for_sample[r_idx]
-                result['original_fsf'] = original_fsf
-                result['fsf'] = rewrite_fsf
-            else:
-                # 没有计算结果（可能没有 rewrite_reasoning）
-                result['original_fsf'] = None
-                result['fsf'] = None
-        
-        # 保存到映射
-        id_to_processed_sample[sample_id] = sample
+        if sample_id not in id_to_processed_sample:
+            # 将结果写回样本
+            results_for_sample = results_by_sample.get(sample_id, {})
+            for r_idx, result in enumerate(sample.get('rewrite_results', [])):
+                if r_idx in results_for_sample:
+                    original_fsf, rewrite_fsf = results_for_sample[r_idx]
+                    result['original_fsf'] = original_fsf
+                    result['fsf'] = rewrite_fsf
+                else:
+                    result['original_fsf'] = None
+                    result['fsf'] = None
+            
+            write_batch.append(sample_id)
+            completed_ids.append(sample_id)
+            id_to_processed_sample[sample_id] = sample
 
-    # 批量保存所有处理完的样本
-    print(f"\n  Saving {len(samples_to_process)} samples to checkpoint...")
-    save_jsonl(samples_to_process, ckpt_path, append=True)
-
-    # 更新进度
-    with open(progress_path, 'w') as f:
-        json.dump({'processed_ids': list(id_to_processed_sample.keys())}, f)
+    # 保存剩余的样本
+    if write_batch:
+        batch_write_results = [id_to_processed_sample[sid] for sid in write_batch]
+        save_jsonl(batch_write_results, ckpt_path, append=is_resuming)
+        
+        # 更新进度
+        if progress_path:
+            with open(progress_path, 'w') as f:
+                json.dump({'completed_ids': completed_ids}, f)
+        
+        print(f"  Saved final batch of {len(write_batch)} samples ({len(completed_ids)}/{len(samples_to_process) + len(processed_ids)} completed)")
 
     # 输出 FSF 统计
     if original_fsfs_recorded:
