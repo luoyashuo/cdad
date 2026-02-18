@@ -1425,7 +1425,7 @@ def step_compute_similarity(
 
 
 # =============================================================================
-# 步骤5: CoT Effect Ratio指标计算（不过滤）
+# 步骤5: CoT Effect Ratio指标计算（不过滤）- 数据并行版本
 # =============================================================================
 
 from verl.experimental.reward.cot_rewriter.sglang_student_reward import SGLangStudentRewardClient
@@ -1437,12 +1437,14 @@ def step_compute_cot_effect(
     stats_collector: Optional[StatisticsCollector] = None
 ) -> List[Dict]:
     """
-    步骤5: 计算 CoT Effect Ratio 指标（不过滤）
+    步骤5: 计算 CoT Effect Ratio 指标（不过滤）- 使用数据并行充分利用所有 GPU
 
     cot_effect_ratio = cot_effect(rewrite) / cot_effect(original)
     其中 cot_effect(cot) = avg_prob(Q,CoT,A) - avg_prob(Q,A)
 
-    只计算指标，保存结果以便后续过滤
+    采用类似 RayRewriteClient 的异步并行方式，将所有任务分配给多个 Ray actors 处理，
+    以提高 GPU 利用率。
+    
     支持断点续传（使用唯一 ID）
     """
     if config.skip_ppl_compute:
@@ -1450,7 +1452,7 @@ def step_compute_cot_effect(
         return samples
 
     print("\n" + "=" * 60)
-    print("Step 5: CoT Effect Ratio Computation (Metrics Only)")
+    print("Step 5: CoT Effect Ratio Computation (Metrics Only) - Data Parallel Mode")
     print("=" * 60)
     print(f"  Student Model: {config.student_model_path}")
     print(f"  CoT Effect Ratio Ceiling: {config.cot_effect_ratio_ceiling}")
@@ -1482,96 +1484,146 @@ def step_compute_cot_effect(
         return list(id_to_processed_sample.values())
 
     # 初始化SGLang客户端，使用 cot_effect_ratio 模式
-    print("  Initializing SGLang student reward client (cot_effect_ratio mode)...")
+    print("  Initializing SGLang student reward client with data parallel...")
+    total_gpus = torch.cuda.device_count()
     student_client = SGLangStudentRewardClient(
         model_path=config.student_model_path,
         tensor_parallel_size=config.sglang_tensor_parallel_size,
         reward_mode="cot_effect_ratio",
         cot_effect_ratio_ceiling=config.cot_effect_ratio_ceiling,
         use_reward_delta=True,
-        devices=[f"cuda:{i}" for i in range(torch.cuda.device_count())],
+        devices=[f"cuda:{i}" for i in range(total_gpus)],
         micro_batch_size=config.sglang_micro_batch_size,
     )
     student_client.initialize()
+    
+    num_actors = student_client.num_actors
+    print(f"    Total GPUs: {total_gpus}")
+    print(f"    Tensor parallel size: {config.sglang_tensor_parallel_size}")
+    print(f"    Number of actors: {num_actors}")
 
     all_cot_effect_ratios = []
 
-    # 创建进度条
-    pbar = tqdm(
-        samples_to_process,
-        total=len(samples_to_process),
-        desc="CoT Effect",
-        unit="sample",
-        dynamic_ncols=True
-    )
-
-    for sample in pbar:
-        sample_id = sample.get('id')
-        question = sample['question']
-        # 兼容 original_thought 和 thought 两种字段名
+    # 收集所有需要计算的 CoT Effect 任务
+    # 每个任务: (sample, rewrite_result_idx, question, original_thought, rewrite_reasoning, answer)
+    all_tasks = []
+    for sample in samples_to_process:
         original_thought = sample.get('original_thought') or sample.get('thought', '')
+        question = sample['question']
         answer = sample.get('answer', '')
         rewrite_results = sample.get('rewrite_results', [])
-
-        # 更新进度条
-        pbar.set_postfix({'remaining': f'{len(samples_to_process) - pbar.n}'})
-
-        # 提取有效的rewrite reasoning
-        rewrite_cots = []
-        result_indices = []
-
+        
         for r_idx, result in enumerate(rewrite_results):
-            if result.get('rewrite_reasoning'):
-                rewrite_cots.append(result['rewrite_reasoning'])
-                result_indices.append(r_idx)
+            if result.get('rewrite_reasoning') and original_thought:
+                all_tasks.append({
+                    'sample': sample,
+                    'r_idx': r_idx,
+                    'question': question,
+                    'original_thought': original_thought,
+                    'rewrite_reasoning': result['rewrite_reasoning'],
+                    'answer': answer,
+                })
 
-        if rewrite_cots:
-            # 计算 cognitive reward (cot_effect_ratio 模式)
-            questions_batch = [question] * len(rewrite_cots)
-            answers_batch = [answer] * len(rewrite_cots)
-            original_cots_batch = [original_thought] * len(rewrite_cots)
+    total_tasks = len(all_tasks)
+    print(f"  Total CoT Effect tasks to compute: {total_tasks}")
 
+    if total_tasks == 0:
+        print("  No CoT Effect tasks to process.")
+        student_client.cleanup()
+        return samples_to_process
+
+    # 批量处理任务，每次处理一个较大的 batch 以充分利用数据并行
+    # SGLangStudentRewardClient.compute_cognitive_reward_batch 内部会将 batch 分发给所有 actors
+    BATCH_SIZE = 64  # 每批处理 64 个 rewrite，确保所有 actors 都有足够的工作
+    
+    completed_tasks = 0
+    failed_tasks = 0
+    
+    with tqdm(total=total_tasks, desc="CoT Effect", unit="task", dynamic_ncols=True) as pbar:
+        for batch_start in range(0, len(all_tasks), BATCH_SIZE):
+            batch_end = min(batch_start + BATCH_SIZE, len(all_tasks))
+            batch_tasks = all_tasks[batch_start:batch_end]
+            
+            # 准备 batch 输入
+            questions_batch = [t['question'] for t in batch_tasks]
+            rewrite_cots_batch = [t['rewrite_reasoning'] for t in batch_tasks]
+            answers_batch = [t['answer'] for t in batch_tasks]
+            original_cots_batch = [t['original_thought'] for t in batch_tasks]
+            
             try:
+                # 调用 compute_cognitive_reward_batch，内部会自动分发给所有 actors
                 reward_result = student_client.compute_cognitive_reward_batch(
                     questions=questions_batch,
-                    rewrite_cots=rewrite_cots,
+                    rewrite_cots=rewrite_cots_batch,
                     answers=answers_batch,
                     original_cots=original_cots_batch,
                 )
-
+                
                 # cot_effect_ratio = rewards (在 cot_effect_ratio 模式下)
                 cot_effect_ratios = reward_result.get('rewards', [])
-
-                # 更新结果（只计算指标，不过滤）
-                for i, r_idx in enumerate(result_indices):
+                
+                # 更新结果到样本
+                for i, task in enumerate(batch_tasks):
+                    sample = task['sample']
+                    r_idx = task['r_idx']
+                    
                     if i < len(cot_effect_ratios):
                         ratio = cot_effect_ratios[i]
                         sample['rewrite_results'][r_idx]['cot_effect_ratio'] = ratio
                         # 同时保留 ppl_relative_improvement 字段用于兼容性
-                        sample['rewrite_results'][r_idx]['ppl_relative_improvement'] = ratio - 1.0  # 转换为改进率
+                        sample['rewrite_results'][r_idx]['ppl_relative_improvement'] = ratio - 1.0
                         all_cot_effect_ratios.append(ratio)
+                        completed_tasks += 1
                     else:
                         sample['rewrite_results'][r_idx]['cot_effect_ratio'] = 0.0
                         sample['rewrite_results'][r_idx]['ppl_relative_improvement'] = -float('inf')
-
+                        failed_tasks += 1
+                    
+                    pbar.update(1)
+                    
             except Exception as e:
-                pbar.set_postfix({'error': str(e)[:30]})
-                for r_idx in result_indices:
+                print(f"\n  [Error] Batch {batch_start}-{batch_end} failed: {e}")
+                # 标记这批任务为失败
+                for task in batch_tasks:
+                    sample = task['sample']
+                    r_idx = task['r_idx']
                     sample['rewrite_results'][r_idx]['cot_effect_ratio'] = 0.0
                     sample['rewrite_results'][r_idx]['ppl_relative_improvement'] = -float('inf')
+                    failed_tasks += 1
+                    pbar.update(1)
+            
+            # 更新进度条
+            pbar.set_postfix({
+                'completed': f'{completed_tasks}/{total_tasks}',
+                'failed': failed_tasks,
+            })
 
+    # 处理没有有效 rewrite 的样本（标记为默认值）
+    for sample in samples_to_process:
+        sample_id = sample.get('id')
+        has_valid_rewrite = False
+        
+        for r_idx, result in enumerate(sample.get('rewrite_results', [])):
+            if result.get('rewrite_reasoning'):
+                has_valid_rewrite = True
+                # 如果之前没有设置 cot_effect_ratio，设置为默认值
+                if 'cot_effect_ratio' not in result:
+                    result['cot_effect_ratio'] = 0.0
+                    result['ppl_relative_improvement'] = -float('inf')
+            else:
+                result['cot_effect_ratio'] = 0.0
+                result['ppl_relative_improvement'] = -float('inf')
+        
         # 保存到映射
         id_to_processed_sample[sample_id] = sample
 
-        # 实时保存（追加模式）
-        save_jsonl([sample], ckpt_path, append=True)
+    # 批量保存所有处理完的样本
+    print(f"\n  Saving {len(samples_to_process)} samples to checkpoint...")
+    save_jsonl(samples_to_process, ckpt_path, append=True)
 
-        # 更新进度
-        with open(progress_path, 'w') as f:
-            json.dump({'processed_ids': list(id_to_processed_sample.keys())}, f)
-
-        if (pbar.n + 1) % 10 == 0 or pbar.n == len(samples_to_process) - 1:
-            print(f"  Progress: {pbar.n + 1}/{len(samples_to_process)}")
+    # 更新进度
+    with open(progress_path, 'w') as f:
+        json.dump({'processed_ids': list(id_to_processed_sample.keys())}, f)
 
     # 输出 CoT Effect Ratio 分布统计
     if all_cot_effect_ratios:
@@ -1582,7 +1634,8 @@ def step_compute_cot_effect(
         print(f"    Max: {np.max(all_cot_effect_ratios):.4f}")
         print(f"    Median: {np.median(all_cot_effect_ratios):.4f}")
 
-    print(f"  Completed. Results saved to: {ckpt_path}")
+    print(f"\n  Completed: {completed_tasks} tasks, Failed: {failed_tasks}")
+    print(f"  Results saved to: {ckpt_path}")
 
     # 收集统计信息
     if stats_collector:
@@ -1602,7 +1655,7 @@ def step_compute_cot_effect(
 
 
 # =============================================================================
-# 步骤6: FSF指标计算（不过滤）
+# 步骤6: FSF指标计算（不过滤）- 数据并行版本
 # =============================================================================
 
 from verl.experimental.reward.cot_rewriter.sglang_fsf_reward import SGLangFSFClient
@@ -1614,9 +1667,11 @@ def step_compute_fsf(
     stats_collector: Optional[StatisticsCollector] = None
 ) -> List[Dict]:
     """
-    步骤6: 计算 FSF 指标（不过滤）
+    步骤6: 计算 FSF 指标（不过滤）- 使用数据并行充分利用所有 GPU
 
-    只计算FSF指标，保存结果以便后续过滤
+    采用类似 RayRewriteClient 的异步并行方式，将所有任务分配给多个 Ray actors 处理，
+    以提高 GPU 利用率。每个 actor 独立处理分配给它的所有 FSF 计算任务。
+    
     支持断点续传（使用唯一 ID）
     """
     if config.skip_fsf_compute:
@@ -1624,7 +1679,7 @@ def step_compute_fsf(
         return samples
 
     print("\n" + "=" * 60)
-    print("Step 6: FSF Computation (Metrics Only)")
+    print("Step 6: FSF Computation (Metrics Only) - Data Parallel Mode")
     print("=" * 60)
     print(f"  FSF Judge Model: {config.fsf_judge_model_path}")
 
@@ -1655,112 +1710,168 @@ def step_compute_fsf(
         return list(id_to_processed_sample.values())
 
     # 初始化FSF客户端
-    print("  Initializing SGLang FSF client...")
+    print("  Initializing SGLang FSF client with data parallel...")
+    total_gpus = torch.cuda.device_count()
     fsf_client = SGLangFSFClient(
         model_path=config.fsf_judge_model_path,
         tensor_parallel_size=config.sglang_tensor_parallel_size,
-        devices=[f"cuda:{i}" for i in range(torch.cuda.device_count())],
+        devices=[f"cuda:{i}" for i in range(total_gpus)],
         micro_batch_size=config.sglang_micro_batch_size,
     )
     fsf_client.initialize()
+    
+    num_actors = fsf_client.num_actors
+    print(f"    Total GPUs: {total_gpus}")
+    print(f"    Tensor parallel size: {config.sglang_tensor_parallel_size}")
+    print(f"    Number of actors: {num_actors}")
 
     original_fsfs_recorded = []  # 记录所有 original FSF 值
     rewrite_fsfs_recorded = []   # 记录所有 rewrite FSF 值
 
-    # 创建进度条
-    pbar = tqdm(
-        samples_to_process,
-        total=len(samples_to_process),
-        desc="FSF Compute",
-        unit="sample",
-        dynamic_ncols=True
-    )
+    # 收集所有需要计算的 FSF 任务
+    # 每个任务: (sample, rewrite_result_idx, question, original_thought, rewrite_reasoning)
+    all_tasks = []
+    for sample in samples_to_process:
+        original_thought = sample.get('original_thought') or sample.get('thought', '')
+        rewrite_results = sample.get('rewrite_results', [])
+        
+        for r_idx, result in enumerate(rewrite_results):
+            if result.get('rewrite_reasoning') and original_thought:
+                all_tasks.append({
+                    'sample': sample,
+                    'r_idx': r_idx,
+                    'question': sample['question'],
+                    'original_thought': original_thought,
+                    'rewrite_reasoning': result['rewrite_reasoning'],
+                })
 
-    # 批量处理样本以提高 GPU 利用率
-    # 每个批次包含多个样本，以便在 8 个 GPU 之间分配工作
-    BATCH_SIZE = 32  # 每批处理 32 个样本，确保每个 GPU 都有工作
+    total_tasks = len(all_tasks)
+    print(f"  Total FSF tasks to compute: {total_tasks}")
 
-    for batch_start in range(0, len(samples_to_process), BATCH_SIZE):
-        batch_end = min(batch_start + BATCH_SIZE, len(samples_to_process))
-        batch_samples = samples_to_process[batch_start:batch_end]
+    if total_tasks == 0:
+        print("  No FSF tasks to process.")
+        fsf_client.shutdown()
+        return samples_to_process
 
-        # 更新进度条
-        pbar.n = batch_start
-        pbar.set_postfix({'batch': f'{batch_start}-{batch_end}', 'remaining': f'{len(samples_to_process) - batch_end}'})
+    # 将任务分配给各个 actors (round-robin)
+    actor_tasks = [[] for _ in range(num_actors)]
+    for i, task in enumerate(all_tasks):
+        actor_tasks[i % num_actors].append(task)
 
-        # 收集所有需要计算的 FSF 任务
-        all_questions = []
-        all_original_cots = []
-        all_rewrite_cots = []
-        task_to_sample = []  # (sample_idx, result_idx) 映射
+    # 统计每个 actor 的任务数
+    for i, tasks in enumerate(actor_tasks):
+        print(f"    Actor {i}: {len(tasks)} tasks")
 
-        for sample in batch_samples:
-            sample_idx_in_batch = len(task_to_sample)
-            original_thought = sample.get('original_thought') or sample.get('thought', '')
-            rewrite_results = sample.get('rewrite_results', [])
+    # 使用异步方式提交任务到所有 actors
+    # 每个 actor 处理其分配到的所有任务
+    pending_refs = []
+    
+    # 提交所有任务到对应的 actors
+    for actor_idx, tasks in enumerate(actor_tasks):
+        if not tasks:
+            continue
+            
+        # 提取这批任务的输入
+        questions = [t['question'] for t in tasks]
+        original_cots = [t['original_thought'] for t in tasks]
+        rewrite_cots = [t['rewrite_reasoning'] for t in tasks]
+        
+        # 调用 actor 的 compute_logic_reward_batch 方法
+        # 注意：这里我们直接使用 actor，但 compute_logic_reward_batch 是客户端方法
+        # 所以我们需要调用 compute_fsf_batch 两次（一次 original，一次 rewrite）
+        ref_original = fsf_client.workers[actor_idx].compute_fsf_batch.remote(
+            original_cots,
+            config.sglang_micro_batch_size,
+        )
+        ref_rewrite = fsf_client.workers[actor_idx].compute_fsf_batch.remote(
+            rewrite_cots,
+            config.sglang_micro_batch_size,
+        )
+        pending_refs.append((actor_idx, ref_original, ref_rewrite, tasks))
 
-            for r_idx, result in enumerate(rewrite_results):
-                if result.get('rewrite_reasoning') and original_thought:
-                    all_questions.append(sample['question'])
-                    all_original_cots.append(original_thought)
-                    all_rewrite_cots.append(result['rewrite_reasoning'])
-                    task_to_sample.append((sample, r_idx))
-
-        # 批量计算 FSF
-        if all_questions:
+    # 收集结果
+    completed_tasks = 0
+    failed_tasks = 0
+    results_by_sample = {}  # sample_id -> {r_idx: (original_fsf, rewrite_fsf)}
+    samples_to_save = []  # 待保存的样本缓冲区
+    
+    # 使用 position=0, leave=True 避免被 Ray 日志干扰
+    with tqdm(total=total_tasks, desc="FSF Compute", unit="task", dynamic_ncols=True, position=0, leave=True) as pbar:
+        for actor_idx, ref_original, ref_rewrite, tasks in pending_refs:
             try:
-                fsf_result = fsf_client.compute_logic_reward_batch(
-                    questions=all_questions,
-                    original_cots=all_original_cots,
-                    rewrite_cots=all_rewrite_cots,
-                )
-
-                original_fsfs = fsf_result.get('original_fsfs', [])
-                rewrite_fsfs = fsf_result.get('rewrite_fsfs', [])
-
+                # 获取该 actor 的结果
+                original_fsfs = ray.get(ref_original)
+                rewrite_fsfs = ray.get(ref_rewrite)
+                
                 # 分发结果回样本
-                for task_idx, (sample, r_idx) in enumerate(task_to_sample):
-                    if task_idx < len(rewrite_fsfs) and rewrite_fsfs[task_idx] is not None:
-                        rewrite_fsf = rewrite_fsfs[task_idx]
-                        original_fsf = original_fsfs[task_idx] if task_idx < len(original_fsfs) else None
-
-                        sample['rewrite_results'][r_idx]['fsf'] = rewrite_fsf
-                        sample['rewrite_results'][r_idx]['original_fsf'] = original_fsf
-
-                        # 记录统计
-                        if task_idx == 0 or original_fsf is not None:
-                            if original_fsf is not None:
-                                original_fsfs_recorded.append(original_fsf)
+                for task_idx, task in enumerate(tasks):
+                    sample = task['sample']
+                    r_idx = task['r_idx']
+                    sample_id = sample.get('id')
+                    
+                    if sample_id not in results_by_sample:
+                        results_by_sample[sample_id] = {}
+                    
+                    original_fsf = original_fsfs[task_idx] if task_idx < len(original_fsfs) else None
+                    rewrite_fsf = rewrite_fsfs[task_idx] if task_idx < len(rewrite_fsfs) else None
+                    
+                    results_by_sample[sample_id][r_idx] = (original_fsf, rewrite_fsf)
+                    
+                    # 记录统计
+                    if rewrite_fsf is not None:
+                        if original_fsf is not None:
+                            original_fsfs_recorded.append(original_fsf)
                         rewrite_fsfs_recorded.append(rewrite_fsf)
+                        completed_tasks += 1
                     else:
-                        sample['rewrite_results'][r_idx]['fsf'] = None
-                        sample['rewrite_results'][r_idx]['original_fsf'] = None
-
+                        failed_tasks += 1
+                    
+                    pbar.update(1)
+                    
             except Exception as e:
-                pbar.set_postfix({'error': str(e)[:30]})
-                for sample, r_idx in task_to_sample:
-                    sample['rewrite_results'][r_idx]['fsf'] = None
-                    sample['rewrite_results'][r_idx]['original_fsf'] = None
+                print(f"\n  [Error] Actor {actor_idx} failed: {e}")
+                # 标记这批任务为失败
+                for task in tasks:
+                    sample = task['sample']
+                    r_idx = task['r_idx']
+                    sample_id = sample.get('id')
+                    if sample_id not in results_by_sample:
+                        results_by_sample[sample_id] = {}
+                    results_by_sample[sample_id][r_idx] = (None, None)
+                    failed_tasks += 1
+                    pbar.update(1)
 
-        # 处理没有有效 rewrite 的样本
-        for sample in batch_samples:
-            if not any(r.get('rewrite_reasoning') for r in sample.get('rewrite_results', [])):
-                for r_idx, result in enumerate(sample.get('rewrite_results', [])):
-                    sample['rewrite_results'][r_idx]['fsf'] = None
-                    sample['rewrite_results'][r_idx]['original_fsf'] = None
+            # 更新进度条
+            pbar.set_postfix({
+                'completed': f'{completed_tasks}/{total_tasks}',
+                'failed': failed_tasks,
+            })
 
-            # 保存到映射
-            sample_id = sample.get('id')
-            id_to_processed_sample[sample_id] = sample
+    # 将结果写回样本
+    for sample in samples_to_process:
+        sample_id = sample.get('id')
+        results_for_sample = results_by_sample.get(sample_id, {})
+        
+        for r_idx, result in enumerate(sample.get('rewrite_results', [])):
+            if r_idx in results_for_sample:
+                original_fsf, rewrite_fsf = results_for_sample[r_idx]
+                result['original_fsf'] = original_fsf
+                result['fsf'] = rewrite_fsf
+            else:
+                # 没有计算结果（可能没有 rewrite_reasoning）
+                result['original_fsf'] = None
+                result['fsf'] = None
+        
+        # 保存到映射
+        id_to_processed_sample[sample_id] = sample
 
-            # 实时保存（追加模式）
-            save_jsonl([sample], ckpt_path, append=True)
+    # 批量保存所有处理完的样本
+    print(f"\n  Saving {len(samples_to_process)} samples to checkpoint...")
+    save_jsonl(samples_to_process, ckpt_path, append=True)
 
-        # 更新进度
-        with open(progress_path, 'w') as f:
-            json.dump({'processed_ids': list(id_to_processed_sample.keys())}, f)
-
-    pbar.close()
+    # 更新进度
+    with open(progress_path, 'w') as f:
+        json.dump({'processed_ids': list(id_to_processed_sample.keys())}, f)
 
     # 输出 FSF 统计
     if original_fsfs_recorded:
@@ -1779,7 +1890,8 @@ def step_compute_fsf(
         print(f"    Max: {np.max(rewrite_fsfs_recorded):.4f}")
         print(f"    Median: {np.median(rewrite_fsfs_recorded):.4f}")
 
-    print(f"  Completed. Results saved to: {ckpt_path}")
+    print(f"\n  Completed: {completed_tasks} tasks, Failed: {failed_tasks}")
+    print(f"  Results saved to: {ckpt_path}")
 
     # 收集统计信息
     if stats_collector:
