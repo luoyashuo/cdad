@@ -96,6 +96,7 @@ uv pip install cachetools==5.3.3 # 修复LRUCache报错
 uv pip install torch-memory-saver
 uv pip install pydot>=2.0.0
 uv pip install graphviz>=0.20.0
+uv pip install matplotlib seaborn
 ```
 
 

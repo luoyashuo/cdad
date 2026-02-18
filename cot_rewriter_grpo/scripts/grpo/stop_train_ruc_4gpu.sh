@@ -1,4 +1,5 @@
-pkill -9 -f "ray::"                                                                                                                       
+pkill -9 -f "ray::" 
+pkill -9 -f "sglang::"                                                                                                                       
 pkill -9 -f "raylet"                                                                                                                      
 pkill -9 -f "gcs_server"                                                                                                                  
 rm -rf /tmp/ray_* 

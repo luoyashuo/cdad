@@ -1,47 +1,131 @@
-# 数据集改写配置示例
+# =============================================================================
+# 数据集改写配置
+# =============================================================================
+# 功能说明：
+#   使用训练好的 CoT Rewriter 模型对原始数据集进行改写，通过多级过滤
+#   筛选出高质量的改写结果，生成新的训练数据集。
+#
+# 流程：
+#   Step 1: 模型格式转换 (FSDP -> HF)
+#   Step 2: 数据加载 + Prompt 构建
+#   Step 3: 改写生成 (每个样本生成 n_rewrites 次改写)
+#   Step 4: 相似度过滤 (similarity < threshold)
+#   Step 5: CoT Effect Ratio 过滤 (ratio > threshold)
+#   Step 6: FSF 过滤 (fsf_rewrite < fsf_original)
+#   Step 7: 选择最优结果或回退原文 -> 生成新数据集
+# =============================================================================
 
-# 模型路径
-rewrite_model_path: /data/luoys/checkpoints/cdad/cot_rewriter_grpo/llama3_8b_grpo_8x80g_v8/global_step_100
+# -----------------------------------------------------------------------------
+# 模型路径配置
+# -----------------------------------------------------------------------------
+# 改写模型路径 (FSDP checkpoint 目录，需包含 global_step_XXX)
+rewrite_model_path: /data/luoys/checkpoints/cdad/cot_rewriter_grpo/llama3_8b_grpo_8x80g_top2000_v4/global_step_160
+
+# Student Model (用于计算 CoT Effect Ratio，使用 SGLang 推理)
 student_model_path: /data/luoys/modelscope_cache/models/Qwen/Qwen3-4B
+
+# FSF Judge Model (用于计算失败步骤比例，使用 SGLang 推理)
 fsf_judge_model_path: /data/luoys/modelscope_cache/models/Qwen/Qwen3-4B
 
-# 数据路径
-input_data_path: /data/luoys/data/cdad/omnithought_rv_optimal/train.jsonl
-output_dir: /data/luoys/data/cdad/rewritten_output/llama3_8b_grpo_8x80g_v8_s100
+# -----------------------------------------------------------------------------
+# 数据路径配置
+# -----------------------------------------------------------------------------
+# 输入数据路径 (JSONL 格式，需包含 conversations 字段)
+input_data_path: /data/luoys/data/cdad/omnithought_rv_optimal_top2000/train.jsonl
 
+# 输出目录 (生成的数据和中间结果将保存在此目录)
+output_dir: /data/luoys/data/cdad/rewritten_output/llama3_8b_grpo_8x80g_top2000_v4_iter160
+
+# -----------------------------------------------------------------------------
 # 改写参数
-n_rewrites: 1  # 每个样本调用n次改写模型
+# -----------------------------------------------------------------------------
+# 每个样本生成的改写次数 (更多次数 = 更大几率找到好的改写，但速度更慢)
+n_rewrites: 3
 
-# 阈值参数
-similarity_penalty_threshold: 0.9  # 相似度高于此值则丢弃
-ppl_relative_improvement_threshold: 0.0  # PPL相对改进率低于此值则丢弃
-fsf_threshold: 0.0  # FSF高于此值则丢弃
+# -----------------------------------------------------------------------------
+# 过滤阈值参数
+# -----------------------------------------------------------------------------
+# Step 4: 相似度过滤阈值
+#   - 范围: [0, 1]，值越低过滤越严格
+#   - 含义: 改写与原文的字符级相似度，高于此值的改写会被丢弃
+#   - 建议: 0.5 (避免与原文过于相似的改写)
+similarity_penalty_threshold: 0.5
 
-# 模型生成参数
-max_new_tokens: 15000
-temperature: 0.6
-top_p: 0.95
-presence_penalty: 1.2
-frequency_penalty: 1.2
+# Step 5: CoT Effect Ratio 过滤阈值
+#   - 范围: [0, inf)，1.0 表示和原文一样好
+#   - 含义: cot_effect_ratio = cot_effect(rewrite) / cot_effect(original)
+#           cot_effect(cot) = avg_prob(Q,CoT,A) - avg_prob(Q,A)
+cot_effect_ratio_threshold: 0.7
 
-# 多进程参数
-num_workers: 8
-batch_size: 32
+# CoT Effect Ratio 计算上限
+#   - 用于裁剪极端值，避免个别样本影响整体
+#   - 建议: 0.95 (将 ratio 裁剪到 0.95)
+cot_effect_ratio_ceiling: 999
 
-# SGLang参数
-# sglang_tensor_parallel_size: Tensor Parallelism大小
-# - 对于7B/8B模型，TP=1即可（单卡推理足够快）
-# - 对于更大模型（如70B），可能需要TP=4或TP=8
-# - 注意：TP越大，显存占用越少，但通信开销会增加
-sglang_tensor_parallel_size: 4
+# Step 6: FSF 过滤 (已废弃，现在使用相对比较)
+#   - 新逻辑: 只保留 fsf_rewrite < fsf_original 的改写
+#   - 即改写的失败步骤比例必须比原文更低
+fsf_threshold: 0.0  # 保留此字段用于兼容，但实际不使用
 
-# sgland_micro_batch_size: micro batch大小，控制显存使用
-# - 越大速度越快，但显存占用越高
-# - 如果遇到OOM，可以减小此值
-sgland_micro_batch_size: 8
+# -----------------------------------------------------------------------------
+# 改写模型生成参数 (用于 vLLM)
+# -----------------------------------------------------------------------------
+max_new_tokens: 15000      # 最大生成长度
+temperature: 1.0           # 采样温度 (越高越随机，0.6-0.8 推荐)
+top_p: 0.95                # nucleus sampling 参数
+top_k: -1                  # top-k sampling 参数 (-1 表示不使用)
+presence_penalty: 0.0      # 存在惩罚 (0.0 = 关闭)
+frequency_penalty: 0.0     # 频率惩罚 (0.0 = 关闭)
 
-# 可选：跳过某些步骤（用于调试）
-skip_rewrite: false
-skip_similarity: false
-skip_ppl: false
-skip_fsf: false
+# -----------------------------------------------------------------------------
+# 批处理参数
+# -----------------------------------------------------------------------------
+num_workers: 8             # 并行 worker 数量（用于相似度过滤）
+process_batch_size: 16     # 每处理这么多样本后保存一次 ckpt
+
+# -----------------------------------------------------------------------------
+# Ray + vLLM 推理参数 (用于改写模型 rewrite_model_path)
+# -----------------------------------------------------------------------------
+# Tensor Parallelism 大小 (每个 Ray Actor 的张量并行大小)
+#   - TP=1: 单卡推理 (适合小模型或大量GPU)
+#   - TP=2: 每个 Actor 用2张卡 (推荐，平衡显存和通讯)
+#   - TP>2: 大模型需要
+#   - 8B模型: 建议 TP=2
+#   - Actor 数量会自动计算 = total_gpus / vllm_tensor_parallel_size
+#     例如：8张卡，TP=2 → 自动创建 4 个 Ray Actor 并行
+vllm_tensor_parallel_size: 1
+
+# GPU 显存利用率
+#   - 范围: [0, 1]
+#   - 建议: 0.85-0.90
+#   - 如遇 OOM，减小此值
+vllm_gpu_memory_utilization: 0.85
+
+# Micro Batch 大小 (每个 Actor 每次处理的任务数)
+#   - 越大速度越快，但显存占用越高
+#   - 8B模型 + 80GB显存: 建议 2
+#   - 8B模型 + 40GB显存: 建议 1
+#   - 如遇 OOM，减小此值
+vllm_micro_batch_size: 1
+
+# -----------------------------------------------------------------------------
+# SGLang 推理参数 (用于 student 和 fsf judge 模型)
+# -----------------------------------------------------------------------------
+# Tensor Parallelism 大小
+#   - TP=1: 每个GPU运行独立的SGLang实例 (数据并行，推荐)
+#   - TP>1: 多个GPU共享一个SGLang实例 (张量并行)
+#   - 4B模型: 建议 TP=1 (数据并行效率更高)
+sglang_tensor_parallel_size: 1
+
+# Micro Batch 大小 (控制显存使用)
+#   - 越大速度越快，但显存占用越高
+#   - 如遇 OOM，减小此值 (8, 4, 2, 1)
+sglang_micro_batch_size: 2
+
+# -----------------------------------------------------------------------------
+# 调试选项 (跳过某些步骤)
+# -----------------------------------------------------------------------------
+skip_rewrite: false    # 跳过改写生成 (直接使用已有的 ckpt_1)
+skip_similarity: false # 跳过相似度过滤
+skip_ppl: false        # 跳过 CoT Effect Ratio 过滤
+skip_fsf: false        # 跳过 FSF 过滤

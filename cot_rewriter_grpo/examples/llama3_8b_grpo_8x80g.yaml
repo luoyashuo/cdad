@@ -32,7 +32,7 @@ data:
   train_batch_size: 1
   val_batch_size: 4
   gen_batch_size: 1
-  max_prompt_length: 4600
+  max_prompt_length: 4800
   max_response_length: 10000
   return_raw_chat: true
   dataloader_num_workers: 8
@@ -72,7 +72,7 @@ actor_rollout_ref:
     ppo_micro_batch_size_per_gpu: 1
     use_kl_in_reward: false
     use_kl_loss: true
-    kl_loss_coef: 0.001
+    kl_loss_coef: 0.0005
     kl_loss_type: low_var_kl
     entropy_from_logits_with_chunking: true
     fsdp_config:
@@ -104,14 +104,14 @@ actor_rollout_ref:
     load_format: auto
     log_prob_micro_batch_size_per_gpu: 1
     n: 8
-    temperature: 0.9
-    top_k: 20
+    temperature: 0.6
+    top_k: 50
     top_p: 0.95
-    presence_penalty: 1.0
-    prompt_length: 4600
+    presence_penalty: 1.5
+    prompt_length: 4800
     response_length: 10000
     max_num_batched_tokens: 62000
-    max_model_len: 14600
+    max_model_len: 14800
     enforce_eager: true
     free_cache_engine: true
     sleep_level: 1
@@ -169,8 +169,8 @@ reward_model:
     # 过长奖励塑形配置
     overlong_buffer_cfg:
       enable: true
-      len: 3000
-      penalty_factor: 0.5
+      len: 2000
+      penalty_factor: 1.0
       log: false
     max_resp_len: 10000
 
@@ -270,8 +270,8 @@ custom_reward_function:
     too_short_threshold_high: 0.4     # 过短上限阈值
     too_short_max_penalty: 0.5        # 最大过短惩罚
     # 过长惩罚阈值
-    too_long_threshold_low: 2.0      # 过长下限阈值 (相比 original)
-    too_long_threshold_high: 2.5      # 过长上限阈值
+    too_long_threshold_low: 4.0      # 过长下限阈值 (相比 original)
+    too_long_threshold_high: 8.0      # 过长上限阈值
     too_long_max_penalty: 0.5         # 最大过长惩罚
     penalty_mode: absolute            # 惩罚模式: absolute | relative
 # ============ Reward Manager Configuration ============
