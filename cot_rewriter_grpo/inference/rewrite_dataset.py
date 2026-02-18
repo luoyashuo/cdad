@@ -6,10 +6,16 @@
 1. 读取配置，转换改写模型格式
 2. 读取原始数据集，构建prompt
 3. 调用改写模型生成n次结果（支持断点续传）
-4. 计算similarity_penalty过滤
-5. 计算ppl_relative_improvement过滤（支持断点续传）
-6. 计算fsf过滤（支持断点续传）
-7. 选择最优结果，生成新数据集
+4. 计算similarity_penalty指标（不过滤）
+5. 计算cot_effect_ratio指标（不过滤）
+6. 计算FSF指标（不过滤）
+7. 应用过滤规则（基于阈值，可单独运行调整阈值）
+8. 选择最优结果，生成新数据集
+
+关键改进：
+- 指标计算与过滤分离
+- 指标计算完成后保存，可重复使用
+- 调整过滤阈值时无需重新计算指标
 """
 
 import argparse
@@ -24,6 +30,7 @@ import shutil
 from typing import Dict, List, Any, Optional, Tuple, Union
 from datetime import datetime
 from dataclasses import dataclass, field, asdict
+from concurrent.futures import ProcessPoolExecutor, as_completed
 import numpy as np
 
 # 添加项目路径
@@ -60,11 +67,17 @@ class RewriteConfig:
     # 改写参数
     n_rewrites: int = 4  # 每个样本调用n次改写模型
 
-    # 阈值参数
+    # 阈值参数（用于过滤步骤）
     similarity_penalty_threshold: float = 0.9  # 相似度阈值，高于此值则丢弃
     cot_effect_ratio_threshold: float = 1.0    # CoT Effect Ratio阈值
     cot_effect_ratio_ceiling: float = 0.95     # CoT Effect Ratio上限
-    fsf_threshold: float = 0.0                 # FSF阈值（已废弃）
+    fsf_threshold: float = 0.0                 # FSF阈值（已废弃，使用相对比较）
+    fsf_use_relative: bool = True              # 是否使用相对比较（fsf_rewrite < fsf_original）
+
+    # 过滤开关（控制是否启用某个过滤器）
+    enable_similarity_filter: bool = True
+    enable_cot_effect_filter: bool = True
+    enable_fsf_filter: bool = True
 
     # 模型生成参数
     max_new_tokens: int = 15000
@@ -87,8 +100,13 @@ class RewriteConfig:
     sglang_tensor_parallel_size: int = 1    # TP=1 数据并行
     sglang_micro_batch_size: int = 4
 
-    # 可选：跳过某些步骤
+    # 可选：跳过某些步骤（用于跳过指标计算）
     skip_rewrite: bool = False
+    skip_similarity_compute: bool = False   # 改名为 compute，表示跳过计算
+    skip_ppl_compute: bool = False          # 改名为 compute
+    skip_fsf_compute: bool = False          # 改名为 compute
+
+    # 兼容旧配置
     skip_similarity: bool = False
     skip_ppl: bool = False
     skip_fsf: bool = False
@@ -104,7 +122,39 @@ class RewriteConfig:
         if 'sgland_micro_batch_size' in config_dict and 'sglang_micro_batch_size' not in config_dict:
             config_dict['sglang_micro_batch_size'] = config_dict['sgland_micro_batch_size']
 
+        # 处理旧的 skip_* 到新 skip_*_compute 的映射
+        if 'skip_similarity' in config_dict and 'skip_similarity_compute' not in config_dict:
+            config_dict['skip_similarity_compute'] = config_dict['skip_similarity']
+        if 'skip_ppl' in config_dict and 'skip_ppl_compute' not in config_dict:
+            config_dict['skip_ppl_compute'] = config_dict['skip_ppl']
+        if 'skip_fsf' in config_dict and 'skip_fsf_compute' not in config_dict:
+            config_dict['skip_fsf_compute'] = config_dict['skip_fsf']
+
         return cls(**config_dict)
+
+    @classmethod
+    def from_dict_with_filters(cls, config_dict: dict, filter_dict: dict = None) -> 'RewriteConfig':
+        """从字典创建配置，支持单独指定过滤参数
+
+        Args:
+            config_dict: 基础配置
+            filter_dict: 可选的过滤参数覆盖（用于调整阈值）
+        """
+        config = cls.from_dict(config_dict)
+
+        if filter_dict:
+            if 'similarity_penalty_threshold' in filter_dict:
+                config.similarity_penalty_threshold = filter_dict['similarity_penalty_threshold']
+            if 'cot_effect_ratio_threshold' in filter_dict:
+                config.cot_effect_ratio_threshold = filter_dict['cot_effect_ratio_threshold']
+            if 'enable_similarity_filter' in filter_dict:
+                config.enable_similarity_filter = filter_dict['enable_similarity_filter']
+            if 'enable_cot_effect_filter' in filter_dict:
+                config.enable_cot_effect_filter = filter_dict['enable_cot_effect_filter']
+            if 'enable_fsf_filter' in filter_dict:
+                config.enable_fsf_filter = filter_dict['enable_fsf_filter']
+
+        return config
 
 
 def load_config(config_path: str) -> RewriteConfig:
@@ -112,6 +162,37 @@ def load_config(config_path: str) -> RewriteConfig:
     with open(config_path, 'r', encoding='utf-8') as f:
         config_dict = yaml.safe_load(f)
     return RewriteConfig.from_dict(config_dict)
+
+
+def load_config_with_filters(config_path: str, filter_config_path: str = None) -> RewriteConfig:
+    """从yaml文件加载配置，支持额外的过滤配置
+
+    Args:
+        config_path: 主配置文件路径
+        filter_config_path: 可选的过滤配置文件路径（用于覆盖阈值）
+
+    Returns:
+        RewriteConfig 实例
+    """
+    with open(config_path, 'r', encoding='utf-8') as f:
+        config_dict = yaml.safe_load(f)
+
+    filter_dict = None
+    if filter_config_path:
+        with open(filter_config_path, 'r', encoding='utf-8') as f:
+            filter_dict = yaml.safe_load(f)
+
+    return RewriteConfig.from_dict_with_filters(config_dict, filter_dict)
+
+
+def get_metrics_path(output_dir: str) -> str:
+    """获取指标文件路径（用于保存/加载计算好的指标）"""
+    return os.path.join(output_dir, 'metrics_with_indices.jsonl')
+
+
+def get_filter_config_path(output_dir: str) -> str:
+    """获取当前使用的过滤配置路径"""
+    return os.path.join(output_dir, 'filter_config_used.yaml')
 
 
 # =============================================================================
@@ -148,9 +229,10 @@ class ReportStatistics:
 
     # 步骤统计
     step_rewrite: StepStatistics = field(default_factory=lambda: StepStatistics("rewrite"))
-    step_similarity: StepStatistics = field(default_factory=lambda: StepStatistics("similarity"))
-    step_ppl: StepStatistics = field(default_factory=lambda: StepStatistics("ppl"))
-    step_fsf: StepStatistics = field(default_factory=lambda: StepStatistics("fsf"))
+    step_similarity_compute: StepStatistics = field(default_factory=lambda: StepStatistics("similarity_compute"))
+    step_ppl_compute: StepStatistics = field(default_factory=lambda: StepStatistics("cot_effect_compute"))
+    step_fsf_compute: StepStatistics = field(default_factory=lambda: StepStatistics("fsf_compute"))
+    step_filter: StepStatistics = field(default_factory=lambda: StepStatistics("filter"))
 
     # 最终统计
     final_stats: Dict[str, Any] = field(default_factory=dict)
@@ -191,13 +273,8 @@ class StatisticsCollector:
         self.report.step_rewrite.pass_rate = success_count / total_rewrites if total_rewrites > 0 else 0.0
 
     def update_similarity_stats(self, samples: List[Dict]):
-        """更新相似度过滤统计"""
+        """更新相似度计算统计（只计算，不过滤）"""
         total_rewrites = sum(len(s['rewrite_results']) for s in samples)
-        filtered_count = sum(
-            sum(1 for r in s['rewrite_results'] if r.get('filtered', False))
-            for s in samples
-        )
-        passed_count = total_rewrites - filtered_count
 
         # 收集所有相似度值
         similarities = []
@@ -207,62 +284,84 @@ class StatisticsCollector:
                 if sim is not None:
                     similarities.append(sim)
 
-        self.report.step_similarity.total_items = total_rewrites
-        self.report.step_similarity.passed = passed_count
-        self.report.step_similarity.filtered = filtered_count
-        self.report.step_similarity.pass_rate = passed_count / total_rewrites if total_rewrites > 0 else 0.0
-        self.report.step_similarity.values = similarities
+        self.report.step_similarity_compute.total_items = total_rewrites
+        self.report.step_similarity_compute.values = similarities
 
         if similarities:
-            self.report.step_similarity.mean = float(np.mean(similarities))
-            self.report.step_similarity.std = float(np.std(similarities))
-            self.report.step_similarity.min = float(np.min(similarities))
-            self.report.step_similarity.max = float(np.max(similarities))
-            self.report.step_similarity.median = float(np.median(similarities))
-            self.report.step_similarity.p25 = float(np.percentile(similarities, 25))
-            self.report.step_similarity.p75 = float(np.percentile(similarities, 75))
-
-    def update_ppl_stats(self, cot_effect_ratios: List[float]):
-        """更新PPL过滤统计"""
-        passed = sum(1 for x in cot_effect_ratios if x > self.config.cot_effect_ratio_threshold)
-        total = len(cot_effect_ratios)
-
-        self.report.step_ppl.total_items = total
-        self.report.step_ppl.passed = passed
-        self.report.step_ppl.filtered = total - passed
-        self.report.step_ppl.pass_rate = passed / total if total > 0 else 0.0
-        self.report.step_ppl.values = cot_effect_ratios.copy()
-
-        if cot_effect_ratios:
-            self.report.step_ppl.mean = float(np.mean(cot_effect_ratios))
-            self.report.step_ppl.std = float(np.std(cot_effect_ratios))
-            self.report.step_ppl.min = float(np.min(cot_effect_ratios))
-            self.report.step_ppl.max = float(np.max(cot_effect_ratios))
-            self.report.step_ppl.median = float(np.median(cot_effect_ratios))
-            self.report.step_ppl.p25 = float(np.percentile(cot_effect_ratios, 25))
-            self.report.step_ppl.p75 = float(np.percentile(cot_effect_ratios, 75))
-            self.report.step_ppl.extra = {
-                'cot_effect_ratio_threshold': self.config.cot_effect_ratio_threshold
+            self.report.step_similarity_compute.mean = float(np.mean(similarities))
+            self.report.step_similarity_compute.std = float(np.std(similarities))
+            self.report.step_similarity_compute.min = float(np.min(similarities))
+            self.report.step_similarity_compute.max = float(np.max(similarities))
+            self.report.step_similarity_compute.median = float(np.median(similarities))
+            self.report.step_similarity_compute.p25 = float(np.percentile(similarities, 25))
+            self.report.step_similarity_compute.p75 = float(np.percentile(similarities, 75))
+            self.report.step_similarity_compute.extra = {
+                'threshold': self.config.similarity_penalty_threshold,
+                'would_pass': sum(1 for x in similarities if x < self.config.similarity_penalty_threshold)
             }
 
-    def update_fsf_stats(self, original_fsfs: List[float], rewrite_better_count: int, total_samples: int):
-        """更新FSF过滤统计"""
-        self.report.step_fsf.total_samples = total_samples
-        self.report.step_fsf.total_items = len(original_fsfs)
-        self.report.step_fsf.values = original_fsfs.copy()
-        self.report.step_fsf.extra = {
-            'samples_with_better_rewrite': rewrite_better_count,
-            'samples_with_better_rewrite_rate': rewrite_better_count / total_samples if total_samples > 0 else 0.0
-        }
+    def update_ppl_stats(self, cot_effect_ratios: List[float]):
+        """更新CoT Effect Ratio计算统计（只计算，不过滤）"""
+        total = len(cot_effect_ratios)
+
+        self.report.step_ppl_compute.total_items = total
+        self.report.step_ppl_compute.values = cot_effect_ratios.copy()
+
+        if cot_effect_ratios:
+            self.report.step_ppl_compute.mean = float(np.mean(cot_effect_ratios))
+            self.report.step_ppl_compute.std = float(np.std(cot_effect_ratios))
+            self.report.step_ppl_compute.min = float(np.min(cot_effect_ratios))
+            self.report.step_ppl_compute.max = float(np.max(cot_effect_ratios))
+            self.report.step_ppl_compute.median = float(np.median(cot_effect_ratios))
+            self.report.step_ppl_compute.p25 = float(np.percentile(cot_effect_ratios, 25))
+            self.report.step_ppl_compute.p75 = float(np.percentile(cot_effect_ratios, 75))
+            self.report.step_ppl_compute.extra = {
+                'threshold': self.config.cot_effect_ratio_threshold,
+                'would_pass': sum(1 for x in cot_effect_ratios if x > self.config.cot_effect_ratio_threshold)
+            }
+
+    def update_fsf_stats(self, original_fsfs: List[float], rewrite_fsfs: List[float] = None):
+        """更新FSF计算统计（只计算，不过滤）"""
+        self.report.step_fsf_compute.total_items = len(original_fsfs)
+        self.report.step_fsf_compute.values = original_fsfs.copy()
 
         if original_fsfs:
-            self.report.step_fsf.mean = float(np.mean(original_fsfs))
-            self.report.step_fsf.std = float(np.std(original_fsfs))
-            self.report.step_fsf.min = float(np.min(original_fsfs))
-            self.report.step_fsf.max = float(np.max(original_fsfs))
-            self.report.step_fsf.median = float(np.median(original_fsfs))
-            self.report.step_fsf.p25 = float(np.percentile(original_fsfs, 25))
-            self.report.step_fsf.p75 = float(np.percentile(original_fsfs, 75))
+            self.report.step_fsf_compute.mean = float(np.mean(original_fsfs))
+            self.report.step_fsf_compute.std = float(np.std(original_fsfs))
+            self.report.step_fsf_compute.min = float(np.min(original_fsfs))
+            self.report.step_fsf_compute.max = float(np.max(original_fsfs))
+            self.report.step_fsf_compute.median = float(np.median(original_fsfs))
+            self.report.step_fsf_compute.p25 = float(np.percentile(original_fsfs, 25))
+            self.report.step_fsf_compute.p75 = float(np.percentile(original_fsfs, 75))
+            self.report.step_fsf_compute.extra = {}
+
+            if rewrite_fsfs:
+                better_count = sum(1 for o, r in zip(original_fsfs, rewrite_fsfs) if r < o)
+                self.report.step_fsf_compute.extra.update({
+                    'rewrite_better_count': better_count,
+                    'rewrite_better_rate': better_count / len(original_fsfs) if original_fsfs else 0.0
+                })
+
+    def update_filter_stats(self, samples: List[Dict]):
+        """更新过滤步骤统计（应用过滤后）"""
+        total_rewrites = sum(len(s.get('rewrite_results', [])) for s in samples)
+        passed_count = sum(
+            sum(1 for r in s.get('rewrite_results', []) if not r.get('filtered', False))
+            for s in samples
+        )
+        filtered_count = total_rewrites - passed_count
+
+        self.report.step_filter.total_items = total_rewrites
+        self.report.step_filter.passed = passed_count
+        self.report.step_filter.filtered = filtered_count
+        self.report.step_filter.pass_rate = passed_count / total_rewrites if total_rewrites > 0 else 0.0
+        self.report.step_filter.extra = {
+            'similarity_enabled': self.config.enable_similarity_filter,
+            'cot_effect_enabled': self.config.enable_cot_effect_filter,
+            'fsf_enabled': self.config.enable_fsf_filter,
+            'similarity_threshold': self.config.similarity_penalty_threshold,
+            'cot_effect_threshold': self.config.cot_effect_ratio_threshold,
+        }
 
     def update_final_stats(self, stats: Dict[str, Any]):
         """更新最终统计"""
@@ -311,89 +410,106 @@ def save_distribution_plots(stats: StatisticsCollector, output_dir: str):
         plt.rcParams['axes.unicode_minus'] = False
 
         fig, axes = plt.subplots(2, 2, figsize=(14, 10))
-        fig.suptitle('Rewrite Dataset Statistics', fontsize=16, fontweight='bold')
+        fig.suptitle('Rewrite Dataset Metrics Distribution', fontsize=16, fontweight='bold')
 
         # 1. Similarity Penalty 分布
-        if stats.report.step_similarity.values:
+        if stats.report.step_similarity_compute.values:
             ax = axes[0, 0]
-            similarities = stats.report.step_similarity.values
+            similarities = stats.report.step_similarity_compute.values
             ax.hist(similarities, bins=50, alpha=0.7, color='steelblue', edgecolor='black')
             ax.axvline(stats.config.similarity_penalty_threshold, color='red',
                       linestyle='--', label=f'Threshold: {stats.config.similarity_penalty_threshold}')
-            ax.axvline(stats.report.step_similarity.mean, color='green',
-                      linestyle='--', label=f'Mean: {stats.report.step_similarity.mean:.3f}')
+            ax.axvline(stats.report.step_similarity_compute.mean, color='green',
+                      linestyle='--', label=f'Mean: {stats.report.step_similarity_compute.mean:.3f}')
             ax.set_xlabel('Similarity Penalty')
             ax.set_ylabel('Count')
             ax.set_title('Similarity Penalty Distribution')
             ax.legend()
             # 添加统计信息文本
-            stats_text = f'Mean: {stats.report.step_similarity.mean:.3f}\n'
-            stats_text += f'Std: {stats.report.step_similarity.std:.3f}\n'
-            stats_text += f'Median: {stats.report.step_similarity.median:.3f}\n'
-            stats_text += f'Pass Rate: {stats.report.step_similarity.pass_rate:.1%}'
+            would_pass = stats.report.step_similarity_compute.extra.get('would_pass', 0)
+            pass_rate = would_pass / len(similarities) * 100 if similarities else 0
+            stats_text = f'Mean: {stats.report.step_similarity_compute.mean:.3f}\n'
+            stats_text += f'Std: {stats.report.step_similarity_compute.std:.3f}\n'
+            stats_text += f'Median: {stats.report.step_similarity_compute.median:.3f}\n'
+            stats_text += f'Would Pass: {pass_rate:.1f}%'
             ax.text(0.95, 0.95, stats_text, transform=ax.transAxes,
                    verticalalignment='top', horizontalalignment='right',
                    bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
 
         # 2. CoT Effect Ratio 分布
-        if stats.report.step_ppl.values:
+        if stats.report.step_ppl_compute.values:
             ax = axes[0, 1]
-            ratios = stats.report.step_ppl.values
+            ratios = stats.report.step_ppl_compute.values
             ax.hist(ratios, bins=50, alpha=0.7, color='seagreen', edgecolor='black')
             ax.axvline(stats.config.cot_effect_ratio_threshold, color='red',
                       linestyle='--', label=f'Threshold: {stats.config.cot_effect_ratio_threshold}')
-            ax.axvline(stats.report.step_ppl.mean, color='green',
-                      linestyle='--', label=f'Mean: {stats.report.step_ppl.mean:.3f}')
+            ax.axvline(stats.report.step_ppl_compute.mean, color='green',
+                      linestyle='--', label=f'Mean: {stats.report.step_ppl_compute.mean:.3f}')
             ax.axvline(1.0, color='orange', linestyle=':', label='Baseline (1.0)')
             ax.set_xlabel('CoT Effect Ratio')
             ax.set_ylabel('Count')
             ax.set_title('CoT Effect Ratio Distribution')
             ax.legend()
-            stats_text = f'Mean: {stats.report.step_ppl.mean:.3f}\n'
-            stats_text += f'Std: {stats.report.step_ppl.std:.3f}\n'
-            stats_text += f'Median: {stats.report.step_ppl.median:.3f}\n'
-            stats_text += f'Pass Rate: {stats.report.step_ppl.pass_rate:.1%}'
+            would_pass = stats.report.step_ppl_compute.extra.get('would_pass', 0)
+            pass_rate = would_pass / len(ratios) * 100 if ratios else 0
+            stats_text = f'Mean: {stats.report.step_ppl_compute.mean:.3f}\n'
+            stats_text += f'Std: {stats.report.step_ppl_compute.std:.3f}\n'
+            stats_text += f'Median: {stats.report.step_ppl_compute.median:.3f}\n'
+            stats_text += f'Would Pass: {pass_rate:.1f}%'
             ax.text(0.95, 0.95, stats_text, transform=ax.transAxes,
                    verticalalignment='top', horizontalalignment='right',
                    bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
 
         # 3. Original FSF 分布
-        if stats.report.step_fsf.values:
+        if stats.report.step_fsf_compute.values:
             ax = axes[1, 0]
-            fsfs = stats.report.step_fsf.values
+            fsfs = stats.report.step_fsf_compute.values
             ax.hist(fsfs, bins=50, alpha=0.7, color='coral', edgecolor='black')
-            ax.axvline(stats.report.step_fsf.mean, color='green',
-                      linestyle='--', label=f'Mean: {stats.report.step_fsf.mean:.3f}')
+            ax.axvline(stats.report.step_fsf_compute.mean, color='green',
+                      linestyle='--', label=f'Mean: {stats.report.step_fsf_compute.mean:.3f}')
             ax.set_xlabel('Original FSF')
             ax.set_ylabel('Count')
             ax.set_title('Original FSF Distribution')
             ax.legend()
-            stats_text = f'Mean: {stats.report.step_fsf.mean:.3f}\n'
-            stats_text += f'Std: {stats.report.step_fsf.std:.3f}\n'
-            stats_text += f'Median: {stats.report.step_fsf.median:.3f}'
+            stats_text = f'Mean: {stats.report.step_fsf_compute.mean:.3f}\n'
+            stats_text += f'Std: {stats.report.step_fsf_compute.std:.3f}\n'
+            stats_text += f'Median: {stats.report.step_fsf_compute.median:.3f}'
+            if 'rewrite_better_rate' in stats.report.step_fsf_compute.extra:
+                better_rate = stats.report.step_fsf_compute.extra['rewrite_better_rate'] * 100
+                stats_text += f'\nRewrite Better: {better_rate:.1f}%'
             ax.text(0.95, 0.95, stats_text, transform=ax.transAxes,
                    verticalalignment='top', horizontalalignment='right',
                    bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
 
         # 4. 过滤步骤通过率对比
         ax = axes[1, 1]
-        steps = ['Similarity', 'CoT Effect\nRatio', 'FSF']
-        pass_rates = [
-            stats.report.step_similarity.pass_rate * 100,
-            stats.report.step_ppl.pass_rate * 100,
-            0.0  # FSF 没有传统意义上的通过率
-        ]
-        colors = ['steelblue', 'seagreen', 'lightgray']
-        bars = ax.bar(steps, pass_rates, color=colors, alpha=0.7, edgecolor='black')
-        ax.set_ylabel('Pass Rate (%)')
-        ax.set_title('Filter Pass Rate Comparison')
-        ax.set_ylim(0, 100)
+        if stats.report.step_filter.total_items > 0:
+            steps = ['After\nFiltering']
+            pass_rates = [stats.report.step_filter.pass_rate * 100]
+            colors = ['steelblue']
+            bars = ax.bar(steps, pass_rates, color=colors, alpha=0.7, edgecolor='black')
+            ax.set_ylabel('Pass Rate (%)')
+            ax.set_title(f'Filter Result (Total: {stats.report.step_filter.total_items})')
+            ax.set_ylim(0, 100)
 
-        # 在柱状图上显示数值
-        for bar, rate in zip(bars, pass_rates):
-            if rate > 0:
-                ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 1,
-                       f'{rate:.1f}%', ha='center', va='bottom')
+            # 添加过滤配置信息
+            filter_info = f'Enabled:\n'
+            if stats.report.step_filter.extra.get('similarity_enabled'):
+                filter_info += f'  Similarity < {stats.report.step_filter.extra.get("similarity_threshold", 0.9)}\n'
+            if stats.report.step_filter.extra.get('cot_effect_enabled'):
+                filter_info += f'  CoT Effect > {stats.report.step_filter.extra.get("cot_effect_threshold", 1.0)}\n'
+            if stats.report.step_filter.extra.get('fsf_enabled'):
+                filter_info += f'  FSF rewrite < original\n'
+
+            for bar, rate in zip(bars, pass_rates):
+                if rate > 0:
+                    ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 1,
+                           f'{rate:.1f}%', ha='center', va='bottom', fontsize=12)
+
+            ax.text(0.02, 0.98, filter_info, transform=ax.transAxes,
+                   verticalalignment='top', horizontalalignment='left',
+                   bbox=dict(boxstyle='round', facecolor='lightblue', alpha=0.3),
+                   fontsize=8)
 
         plt.tight_layout()
         plot_path = os.path.join(output_dir, 'distribution_plots.png')
@@ -672,7 +788,7 @@ Directly output the rewritten reasoning strictly enclosed within <rewrite_reason
         处理一批任务，支持格式提取失败时重试（最多3次）
 
         Args:
-            tasks: 任务列表，每个任务包含 task_id, sample_idx, question, thought, answer
+            tasks: 任务列表，每个任务包含 task_id, sample_id, question, thought, answer
             sampling_params_dict: 采样参数字典
 
         Returns:
@@ -703,7 +819,7 @@ Directly output the rewritten reasoning strictly enclosed within <rewrite_reason
 
                 results[task['task_id']] = {
                     'task_id': task['task_id'],
-                    'sample_idx': task['sample_idx'],
+                    'sample_id': task['sample_id'],  # 使用唯一 ID
                     'question': task['question'],
                     'original_thought': task['thought'],
                     'answer': task.get('answer', ''),
@@ -717,7 +833,7 @@ Directly output the rewritten reasoning strictly enclosed within <rewrite_reason
             for task in tasks:
                 results[task['task_id']] = {
                     'task_id': task['task_id'],
-                    'sample_idx': task['sample_idx'],
+                    'sample_id': task['sample_id'],  # 使用唯一 ID
                     'question': task['question'],
                     'original_thought': task['thought'],
                     'answer': task.get('answer', ''),
@@ -761,7 +877,7 @@ Directly output the rewritten reasoning strictly enclosed within <rewrite_reason
                         # 重试成功，更新结果
                         results[task['task_id']] = {
                             'task_id': task['task_id'],
-                            'sample_idx': task['sample_idx'],
+                            'sample_id': task['sample_id'],  # 使用唯一 ID
                             'question': task['question'],
                             'original_thought': task['thought'],
                             'answer': task.get('answer', ''),
@@ -888,6 +1004,7 @@ class RayRewriteClient:
     def process_samples(
         self,
         samples: List[Dict],
+        id_to_sample: Dict[str, Dict],
         n_rewrites: int,
         max_new_tokens: int = 15000,
         temperature: float = 0.6,
@@ -898,12 +1015,14 @@ class RayRewriteClient:
         ckpt_path: Optional[str] = None,
         progress_path: Optional[str] = None,
         process_batch_size: int = 32,
+        is_resuming: bool = False,
     ) -> List[Dict]:
         """
         处理多个样本，每个样本生成 n_rewrites 次改写
 
         Args:
-            samples: 样本列表，每个样本包含 sample_idx, question, thought, answer
+            samples: 样本列表，每个样本必须包含 id, question, thought, answer
+            id_to_sample: 全局 ID -> sample 的映射
             n_rewrites: 每个样本生成的改写次数
             max_new_tokens: 最大生成长度
             temperature: 采样温度
@@ -914,6 +1033,7 @@ class RayRewriteClient:
             ckpt_path: 检查点文件路径
             progress_path: 进度文件路径
             process_batch_size: 每处理这么多样本后保存一次 ckpt
+            is_resuming: 是否是断点续传模式
 
         Returns:
             处理后的样本列表
@@ -933,14 +1053,15 @@ class RayRewriteClient:
         if frequency_penalty != 0.0:
             sampling_params["frequency_penalty"] = frequency_penalty
 
-        # 准备所有任务
+        # 准备所有任务 - 使用唯一 ID
         all_tasks = []
         task_id = 0
         for sample in samples:
+            sample_id = sample['id']
             for _ in range(n_rewrites):
                 all_tasks.append({
                     'task_id': task_id,
-                    'sample_idx': sample['sample_idx'],
+                    'sample_id': sample_id,  # 使用唯一 ID
                     'question': sample['question'],
                     'thought': sample['thought'],
                     'answer': sample.get('answer', ''),
@@ -966,14 +1087,11 @@ class RayRewriteClient:
 
         print(f"  [RayRewriteClient] Distributed {total_tasks} tasks across {num_actors} actors")
 
-        # 收集结果
-        results = {i: [] for i in range(len(samples))}
-        sample_task_counts = {i: 0 for i in range(len(samples))}
-        completed_samples = []
+        # 收集结果 - 使用 sample_id (唯一 ID) 作为键
+        results = {s['id']: [] for s in samples}
+        sample_task_counts = {s['id']: 0 for s in samples}
+        completed_ids = []
         write_batch = []
-
-        # 获取起始样本索引
-        start_sample_idx = samples[0].get('sample_idx', 0) if samples else 0
 
         # 使用异步方式提交任务并收集结果
         pending_refs = []
@@ -1016,15 +1134,15 @@ class RayRewriteClient:
 
                         # 处理结果
                         for result in batch_results:
-                            sample_idx = result['sample_idx']
-                            results[sample_idx].append(result)
-                            sample_task_counts[sample_idx] += 1
+                            sample_id = result['sample_id']
+                            results[sample_id].append(result)
+                            sample_task_counts[sample_id] += 1
                             pbar.update(1)
 
                             # 检查样本是否完成
-                            if sample_task_counts[sample_idx] == n_rewrites:
-                                write_batch.append(sample_idx)
-                                completed_samples.append(sample_idx)
+                            if sample_task_counts[sample_id] == n_rewrites:
+                                write_batch.append(sample_id)
+                                completed_ids.append(sample_id)
 
                         # 提交该 actor 的下一批
                         next_batch_idx = actor_batch_indices[actor_idx]
@@ -1037,14 +1155,15 @@ class RayRewriteClient:
 
                         # 批量写入
                         completed_tasks = sum(sample_task_counts.values())
-                        pbar.set_postfix({'completed': f'{completed_tasks}/{total_tasks}', 'samples': f'{len(completed_samples)}/{len(samples)}'})
+                        pbar.set_postfix({'completed': f'{completed_tasks}/{total_tasks}', 'samples': f'{len(completed_ids)}/{len(samples)}'})
 
                         if len(write_batch) >= process_batch_size or completed_tasks == total_tasks:
                             batch_write_results = []
-                            for idx in sorted(write_batch):
-                                sample = samples[idx]
+                            for sample_id in sorted(write_batch):
+                                # 从 id_to_sample 获取完整信息（包含 line_id 等）
+                                sample = id_to_sample[sample_id]
                                 rewrite_results = []
-                                for r in results.get(idx, []):
+                                for r in results.get(sample_id, []):
                                     rewrite_results.append({
                                         'rewrite_output': r['rewrite_output'],
                                         'rewrite_reasoning': r['rewrite_reasoning'],
@@ -1052,7 +1171,8 @@ class RayRewriteClient:
                                     })
 
                                 result_item = {
-                                    'sample_idx': sample['sample_idx'],
+                                    'id': sample_id,
+                                    'line_id': sample.get('line_id', -1),
                                     'question': sample['question'],
                                     'original_thought': sample['thought'],
                                     'answer': sample.get('answer', ''),
@@ -1062,17 +1182,17 @@ class RayRewriteClient:
 
                             # 写入文件
                             if ckpt_path:
-                                is_first_batch = (start_sample_idx == samples[0].get('sample_idx', 0) and len(completed_samples) == len(write_batch))
-                                save_jsonl(batch_write_results, ckpt_path, append=(not is_first_batch))
+                                # 断点续传时始终追加，首次运行时覆盖
+                                save_jsonl(batch_write_results, ckpt_path, append=is_resuming)
+                                # 首次写入后，后续都应该是追加模式
+                                is_resuming = True
 
-                            # 更新进度
+                            # 更新进度（记录已完成的 ID）
                             if progress_path:
-                                completed_count = len(completed_samples)
-                                last_idx = start_sample_idx + completed_count
                                 with open(progress_path, 'w') as f:
-                                    json.dump({'last_completed_idx': last_idx}, f)
+                                    json.dump({'completed_ids': completed_ids}, f)
 
-                            pbar.write(f"  Saved batch of {len(write_batch)} samples ({len(completed_samples)}/{len(samples)} completed)")
+                            pbar.write(f"  Saved batch of {len(write_batch)} samples ({len(completed_ids)}/{len(samples)} completed)")
                             write_batch.clear()
 
                     except Exception as e:
@@ -1089,9 +1209,10 @@ class RayRewriteClient:
 
         # 整理最终结果
         final_results = []
-        for i, sample in enumerate(samples):
+        for sample in samples:
+            sample_id = sample['id']
             rewrite_results = []
-            for r in results.get(i, []):
+            for r in results.get(sample_id, []):
                 rewrite_results.append({
                     'rewrite_output': r['rewrite_output'],
                     'rewrite_reasoning': r['rewrite_reasoning'],
@@ -1099,7 +1220,8 @@ class RayRewriteClient:
                 })
 
             result_item = {
-                'sample_idx': sample['sample_idx'],
+                'id': sample_id,
+                'line_id': sample.get('line_id', -1),
                 'question': sample['question'],
                 'original_thought': sample['thought'],
                 'answer': sample.get('answer', ''),
@@ -1141,7 +1263,7 @@ def step_rewrite(
 
     使用 Ray 数据并行模式。
 
-    支持断点续传。
+    支持断点续传（使用唯一 ID 而不是索引）。
     """
     print("\n" + "=" * 60)
     print("Step 3: Rewrite Generation")
@@ -1150,47 +1272,44 @@ def step_rewrite(
     ckpt_path = get_checkpoint_path(config.output_dir, 1)
     progress_path = get_progress_path(config.output_dir, 1)
 
-    # 检查是否有断点
-    start_idx = 0
-    if os.path.exists(progress_path):
-        with open(progress_path, 'r') as f:
-            progress = json.load(f)
-        start_idx = progress.get('last_completed_idx', 0)
-        print(f"  [Resume] Found checkpoint, resuming from sample {start_idx}")
+    # 构建 ID -> sample 的映射
+    id_to_sample = {s['id']: s for s in samples}
 
-    # 加载已保存的结果
-    results = []
+    # 检查是否有断点：加载已处理的 ID 集合
+    processed_ids = set()
     if os.path.exists(ckpt_path):
-        results = load_jsonl(ckpt_path)
-        print(f"  [Resume] Loaded {len(results)} existing results")
+        existing_results = load_jsonl(ckpt_path)
+        for item in existing_results:
+            if 'id' in item:
+                processed_ids.add(item['id'])
+        print(f"  [Resume] Loaded {len(processed_ids)} existing results")
+
+    # 找出待处理的样本
+    samples_to_process = [s for s in samples if s['id'] not in processed_ids]
 
     total_samples = len(samples)
-    remaining_samples = total_samples - start_idx
+    remaining_samples = len(samples_to_process)
 
     print(f"  Total samples: {total_samples}")
-    print(f"  Already processed: {start_idx}")
+    print(f"  Already processed: {len(processed_ids)}")
     print(f"  Remaining: {remaining_samples}")
     print(f"  N rewrites per sample: {config.n_rewrites}")
     print(f"  Mode: Ray data parallel")
     print(f"  Num actors: {rewrite_client.num_instances}")
     print(f"  Process batch size: {config.process_batch_size}")
 
-    # 获取待处理的样本
-    remaining_samples_list = samples[start_idx:]
-
-    if not remaining_samples_list:
+    if not samples_to_process:
         print("  No samples to process.")
-        return results
-
-    # 为样本添加 sample_idx
-    samples_to_process = [
-        {**s, 'sample_idx': start_idx + i}
-        for i, s in enumerate(remaining_samples_list)
-    ]
+        # 返回完整的结果列表
+        if processed_ids and os.path.exists(ckpt_path):
+            return load_jsonl(ckpt_path)
+        return []
 
     # 批量处理（使用 process_batch_size 控制保存策略）
+    # 注意：process_samples 会在内部处理 ID 并写入文件
     new_results = rewrite_client.process_samples(
         samples=samples_to_process,
+        id_to_sample=id_to_sample,
         n_rewrites=config.n_rewrites,
         max_new_tokens=config.max_new_tokens,
         temperature=config.temperature,
@@ -1201,77 +1320,75 @@ def step_rewrite(
         ckpt_path=ckpt_path,
         progress_path=progress_path,
         process_batch_size=config.process_batch_size,
+        is_resuming=len(processed_ids) > 0,
     )
 
-    # 结果已在 process_samples 中写入文件，这里只用于返回
-    results.extend(new_results)
-
     print(f"  Completed. Results saved to: {ckpt_path}")
-    return results
+
+    # 返回完整的结果列表（合并已有和新处理的）
+    if os.path.exists(ckpt_path):
+        return load_jsonl(ckpt_path)
+    return new_results
 
 
 # =============================================================================
-# 步骤4: Similarity Penalty过滤
+# 步骤4: Similarity Penalty指标计算（不过滤）
 # =============================================================================
 
-def compute_similarity_worker(args: Tuple[int, Dict, float]) -> Tuple[int, List[Dict]]:
-    """多进程worker：计算单个样本的similarity，不删除结果只标记"""
-    idx, sample, threshold = args
+def compute_similarity_worker(args: Tuple[str, Dict]) -> Tuple[str, List[Dict]]:
+    """多进程worker：计算单个样本的similarity指标
+
+    Args:
+        args: (sample_id, sample)
+
+    Returns:
+        (sample_id, rewrite_results)
+    """
+    sample_id, sample = args
 
     original_thought = sample['original_thought']
     rewrite_results = sample.get('rewrite_results', [])
 
-    # 不删除结果，只添加标记
+    # 只计算指标，不标记过滤
     for result in rewrite_results:
         rewrite_reasoning = result.get('rewrite_reasoning')
 
         if not rewrite_reasoning:
             result['similarity_penalty'] = None
-            result['similarity_passed'] = False
-            result['filtered'] = True
             continue
 
         similarity = compute_similarity_penalty(original_thought, rewrite_reasoning)
-
         result['similarity_penalty'] = similarity
-        passed = similarity < threshold
-        result['similarity_passed'] = passed
-        # 如果之前没有过滤标记，或者当前过滤失败，则标记为 filtered
-        if passed:
-            result['filtered'] = result.get('filtered', False)
-        else:
-            result['filtered'] = True
 
-    return idx, rewrite_results
+    return sample_id, rewrite_results
 
 
-def step_similarity_filter(
+def step_compute_similarity(
     config: RewriteConfig,
     samples: List[Dict],
     stats_collector: Optional[StatisticsCollector] = None
 ) -> List[Dict]:
     """
-    步骤4: 计算similarity_penalty并标记过滤
+    步骤4: 计算similarity_penalty指标（不过滤）
 
-    不删除结果，只添加 filtered 标记
+    只计算相似度指标，保存结果以便后续过滤
     """
-    if config.skip_similarity:
-        print("\n  [Skip] Similarity filter skipped")
+    if config.skip_similarity_compute:
+        print("\n  [Skip] Similarity computation skipped")
         return samples
 
     print("\n" + "=" * 60)
-    print("Step 4: Similarity Penalty Filter")
+    print("Step 4: Similarity Penalty Computation (Metrics Only)")
     print("=" * 60)
-    print(f"  Threshold: {config.similarity_penalty_threshold}")
     print(f"  Workers: {config.num_workers}")
 
-    # 准备多进程参数
+    # 准备多进程参数 - 使用唯一 ID
     args_list = [
-        (i, sample, config.similarity_penalty_threshold)
+        (sample.get('id', str(i)), sample)
         for i, sample in enumerate(samples)
     ]
 
-    results = [None] * len(samples)
+    id_to_rewrite_results = {}
 
     # 多进程处理，使用tqdm显示进度
     with ProcessPoolExecutor(max_workers=config.num_workers) as executor:
@@ -1279,84 +1396,90 @@ def step_similarity_filter(
 
         pbar = tqdm(total=len(samples), desc="Similarity", unit="sample", dynamic_ncols=True)
         for future in as_completed(futures):
-            idx, rewrite_results = future.result()
-            results[idx] = rewrite_results
+            sample_id, rewrite_results = future.result()
+            id_to_rewrite_results[sample_id] = rewrite_results
             pbar.update(1)
         pbar.close()
 
     # 更新样本
-    filtered_samples = []
-    for i, sample in enumerate(samples):
+    updated_samples = []
+    for sample in samples:
         sample_copy = sample.copy()
-        sample_copy['rewrite_results'] = results[i] if results[i] else []
-        filtered_samples.append(sample_copy)
+        sample_id = sample.get('id')
+        if sample_id in id_to_rewrite_results:
+            sample_copy['rewrite_results'] = id_to_rewrite_results[sample_id] if id_to_rewrite_results[sample_id] else []
+        else:
+            sample_copy['rewrite_results'] = []
+        updated_samples.append(sample_copy)
 
     # 统计
-    total_rewrites = sum(len(s['rewrite_results']) for s in filtered_samples)
-    filtered_count = sum(
-        sum(1 for r in s['rewrite_results'] if r.get('filtered', False))
-        for s in filtered_samples
-    )
-    passed_count = total_rewrites - filtered_count
+    total_rewrites = sum(len(s['rewrite_results']) for s in updated_samples)
 
     print(f"  Total rewrites: {total_rewrites}")
-    print(f"  Passed: {passed_count} ({passed_count / total_rewrites * 100:.1f}%)")
-    print(f"  Filtered: {filtered_count} ({filtered_count / total_rewrites * 100:.1f}%)")
 
     # 收集统计信息
     if stats_collector:
-        stats_collector.update_similarity_stats(filtered_samples)
+        stats_collector.update_similarity_stats(updated_samples)
 
-    return filtered_samples
+    return updated_samples
 
 
 # =============================================================================
-# 步骤5: PPL过滤
+# 步骤5: CoT Effect Ratio指标计算（不过滤）
 # =============================================================================
 
 from verl.experimental.reward.cot_rewriter.sglang_student_reward import SGLangStudentRewardClient
 
 
-def step_ppl_filter(
+def step_compute_cot_effect(
     config: RewriteConfig,
     samples: List[Dict],
     stats_collector: Optional[StatisticsCollector] = None
 ) -> List[Dict]:
     """
-    步骤5: 计算 CoT Effect Ratio 并过滤
+    步骤5: 计算 CoT Effect Ratio 指标（不过滤）
 
     cot_effect_ratio = cot_effect(rewrite) / cot_effect(original)
     其中 cot_effect(cot) = avg_prob(Q,CoT,A) - avg_prob(Q,A)
 
-    支持断点续传
+    只计算指标，保存结果以便后续过滤
+    支持断点续传（使用唯一 ID）
     """
-    if config.skip_ppl:
-        print("\n  [Skip] PPL filter skipped")
+    if config.skip_ppl_compute:
+        print("\n  [Skip] CoT Effect computation skipped")
         return samples
 
     print("\n" + "=" * 60)
-    print("Step 5: CoT Effect Ratio Filter")
+    print("Step 5: CoT Effect Ratio Computation (Metrics Only)")
     print("=" * 60)
     print(f"  Student Model: {config.student_model_path}")
-    print(f"  CoT Effect Ratio Threshold: {config.cot_effect_ratio_threshold} (>{config.cot_effect_ratio_threshold} to pass)")
     print(f"  CoT Effect Ratio Ceiling: {config.cot_effect_ratio_ceiling}")
 
-    ckpt_path = get_checkpoint_path(config.output_dir, 2)
-    progress_path = get_progress_path(config.output_dir, 2)
+    ckpt_path = get_checkpoint_path(config.output_dir, 5)
+    progress_path = get_progress_path(config.output_dir, 5)
 
-    # 检查断点
-    start_idx = 0
-    if os.path.exists(progress_path):
-        with open(progress_path, 'r') as f:
-            progress = json.load(f)
-        start_idx = progress.get('last_completed_idx', 0)
-        print(f"  [Resume] Found checkpoint, resuming from sample {start_idx}")
+    # 构建已处理样本的 ID 集合
+    processed_ids = set()
+    id_to_processed_sample = {}  # ID -> 已处理样本的映射
 
-    # 加载已处理的结果
-    processed_samples = []
     if os.path.exists(ckpt_path):
-        processed_samples = load_jsonl(ckpt_path)
-        print(f"  [Resume] Loaded {len(processed_samples)} existing results")
+        existing_results = load_jsonl(ckpt_path)
+        for item in existing_results:
+            if 'id' in item:
+                processed_ids.add(item['id'])
+                id_to_processed_sample[item['id']] = item
+        print(f"  [Resume] Loaded {len(processed_ids)} existing results")
+
+    # 找出待处理的样本
+    samples_to_process = [s for s in samples if s.get('id') not in processed_ids]
+
+    print(f"  Total samples: {len(samples)}")
+    print(f"  Already processed: {len(processed_ids)}")
+    print(f"  Remaining: {len(samples_to_process)}")
+
+    if not samples_to_process:
+        print("  No samples to process.")
+        return list(id_to_processed_sample.values())
 
     # 初始化SGLang客户端，使用 cot_effect_ratio 模式
     print("  Initializing SGLang student reward client (cot_effect_ratio mode)...")
@@ -1371,28 +1494,27 @@ def step_ppl_filter(
     )
     student_client.initialize()
 
-    total_samples = len(samples)
     all_cot_effect_ratios = []
 
     # 创建进度条
     pbar = tqdm(
-        range(start_idx, total_samples),
-        initial=start_idx,
-        total=total_samples,
-        desc="CoT Effect Ratio Filter",
+        samples_to_process,
+        total=len(samples_to_process),
+        desc="CoT Effect",
         unit="sample",
         dynamic_ncols=True
     )
 
-    for idx in pbar:
-        sample = samples[idx]
+    for sample in pbar:
+        sample_id = sample.get('id')
         question = sample['question']
-        original_thought = sample['original_thought']
+        # 兼容 original_thought 和 thought 两种字段名
+        original_thought = sample.get('original_thought') or sample.get('thought', '')
         answer = sample.get('answer', '')
         rewrite_results = sample.get('rewrite_results', [])
 
         # 更新进度条
-        pbar.set_postfix({'sample': f'{idx}/{total_samples}'})
+        pbar.set_postfix({'remaining': f'{len(samples_to_process) - pbar.n}'})
 
         # 提取有效的rewrite reasoning
         rewrite_cots = []
@@ -1420,47 +1542,36 @@ def step_ppl_filter(
                 # cot_effect_ratio = rewards (在 cot_effect_ratio 模式下)
                 cot_effect_ratios = reward_result.get('rewards', [])
 
-                # 更新结果
+                # 更新结果（只计算指标，不过滤）
                 for i, r_idx in enumerate(result_indices):
                     if i < len(cot_effect_ratios):
                         ratio = cot_effect_ratios[i]
                         sample['rewrite_results'][r_idx]['cot_effect_ratio'] = ratio
-                        # ratio > 1 表示 rewrite 比 original 更有帮助
-                        # ratio > threshold 则通过过滤
-                        passed = ratio > config.cot_effect_ratio_threshold
-                        sample['rewrite_results'][r_idx]['ppl_passed'] = passed
                         # 同时保留 ppl_relative_improvement 字段用于兼容性
                         sample['rewrite_results'][r_idx]['ppl_relative_improvement'] = ratio - 1.0  # 转换为改进率
-                        # 更新 filtered 标记：如果之前未过滤且当前通过，则保持未过滤；否则标记为过滤
-                        if not passed:
-                            sample['rewrite_results'][r_idx]['filtered'] = True
-                        else:
-                            # 如果之前已经被过滤，保持过滤状态
-                            sample['rewrite_results'][r_idx]['filtered'] = sample['rewrite_results'][r_idx].get('filtered', False)
                         all_cot_effect_ratios.append(ratio)
                     else:
                         sample['rewrite_results'][r_idx]['cot_effect_ratio'] = 0.0
                         sample['rewrite_results'][r_idx]['ppl_relative_improvement'] = -float('inf')
-                        sample['rewrite_results'][r_idx]['ppl_passed'] = False
-                        sample['rewrite_results'][r_idx]['filtered'] = True
 
             except Exception as e:
-                pbar.set_postfix({'sample': f'{idx}/{total_samples}', 'error': str(e)[:30]})
+                pbar.set_postfix({'error': str(e)[:30]})
                 for r_idx in result_indices:
                     sample['rewrite_results'][r_idx]['cot_effect_ratio'] = 0.0
                     sample['rewrite_results'][r_idx]['ppl_relative_improvement'] = -float('inf')
-                    sample['rewrite_results'][r_idx]['ppl_passed'] = False
-                    sample['rewrite_results'][r_idx]['filtered'] = True
 
-        processed_samples.append(sample)
+        # 保存到映射
+        id_to_processed_sample[sample_id] = sample
 
-        # 保存进度
-        save_jsonl([sample], ckpt_path, append=(idx > 0))
+        # 实时保存（追加模式）
+        save_jsonl([sample], ckpt_path, append=True)
+
+        # 更新进度
         with open(progress_path, 'w') as f:
-            json.dump({'last_completed_idx': idx + 1}, f)
+            json.dump({'processed_ids': list(id_to_processed_sample.keys())}, f)
 
-        if (idx + 1) % 10 == 0 or idx == total_samples - 1:
-            print(f"  Progress: {idx + 1}/{total_samples}")
+        if (pbar.n + 1) % 10 == 0 or pbar.n == len(samples_to_process) - 1:
+            print(f"  Progress: {pbar.n + 1}/{len(samples_to_process)}")
 
     # 输出 CoT Effect Ratio 分布统计
     if all_cot_effect_ratios:
@@ -1470,7 +1581,6 @@ def step_ppl_filter(
         print(f"    Min: {np.min(all_cot_effect_ratios):.4f}")
         print(f"    Max: {np.max(all_cot_effect_ratios):.4f}")
         print(f"    Median: {np.median(all_cot_effect_ratios):.4f}")
-        print(f"    Passed: {sum(1 for x in all_cot_effect_ratios if x > config.cot_effect_ratio_threshold)}/{len(all_cot_effect_ratios)}")
 
     print(f"  Completed. Results saved to: {ckpt_path}")
 
@@ -1479,55 +1589,70 @@ def step_ppl_filter(
         stats_collector.update_ppl_stats(all_cot_effect_ratios)
 
     # 清理
-    student_client.shutdown()
+    student_client.cleanup()
 
-    return processed_samples
+    # 返回完整的结果列表（按原始顺序）
+    result_list = []
+    for s in samples:
+        sample_id = s.get('id')
+        if sample_id in id_to_processed_sample:
+            result_list.append(id_to_processed_sample[sample_id])
+
+    return result_list
 
 
 # =============================================================================
-# 步骤6: FSF过滤
+# 步骤6: FSF指标计算（不过滤）
 # =============================================================================
 
 from verl.experimental.reward.cot_rewriter.sglang_fsf_reward import SGLangFSFClient
 
 
-def step_fsf_filter(
+def step_compute_fsf(
     config: RewriteConfig,
     samples: List[Dict],
     stats_collector: Optional[StatisticsCollector] = None
 ) -> List[Dict]:
     """
-    步骤6: 计算FSF并过滤
+    步骤6: 计算 FSF 指标（不过滤）
 
-    过滤条件：fsf_rewrite < fsf_original（改写比原文失败步骤更少）
-    支持断点续传
+    只计算FSF指标，保存结果以便后续过滤
+    支持断点续传（使用唯一 ID）
     """
-    if config.skip_fsf:
-        print("\n  [Skip] FSF filter skipped")
+    if config.skip_fsf_compute:
+        print("\n  [Skip] FSF computation skipped")
         return samples
 
     print("\n" + "=" * 60)
-    print("Step 6: FSF Filter (Compare with Original)")
+    print("Step 6: FSF Computation (Metrics Only)")
     print("=" * 60)
     print(f"  FSF Judge Model: {config.fsf_judge_model_path}")
-    print(f"  Filter: Keep rewrites with fsf_rewrite < fsf_original")
 
-    ckpt_path = get_checkpoint_path(config.output_dir, 3)
-    progress_path = get_progress_path(config.output_dir, 3)
+    ckpt_path = get_checkpoint_path(config.output_dir, 6)
+    progress_path = get_progress_path(config.output_dir, 6)
 
-    # 检查断点
-    start_idx = 0
-    if os.path.exists(progress_path):
-        with open(progress_path, 'r') as f:
-            progress = json.load(f)
-        start_idx = progress.get('last_completed_idx', 0)
-        print(f"  [Resume] Found checkpoint, resuming from sample {start_idx}")
+    # 构建已处理样本的 ID 集合
+    processed_ids = set()
+    id_to_processed_sample = {}  # ID -> 已处理样本的映射
 
-    # 加载已处理的结果
-    processed_samples = []
     if os.path.exists(ckpt_path):
-        processed_samples = load_jsonl(ckpt_path)
-        print(f"  [Resume] Loaded {len(processed_samples)} existing results")
+        existing_results = load_jsonl(ckpt_path)
+        for item in existing_results:
+            if 'id' in item:
+                processed_ids.add(item['id'])
+                id_to_processed_sample[item['id']] = item
+        print(f"  [Resume] Loaded {len(processed_ids)} existing results")
+
+    # 找出待处理的样本
+    samples_to_process = [s for s in samples if s.get('id') not in processed_ids]
+
+    print(f"  Total samples: {len(samples)}")
+    print(f"  Already processed: {len(processed_ids)}")
+    print(f"  Remaining: {len(samples_to_process)}")
+
+    if not samples_to_process:
+        print("  No samples to process.")
+        return list(id_to_processed_sample.values())
 
     # 初始化FSF客户端
     print("  Initializing SGLang FSF client...")
@@ -1539,113 +1664,103 @@ def step_fsf_filter(
     )
     fsf_client.initialize()
 
-    total_samples = len(samples)
     original_fsfs_recorded = []  # 记录所有 original FSF 值
-    rewrite_better_count = 0      # 记录有多少 rewrite 比 original 好
+    rewrite_fsfs_recorded = []   # 记录所有 rewrite FSF 值
 
     # 创建进度条
     pbar = tqdm(
-        range(start_idx, total_samples),
-        initial=start_idx,
-        total=total_samples,
-        desc="FSF Filter",
+        samples_to_process,
+        total=len(samples_to_process),
+        desc="FSF Compute",
         unit="sample",
         dynamic_ncols=True
     )
 
-    for idx in pbar:
-        sample = samples[idx]
-        original_thought = sample.get('original_thought', '')
-        rewrite_results = sample.get('rewrite_results', [])
+    # 批量处理样本以提高 GPU 利用率
+    # 每个批次包含多个样本，以便在 8 个 GPU 之间分配工作
+    BATCH_SIZE = 32  # 每批处理 32 个样本，确保每个 GPU 都有工作
+
+    for batch_start in range(0, len(samples_to_process), BATCH_SIZE):
+        batch_end = min(batch_start + BATCH_SIZE, len(samples_to_process))
+        batch_samples = samples_to_process[batch_start:batch_end]
 
         # 更新进度条
-        pbar.set_postfix({'sample': f'{idx}/{total_samples}'})
+        pbar.n = batch_start
+        pbar.set_postfix({'batch': f'{batch_start}-{batch_end}', 'remaining': f'{len(samples_to_process) - batch_end}'})
 
-        # 提取有效的rewrite reasoning
-        rewrite_cots = []
-        result_indices = []
+        # 收集所有需要计算的 FSF 任务
+        all_questions = []
+        all_original_cots = []
+        all_rewrite_cots = []
+        task_to_sample = []  # (sample_idx, result_idx) 映射
 
-        for r_idx, result in enumerate(rewrite_results):
-            if result.get('rewrite_reasoning'):
-                rewrite_cots.append(result['rewrite_reasoning'])
-                result_indices.append(r_idx)
+        for sample in batch_samples:
+            sample_idx_in_batch = len(task_to_sample)
+            original_thought = sample.get('original_thought') or sample.get('thought', '')
+            rewrite_results = sample.get('rewrite_results', [])
 
-        if rewrite_cots and original_thought:
+            for r_idx, result in enumerate(rewrite_results):
+                if result.get('rewrite_reasoning') and original_thought:
+                    all_questions.append(sample['question'])
+                    all_original_cots.append(original_thought)
+                    all_rewrite_cots.append(result['rewrite_reasoning'])
+                    task_to_sample.append((sample, r_idx))
+
+        # 批量计算 FSF
+        if all_questions:
             try:
-                # 使用 compute_logic_reward_batch 同时计算 original 和 rewrite 的 FSF
-                # 这个方法会返回 original_fsfs, rewrite_fsfs, logic_rewards
-                # logic_rewards = original_fsf - rewrite_fsf，正值表示 rewrite 更好
                 fsf_result = fsf_client.compute_logic_reward_batch(
-                    questions=[sample['question']] * len(rewrite_cots),
-                    original_cots=[original_thought] * len(rewrite_cots),
-                    rewrite_cots=rewrite_cots,
+                    questions=all_questions,
+                    original_cots=all_original_cots,
+                    rewrite_cots=all_rewrite_cots,
                 )
 
                 original_fsfs = fsf_result.get('original_fsfs', [])
                 rewrite_fsfs = fsf_result.get('rewrite_fsfs', [])
-                logic_rewards = fsf_result.get('logic_rewards', [])
 
-                # 记录第一个 original FSF（同一个样本的所有 original FSF 应该相同）
-                if original_fsfs and original_fsfs[0] is not None:
-                    original_fsfs_recorded.append(original_fsfs[0])
-
-                # 更新结果
-                sample_has_better_rewrite = False
-                for i, r_idx in enumerate(result_indices):
-                    if i < len(rewrite_fsfs) and rewrite_fsfs[i] is not None:
-                        rewrite_fsf = rewrite_fsfs[i]
-                        original_fsf = original_fsfs[i] if i < len(original_fsfs) else None
+                # 分发结果回样本
+                for task_idx, (sample, r_idx) in enumerate(task_to_sample):
+                    if task_idx < len(rewrite_fsfs) and rewrite_fsfs[task_idx] is not None:
+                        rewrite_fsf = rewrite_fsfs[task_idx]
+                        original_fsf = original_fsfs[task_idx] if task_idx < len(original_fsfs) else None
 
                         sample['rewrite_results'][r_idx]['fsf'] = rewrite_fsf
                         sample['rewrite_results'][r_idx]['original_fsf'] = original_fsf
 
-                        # 过滤条件：fsf_rewrite < fsf_original
-                        # 即 logic_reward = original_fsf - rewrite_fsf > 0
-                        if original_fsf is not None:
-                            passed = rewrite_fsf < original_fsf
-                        else:
-                            passed = False  # original FSF 计算失败，不通过
-
-                        sample['rewrite_results'][r_idx]['fsf_passed'] = passed
-                        # 更新 filtered 标记
-                        if not passed:
-                            sample['rewrite_results'][r_idx]['filtered'] = True
-                        else:
-                            # 如果之前已经被过滤，保持过滤状态
-                            sample['rewrite_results'][r_idx]['filtered'] = sample['rewrite_results'][r_idx].get('filtered', False)
-
-                        if passed:
-                            sample_has_better_rewrite = True
+                        # 记录统计
+                        if task_idx == 0 or original_fsf is not None:
+                            if original_fsf is not None:
+                                original_fsfs_recorded.append(original_fsf)
+                        rewrite_fsfs_recorded.append(rewrite_fsf)
                     else:
-                        sample['rewrite_results'][r_idx]['fsf'] = float('inf')
+                        sample['rewrite_results'][r_idx]['fsf'] = None
                         sample['rewrite_results'][r_idx]['original_fsf'] = None
-                        sample['rewrite_results'][r_idx]['fsf_passed'] = False
-                        sample['rewrite_results'][r_idx]['filtered'] = True
-
-                if sample_has_better_rewrite:
-                    rewrite_better_count += 1
 
             except Exception as e:
-                pbar.set_postfix({'sample': f'{idx}/{total_samples}', 'error': str(e)[:30]})
-                for r_idx in result_indices:
-                    sample['rewrite_results'][r_idx]['fsf'] = float('inf')
+                pbar.set_postfix({'error': str(e)[:30]})
+                for sample, r_idx in task_to_sample:
+                    sample['rewrite_results'][r_idx]['fsf'] = None
                     sample['rewrite_results'][r_idx]['original_fsf'] = None
-                    sample['rewrite_results'][r_idx]['fsf_passed'] = False
-                    sample['rewrite_results'][r_idx]['filtered'] = True
-        else:
-            # 没有 rewrite 或 original 为空，标记所有为未通过
-            for r_idx in result_indices:
-                sample['rewrite_results'][r_idx]['fsf'] = None
-                sample['rewrite_results'][r_idx]['original_fsf'] = None
-                sample['rewrite_results'][r_idx]['fsf_passed'] = False
-                sample['rewrite_results'][r_idx]['filtered'] = True
 
-        processed_samples.append(sample)
+        # 处理没有有效 rewrite 的样本
+        for sample in batch_samples:
+            if not any(r.get('rewrite_reasoning') for r in sample.get('rewrite_results', [])):
+                for r_idx, result in enumerate(sample.get('rewrite_results', [])):
+                    sample['rewrite_results'][r_idx]['fsf'] = None
+                    sample['rewrite_results'][r_idx]['original_fsf'] = None
 
-        # 保存进度
-        save_jsonl([sample], ckpt_path, append=(idx > 0))
+            # 保存到映射
+            sample_id = sample.get('id')
+            id_to_processed_sample[sample_id] = sample
+
+            # 实时保存（追加模式）
+            save_jsonl([sample], ckpt_path, append=True)
+
+        # 更新进度
         with open(progress_path, 'w') as f:
-            json.dump({'last_completed_idx': idx + 1}, f)
+            json.dump({'processed_ids': list(id_to_processed_sample.keys())}, f)
+
+    pbar.close()
 
     # 输出 FSF 统计
     if original_fsfs_recorded:
@@ -1656,18 +1771,140 @@ def step_fsf_filter(
         print(f"    Max: {np.max(original_fsfs_recorded):.4f}")
         print(f"    Median: {np.median(original_fsfs_recorded):.4f}")
 
-    print(f"\n  Samples with at least one better rewrite: {rewrite_better_count}/{total_samples}")
+    if rewrite_fsfs_recorded:
+        print("\n  Rewrite FSF Distribution:")
+        print(f"    Mean: {np.mean(rewrite_fsfs_recorded):.4f}")
+        print(f"    Std: {np.std(rewrite_fsfs_recorded):.4f}")
+        print(f"    Min: {np.min(rewrite_fsfs_recorded):.4f}")
+        print(f"    Max: {np.max(rewrite_fsfs_recorded):.4f}")
+        print(f"    Median: {np.median(rewrite_fsfs_recorded):.4f}")
 
     print(f"  Completed. Results saved to: {ckpt_path}")
 
     # 收集统计信息
     if stats_collector:
-        stats_collector.update_fsf_stats(original_fsfs_recorded, rewrite_better_count, total_samples)
+        stats_collector.update_fsf_stats(original_fsfs_recorded, rewrite_fsfs_recorded)
 
     # 清理
     fsf_client.shutdown()
 
-    return processed_samples
+    # 返回完整的结果列表（按原始顺序）
+    result_list = []
+    for s in samples:
+        sample_id = s.get('id')
+        if sample_id in id_to_processed_sample:
+            result_list.append(id_to_processed_sample[sample_id])
+
+    return result_list
+
+
+# =============================================================================
+# 步骤7: 应用过滤规则
+# =============================================================================
+
+def step_apply_filters(
+    config: RewriteConfig,
+    samples: List[Dict],
+    stats_collector: Optional[StatisticsCollector] = None
+) -> List[Dict]:
+    """
+    步骤7: 根据配置的阈值应用过滤规则
+
+    这个步骤可以单独运行，用于调整阈值而无需重新计算指标
+    """
+    print("\n" + "=" * 60)
+    print("Step 7: Apply Filters")
+    print("=" * 60)
+    print(f"  Similarity Enabled: {config.enable_similarity_filter}")
+    if config.enable_similarity_filter:
+        print(f"    Threshold: {config.similarity_penalty_threshold}")
+    print(f"  CoT Effect Enabled: {config.enable_cot_effect_filter}")
+    if config.enable_cot_effect_filter:
+        print(f"    Threshold: {config.cot_effect_ratio_threshold}")
+    print(f"  FSF Enabled: {config.enable_fsf_filter}")
+    if config.enable_fsf_filter:
+        print(f"    Mode: fsf_rewrite < fsf_original")
+
+    # 保存过滤配置
+    filter_config_path = get_filter_config_path(config.output_dir)
+    filter_config = {
+        'enable_similarity_filter': config.enable_similarity_filter,
+        'similarity_penalty_threshold': config.similarity_penalty_threshold,
+        'enable_cot_effect_filter': config.enable_cot_effect_filter,
+        'cot_effect_ratio_threshold': config.cot_effect_ratio_threshold,
+        'enable_fsf_filter': config.enable_fsf_filter,
+        'fsf_use_relative': config.fsf_use_relative,
+    }
+    with open(filter_config_path, 'w') as f:
+        yaml.dump(filter_config, f)
+    print(f"  Filter config saved to: {filter_config_path}")
+
+    total_rewrites = 0
+    filtered_count = 0
+
+    for sample in samples:
+        for result in sample.get('rewrite_results', []):
+            total_rewrites += 1
+
+            # 重置过滤标记
+            result['filtered'] = False
+            result['similarity_passed'] = True
+            result['cot_effect_passed'] = True
+            result['fsf_passed'] = True
+
+            # 应用相似度过滤
+            if config.enable_similarity_filter:
+                sim = result.get('similarity_penalty')
+                if sim is None:
+                    result['filtered'] = True
+                    result['similarity_passed'] = False
+                elif sim >= config.similarity_penalty_threshold:
+                    result['filtered'] = True
+                    result['similarity_passed'] = False
+
+            # 应用 CoT Effect 过滤
+            if config.enable_cot_effect_filter and not result.get('filtered', False):
+                ratio = result.get('cot_effect_ratio')
+                if ratio is None:
+                    result['filtered'] = True
+                    result['cot_effect_passed'] = False
+                elif ratio <= config.cot_effect_ratio_threshold:
+                    result['filtered'] = True
+                    result['cot_effect_passed'] = False
+
+            # 应用 FSF 过滤
+            if config.enable_fsf_filter and not result.get('filtered', False):
+                rewrite_fsf = result.get('fsf')
+                original_fsf = result.get('original_fsf')
+                if rewrite_fsf is None or original_fsf is None:
+                    result['filtered'] = True
+                    result['fsf_passed'] = False
+                elif config.fsf_use_relative:
+                    # 使用相对比较：fsf_rewrite < fsf_original
+                    if rewrite_fsf >= original_fsf:
+                        result['filtered'] = True
+                        result['fsf_passed'] = False
+
+            if result.get('filtered', False):
+                filtered_count += 1
+
+    passed_count = total_rewrites - filtered_count
+
+    print(f"\n  Filtering Results:")
+    print(f"    Total rewrites: {total_rewrites}")
+    print(f"    Passed: {passed_count} ({passed_count / total_rewrites * 100:.1f}%)")
+    print(f"    Filtered: {filtered_count} ({filtered_count / total_rewrites * 100:.1f}%)")
+
+    # 保存过滤后的结果
+    metrics_path = get_metrics_path(config.output_dir)
+    save_jsonl(samples, metrics_path)
+    print(f"  Filtered results saved to: {metrics_path}")
+
+    # 收集统计信息
+    if stats_collector:
+        stats_collector.update_filter_stats(samples)
+
+    return samples
 
 
 # =============================================================================
@@ -1762,7 +1999,8 @@ def step_select_and_generate(
     
     for sample in pbar:
         question = sample['question']
-        original_thought = sample['original_thought']
+        # 兼容 original_thought 和 thought 两种字段名
+        original_thought = sample.get('original_thought') or sample.get('thought', '')
         answer = sample.get('answer', '')
         rewrite_results = sample.get('rewrite_results', [])
         
@@ -1804,6 +2042,8 @@ def step_select_and_generate(
                 }
             ],
             'metadata': {
+                'sample_id': sample.get('id'),  # 保留唯一 ID
+                'line_id': sample.get('line_id'),  # 保留行号
                 'using_original': using_original,
                 'original_thought': original_thought,
                 'answer': answer,
@@ -1854,33 +2094,46 @@ def step_select_and_generate(
 # =============================================================================
 
 def load_and_parse_input_data(input_path: str) -> List[Dict]:
-    """加载并解析输入数据"""
+    """加载并解析输入数据
+
+    为每个样本分配唯一 ID: f"{line_id}-{question_hash}"
+    - line_id: 原始数据中的行号（从0开始）
+    - question_hash: question 内容的 SHA256 哈希值（前8位）
+    """
+    import hashlib
+
     print(f"\n  Loading input data from: {input_path}")
-    
+
     data = load_jsonl(input_path)
     samples = []
-    
-    for item in data:
+
+    for line_id, item in enumerate(data):
         conversations = item.get('conversations', [])
         if len(conversations) < 2:
             continue
-        
+
         question = conversations[0].get('content', '')
         assistant_content = conversations[1].get('content', '')
-        
+
         try:
             thought = extract_think_from_rv(assistant_content)
             answer = extract_answer_from_rv(assistant_content)
         except (IndexError, AttributeError):
             continue
-        
+
+        # 生成唯一 ID: line_id + question hash
+        question_hash = hashlib.sha256(question.encode('utf-8')).hexdigest()[:8]
+        unique_id = f"{line_id}-{question_hash}"
+
         samples.append({
+            'id': unique_id,  # 唯一标识符
+            'line_id': line_id,  # 原始行号
             'question': question,
             'thought': thought,
             'answer': answer,
             'original_item': item
         })
-    
+
     print(f"  Loaded {len(samples)} valid samples")
     return samples
 
@@ -1888,9 +2141,11 @@ def load_and_parse_input_data(input_path: str) -> List[Dict]:
 def main():
     parser = argparse.ArgumentParser(description='Rewrite dataset using rewrite model')
     parser.add_argument('--config', type=str, required=True, help='Path to config YAML file')
+    parser.add_argument('--filter-config', type=str, default=None,
+                        help='Path to filter config YAML file (for re-running with different thresholds)')
     parser.add_argument('--step', type=str, default='all',
-                        choices=['all', 'rewrite', 'similarity', 'ppl', 'fsf', 'select'],
-                        help='Run specific step only')
+                        choices=['all', 'rewrite', 'similarity', 'cot_effect', 'fsf', 'filter', 'select'],
+                        help='Run specific step only (new: similarity/cot_effect/fsf are compute steps, filter applies thresholds)')
     parser.add_argument('--no-plots', action='store_true',
                         help='Skip generating distribution plots')
     args = parser.parse_args()
@@ -1899,8 +2154,15 @@ def main():
     print("=" * 60)
     print("Loading Configuration")
     print("=" * 60)
-    config = load_config(args.config)
-    print(f"  Config loaded from: {args.config}")
+
+    if args.filter_config:
+        config = load_config_with_filters(args.config, args.filter_config)
+        print(f"  Config loaded from: {args.config}")
+        print(f"  Filter overrides from: {args.filter_config}")
+    else:
+        config = load_config(args.config)
+        print(f"  Config loaded from: {args.config}")
+
     print(f"  Output directory: {config.output_dir}")
 
     # 创建输出目录
@@ -1949,48 +2211,53 @@ def main():
     # 加载输入数据
     samples = load_and_parse_input_data(config.input_data_path)
 
-    # 根据步骤执行
+    # 根据步骤执行 - 新工作流程
     if args.step == 'all' or args.step == 'rewrite':
         # 步骤3: 改写生成
         samples = step_rewrite(config, samples, rewrite_client)
         rewrite_client.shutdown()
         gc.collect()
         torch.cuda.empty_cache()
+    elif not os.path.exists(get_checkpoint_path(config.output_dir, 1)):
+        print("\n  [Error] Rewrite checkpoint not found. Please run with --step rewrite first.")
+        return
     else:
         # 从检查点加载
         ckpt_path = get_checkpoint_path(config.output_dir, 1)
-        if os.path.exists(ckpt_path):
-            samples = load_jsonl(ckpt_path)
-            print(f"\n  Loaded {len(samples)} samples from checkpoint 1")
+        samples = load_jsonl(ckpt_path)
+        print(f"\n  Loaded {len(samples)} samples from checkpoint 1")
 
+    # 步骤4: 计算相似度指标（不过滤）
     if args.step == 'all' or args.step == 'similarity':
-        # 步骤4: Similarity过滤
-        samples = step_similarity_filter(config, samples, stats_collector)
-        # 保存中间结果
-        save_jsonl(samples, get_checkpoint_path(config.output_dir, '1_5'))
-    else:
-        ckpt_path = get_checkpoint_path(config.output_dir, '1_5')
-        if os.path.exists(ckpt_path):
-            samples = load_jsonl(ckpt_path)
+        samples = step_compute_similarity(config, samples, stats_collector)
+    elif args.step != 'rewrite' and args.step != 'filter' and args.step != 'select':
+        metrics_path = get_metrics_path(config.output_dir)
+        if os.path.exists(metrics_path):
+            # 尝试从指标文件加载
+            samples = load_jsonl(metrics_path)
+            print(f"\n  Loaded {len(samples)} samples from metrics file")
+        else:
+            # 从旧检查点加载（兼容）
+            ckpt_path = get_checkpoint_path(config.output_dir, 4)
+            if os.path.exists(ckpt_path):
+                samples = load_jsonl(ckpt_path)
+            elif os.path.exists(get_checkpoint_path(config.output_dir, '1_5')):
+                samples = load_jsonl(get_checkpoint_path(config.output_dir, '1_5'))
 
-    if args.step == 'all' or args.step == 'ppl':
-        # 步骤5: PPL过滤
-        samples = step_ppl_filter(config, samples, stats_collector)
-    else:
-        ckpt_path = get_checkpoint_path(config.output_dir, 2)
-        if os.path.exists(ckpt_path):
-            samples = load_jsonl(ckpt_path)
+    # 步骤5: 计算 CoT Effect Ratio 指标（不过滤）
+    if args.step == 'all' or args.step == 'cot_effect':
+        samples = step_compute_cot_effect(config, samples, stats_collector)
 
+    # 步骤6: 计算 FSF 指标（不过滤）
     if args.step == 'all' or args.step == 'fsf':
-        # 步骤6: FSF过滤
-        samples = step_fsf_filter(config, samples, stats_collector)
-    else:
-        ckpt_path = get_checkpoint_path(config.output_dir, 3)
-        if os.path.exists(ckpt_path):
-            samples = load_jsonl(ckpt_path)
+        samples = step_compute_fsf(config, samples, stats_collector)
 
+    # 步骤7: 应用过滤规则
+    if args.step == 'all' or args.step == 'filter':
+        samples = step_apply_filters(config, samples, stats_collector)
+
+    # 步骤8: 选择和生成
     if args.step == 'all' or args.step == 'select':
-        # 步骤7: 选择和生成
         new_dataset, stats = step_select_and_generate(config, samples)
         # 更新最终统计
         stats_collector.update_final_stats(stats)
@@ -2010,6 +2277,23 @@ def main():
     # 绘制分布图
     if not args.no_plots:
         save_distribution_plots(stats_collector, config.output_dir)
+
+    # 打印重新运行提示
+    if args.step == 'all':
+        print("\n" + "=" * 60)
+        print("Quick Re-run Guide")
+        print("=" * 60)
+        print("To re-run with different filter thresholds (no recomputation needed):")
+        print(f"  1. Create a filter config file (e.g., filter_adjusted.yaml):")
+        print("     enable_similarity_filter: true")
+        print("     similarity_penalty_threshold: 0.6")
+        print("     enable_cot_effect_filter: true")
+        print("     cot_effect_ratio_threshold: 0.9")
+        print("     enable_fsf_filter: true")
+        print(f"  2. Run: python inference/rewrite_dataset.py \\")
+        print(f"             --config {args.config} \\")
+        print(f"             --filter-config filter_adjusted.yaml \\")
+        print(f"             --step filter")
 
 
 if __name__ == '__main__':
