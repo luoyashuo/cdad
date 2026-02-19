@@ -994,5 +994,44 @@
       "assistant_tag": "assistant",
       "system_tag": "system"
     }
+  },
+  "omnithought_rv_optimal_top2000_train": {
+    "file_name": "/data/luoys/data/cdad/omnithought_rv_optimal_top2000/train.jsonl",
+    "formatting": "sharegpt",
+    "columns": {
+      "messages": "conversations"
+    },
+    "tags": {
+      "role_tag": "role",
+      "content_tag": "content",
+      "user_tag": "user",
+      "assistant_tag": "assistant"
+    }
+  },
+  "omnithought_rv_optimal_top2000_val": {
+    "file_name": "/data/luoys/data/cdad/omnithought_rv_optimal_top2000/val.jsonl",
+    "formatting": "sharegpt",
+    "columns": {
+      "messages": "conversations"
+    },
+    "tags": {
+      "role_tag": "role",
+      "content_tag": "content",
+      "user_tag": "user",
+      "assistant_tag": "assistant"
+    }
+  },
+  "omnithought_rv_optimal_top2000_train_llama3-3b_rewrite": {
+    "file_name": "/data/luoys/data/cdad/rewritten_output/llama3_3b_grpo_8x80g_top2000_iter180_train/final_dataset.jsonl",
+    "formatting": "sharegpt",
+    "columns": {
+      "messages": "conversations"
+    },
+    "tags": {
+      "role_tag": "role",
+      "content_tag": "content",
+      "user_tag": "user",
+      "assistant_tag": "assistant"
+    }
   }
 }
