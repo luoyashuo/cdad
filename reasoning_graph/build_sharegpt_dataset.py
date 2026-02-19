@@ -1008,4 +1008,24 @@ python build_sharegpt_dataset.py \
     -o /data/luoys/data/cdad/omnithought_rv_optimal_top2000 \
     --train-ratio 0.99 \
     -r ../LlamaFactory/data/dataset_info.json
+    
+python build_sharegpt_dataset.py \
+    -i /data/luoys/data/cdad/omnithought_math_all/train_merge_level1.jsonl \
+        /data/luoys/data/cdad/omnithought_code_all/train_merge_level1.jsonl \
+    -s rv_optimal \
+    --rv_min 3 --rv_max 5 \
+    --fsf-topk 20000 \
+    -o /data/luoys/data/cdad/omnithought_rv_optimal_top20k \
+    --train-ratio 0.99 \
+    -r ../LlamaFactory/data/dataset_info.json
+    
+python build_sharegpt_dataset.py \
+    -i /data/luoys/data/cdad/omnithought_math_all/train_merge_level1.jsonl \
+        /data/luoys/data/cdad/omnithought_code_all/train_merge_level1.jsonl \
+    -s rv_optimal \
+    --rv_min 3 --rv_max 5 \
+    --fsf-topk 50000 \
+    -o /data/luoys/data/cdad/omnithought_rv_optimal_top50k \
+    --train-ratio 0.99 \
+    -r ../LlamaFactory/data/dataset_info.json
 """

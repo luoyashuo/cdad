@@ -2,7 +2,7 @@
 # 注意: 训练完成后需要更新 checkpoint 路径
 
 # 模型路径 (训练完成后更新为实际的checkpoint路径)
-model_path: /data/luoys/checkpoints/cdad/warmup/llama3_2_1b_rv_optimal_top2000/checkpoint-496
+model_path: /data/luoys/checkpoints/cdad/warmup/llama3_2_1b_rv_optimal_top20k/checkpoint-4950
 # vLLM配置
 vllm:
   tp: 8  # tensor parallel size

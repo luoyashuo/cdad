@@ -23,10 +23,10 @@ rewrite_model_path: /data/luoys/checkpoints/cdad/cot_rewriter_grpo/llama3_3b_grp
 # 数据路径配置
 # -----------------------------------------------------------------------------
 # 输入数据路径 (JSONL 格式，需包含 conversations 字段)
-input_data_path: /data/luoys/data/cdad/omnithought_rv_optimal_top2000/train.jsonl
+input_data_path: /data/luoys/data/cdad/omnithought_rv_optimal_top20k/train.jsonl
 
 # 输出目录
-output_dir: /data/luoys/data/cdad/rewritten_output/llama3_3b_grpo_8x80g_top2000_iter180_train
+output_dir: /data/luoys/data/cdad/rewritten_output/llama3_3b_grpo_8x80g_top20k_iter180_train
 
 # -----------------------------------------------------------------------------
 # 改写参数
@@ -60,7 +60,7 @@ process_batch_size: 32     # 每处理这么多样本后保存一次 ckpt
 # -----------------------------------------------------------------------------
 # Tensor Parallelism 大小 (每个 Ray Actor 的张量并行大小)
 # Actor 数量会自动计算 = total_gpus / vllm_tensor_parallel_size
-vllm_tensor_parallel_size: 2
+vllm_tensor_parallel_size: 1
 
 # GPU 显存利用率
 vllm_gpu_memory_utilization: 0.85

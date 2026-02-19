@@ -1033,5 +1033,57 @@
       "user_tag": "user",
       "assistant_tag": "assistant"
     }
+  },
+  "omnithought_rv_optimal_top20k_train": {
+    "file_name": "/data/luoys/data/cdad/omnithought_rv_optimal_top20k/train.jsonl",
+    "formatting": "sharegpt",
+    "columns": {
+      "messages": "conversations"
+    },
+    "tags": {
+      "role_tag": "role",
+      "content_tag": "content",
+      "user_tag": "user",
+      "assistant_tag": "assistant"
+    }
+  },
+  "omnithought_rv_optimal_top20k_val": {
+    "file_name": "/data/luoys/data/cdad/omnithought_rv_optimal_top20k/val.jsonl",
+    "formatting": "sharegpt",
+    "columns": {
+      "messages": "conversations"
+    },
+    "tags": {
+      "role_tag": "role",
+      "content_tag": "content",
+      "user_tag": "user",
+      "assistant_tag": "assistant"
+    }
+  },
+  "omnithought_rv_optimal_top50k_train": {
+    "file_name": "/data/luoys/data/cdad/omnithought_rv_optimal_top50k/train.jsonl",
+    "formatting": "sharegpt",
+    "columns": {
+      "messages": "conversations"
+    },
+    "tags": {
+      "role_tag": "role",
+      "content_tag": "content",
+      "user_tag": "user",
+      "assistant_tag": "assistant"
+    }
+  },
+  "omnithought_rv_optimal_top50k_val": {
+    "file_name": "/data/luoys/data/cdad/omnithought_rv_optimal_top50k/val.jsonl",
+    "formatting": "sharegpt",
+    "columns": {
+      "messages": "conversations"
+    },
+    "tags": {
+      "role_tag": "role",
+      "content_tag": "content",
+      "user_tag": "user",
+      "assistant_tag": "assistant"
+    }
   }
 }
