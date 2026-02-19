@@ -181,8 +181,25 @@ class VLLMServiceManager:
                 logger.debug(f"模型 {self.model_name} 尚未加载，当前可用模型: {model_ids}")
                 return False
 
+            # 额外检查：发送一个实际的测试请求，确保模型真正可用（CUDA图编译完成）
+            # 这是必要的，因为vLLM启动后需要时间来编译CUDA图
+            test_response = requests.post(
+                f"{self.api_url}/v1/chat/completions",
+                headers={"Content-Type": "application/json"},
+                json={
+                    "model": self.model_name,
+                    "messages": [{"role": "user", "content": "Hi"}],
+                    "max_tokens": 1
+                },
+                timeout=30
+            )
+            if test_response.status_code != 200:
+                logger.debug(f"模型测试请求失败，状态码: {test_response.status_code}, 响应: {test_response.text[:200]}")
+                return False
+
             return True
-        except:
+        except Exception as e:
+            logger.debug(f"服务检查异常: {str(e)}")
             return False
 
 
