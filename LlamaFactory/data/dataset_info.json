@@ -1098,5 +1098,45 @@
       "user_tag": "user",
       "assistant_tag": "assistant"
     }
+  },
+  "omnithought_rv_optimal_top2000_train-llama3-3b_rewrite_no_train": {
+    "file_name": "/data/luoys/data/cdad/rewritten_output/llama3_3b_train_top2000/final_dataset2.jsonl",
+    "formatting": "sharegpt",
+    "columns": {
+      "messages": "conversations"
+    },
+    "tags": {
+      "role_tag": "role",
+      "content_tag": "content",
+      "user_tag": "user",
+      "assistant_tag": "assistant"
+    }
+  },
+  "omnithought_rv_optimal_top2000_train-llama3-3b_rewrite_no_train_2": {
+    "file_name": "/data/luoys/data/cdad/rewritten_output/llama3_3b_train_top2000_2/final_dataset_2.jsonl",
+    "formatting": "sharegpt",
+    "columns": {
+      "messages": "conversations"
+    },
+    "tags": {
+      "role_tag": "role",
+      "content_tag": "content",
+      "user_tag": "user",
+      "assistant_tag": "assistant"
+    }
+  },
+  "omnithought_rv_optimal_top2000_train-llama3-1b_rewrite_no_train_3": {
+    "file_name": "/data/luoys/data/cdad/rewritten_output/llama3_1b_train_top2000_3/final_dataset.jsonl",
+    "formatting": "sharegpt",
+    "columns": {
+      "messages": "conversations"
+    },
+    "tags": {
+      "role_tag": "role",
+      "content_tag": "content",
+      "user_tag": "user",
+      "assistant_tag": "assistant"
+    }
   }
+  
 }

@@ -34,3 +34,7 @@ python eval.py \
     /data/luoys/projects/cdad/eval/eval_configs/eval_student.yaml \
     > /data/luoys/projects/cdad/eval/vllm_logs/eval_student.log 2>&1 &
 
+setsid env CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
+python eval.py \
+    /data/luoys/projects/cdad/eval/eval_configs/eval_rv_optimal_top2000_rewrite.yaml \
+    > /data/luoys/projects/cdad/eval/vllm_logs/llama3_2_1b_rv_optimal_top2000_rewrite_4.log 2>&1 &

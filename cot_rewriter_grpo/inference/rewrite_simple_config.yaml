@@ -17,16 +17,16 @@
 # 模型路径配置
 # -----------------------------------------------------------------------------
 # 改写模型路径 (FSDP checkpoint 目录)
-rewrite_model_path: /data/luoys/checkpoints/cdad/cot_rewriter_grpo/llama3_3b_grpo_8x80g_top2000/global_step_180
-
+# rewrite_model_path: /data/luoys/checkpoints/cdad/cot_rewriter_grpo/llama3_3b_grpo_8x80g_top2000/global_step_180
+rewrite_model_path: /data/luoys/modelscope_cache/models/LLM-Research/Llama-3.2-1B-Instruct
 # -----------------------------------------------------------------------------
 # 数据路径配置
 # -----------------------------------------------------------------------------
 # 输入数据路径 (JSONL 格式，需包含 conversations 字段)
-input_data_path: /data/luoys/data/cdad/omnithought_rv_optimal_top50k/train.jsonl
+input_data_path: /data/luoys/data/cdad/omnithought_rv_optimal_top2000/train.jsonl
 
 # 输出目录
-output_dir: /data/luoys/data/cdad/rewritten_output/llama3_3b_grpo_8x80g_top50k_iter180_train
+output_dir: /data/luoys/data/cdad/rewritten_output/llama3_1b_train_top2000_3
 
 # -----------------------------------------------------------------------------
 # 改写参数
@@ -67,3 +67,12 @@ vllm_gpu_memory_utilization: 0.85
 
 # Micro Batch 大小 (每个 Actor 每次处理的任务数)
 vllm_micro_batch_size: 1
+
+
+# -----------------------------------------------------------------------------
+# Fallback 参数
+# -----------------------------------------------------------------------------
+# 当 rewrite_reasoning 为 null 时，尝试从 rewrite_output 中提取标签内容
+# 注意：此参数仅在 use_original_on_fail=false 时生效
+use_rewrite_output_as_fallback: true
+use_original_on_fail: false  # 如果改写失败是否使用原始 CoT (default: True)

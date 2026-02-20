@@ -32,9 +32,14 @@ while [[ $# -gt 0 ]]; do
             EXTRA_ARGS="$EXTRA_ARGS --no-shuffle"
             shift
             ;;
+        --drop-on-fail)
+            # 改写失败时放弃该样本（默认使用原始CoT）
+            EXTRA_ARGS="$EXTRA_ARGS --drop-on-fail"
+            shift
+            ;;
         *)
             echo "Unknown option: $1"
-            echo "Usage: $0 [--config CONFIG_FILE] [--no-shuffle]"
+            echo "Usage: $0 [--config CONFIG_FILE] [--no-shuffle] [--drop-on-fail]"
             exit 1
             ;;
     esac

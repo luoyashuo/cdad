@@ -62,6 +62,10 @@ class SimpleRewriteConfig:
     shuffle_rewrites: bool = True  # 是否打乱改写结果
     random_seed: int = 42  # 随机种子
 
+    # 失败处理参数
+    use_original_on_fail: bool = True  # 改写失败时使用原始CoT还是放弃该样本
+    use_rewrite_output_as_fallback: bool = False  # 当rewrite_reasoning为null时，尝试从rewrite_output提取标签内容（仅在use_original_on_fail=False时生效）
+
     # 模型生成参数
     max_new_tokens: int = 15000
     temperature: float = 0.6
@@ -87,7 +91,16 @@ def load_config(config_path: str) -> SimpleRewriteConfig:
     """从yaml文件加载配置"""
     with open(config_path, 'r', encoding='utf-8') as f:
         config_dict = yaml.safe_load(f)
-    return SimpleRewriteConfig.from_dict(config_dict)
+    config = SimpleRewriteConfig.from_dict(config_dict)
+
+    # 参数互斥验证
+    if config.use_rewrite_output_as_fallback and config.use_original_on_fail:
+        raise ValueError(
+            "use_rewrite_output_as_fallback=True cannot be used together with use_original_on_fail=True. "
+            "use_rewrite_output_as_fallback only works when use_original_on_fail=False."
+        )
+
+    return config
 
 
 def save_jsonl(data: List[Dict], path: str, append: bool = False):
@@ -145,22 +158,45 @@ def extract_answer_from_rv(content: str) -> str:
 # Step 0: Model Format Conversion
 # =============================================================================
 
+def _is_hf_format(path: str) -> bool:
+    """
+    检查给定路径是否是 HuggingFace 格式（包含必要的模型文件）
+    
+    检查项：
+    - config.json
+    - tokenizer 文件 (tokenizer.json 或 tokenizer_config.json)
+    - 模型权重文件 (*.bin, *.safetensors)
+    """
+    if not os.path.exists(path) or not os.path.isdir(path):
+        return False
+    
+    files = os.listdir(path)
+    has_config = 'config.json' in files
+    has_tokenizer = 'tokenizer.json' in files or 'tokenizer_config.json' in files
+    has_model = any(f.endswith('.bin') or f.endswith('.safetensors') for f in files)
+    
+    return has_config and has_tokenizer and has_model
+
+
 def convert_model_to_hf(model_path: str) -> str:
     """
     将FSDP checkpoint转换为Huggingface格式 (使用VERL的model_merger库)
+    
+    检测逻辑（按优先级）：
+    1. 如果 model_path 本身就是 HF 格式，直接返回
+    2. 检查 model_path/hf/ 是否存在且为 HF 格式
+    3. 如果是 FSDP 格式，则进行转换
     """
+    # 1. 首先检查传入的路径本身是否是 HF 格式
+    if _is_hf_format(model_path):
+        print(f"  [Model Convert] Input path is already HF format: {model_path}")
+        return model_path
+    
+    # 2. 检查是否已存在转换后的模型（hf/ 子目录）
     hf_path = os.path.join(model_path, 'hf')
-
-    # 检查是否已存在转换后的模型
-    if os.path.exists(hf_path) and os.path.isdir(hf_path):
-        files = os.listdir(hf_path)
-        has_config = 'config.json' in files
-        has_tokenizer = 'tokenizer.json' in files or 'tokenizer_config.json' in files
-        has_model = any(f.endswith('.bin') or f.endswith('.safetensors') for f in files)
-
-        if has_config and has_tokenizer and has_model:
-            print(f"  [Model Convert] HF format already exists at {hf_path}")
-            return hf_path
+    if _is_hf_format(hf_path):
+        print(f"  [Model Convert] HF format found at {hf_path}")
+        return hf_path
 
     print(f"  [Model Convert] Converting FSDP checkpoint to HF format...")
     print(f"    Source: {model_path}")
@@ -247,6 +283,9 @@ Follow these guidelines:
 3. **Avoid Literal Repetition**: Rephrase the content in your own words rather than simply duplicating the text of the original process.
 
 Directly output the rewritten reasoning strictly enclosed within <rewrite_reasoning> </rewrite_reasoning> tags. Output nothing else."""
+#         self.system_prompt = """\
+# You are an expert in math and code. The 'Original Reasoning Process' is a verified and valid derivation. Using it as a reference, rewrite the reasoning with a better logical structure and a more clear delivery.
+# Directly output the rewritten reasoning strictly enclosed within <rewrite_reasoning> </rewrite_reasoning> tags. Output nothing else."""
 
         print(f"[vLLMWorkerActor {worker_id}] Initialization complete")
 
@@ -746,6 +785,7 @@ def step_shuffle_and_generate(
         'failed_rewrites': 0,
         'using_rewrite': 0,
         'using_original': 0,
+        'dropped_samples': 0,
     }
 
     pbar = tqdm(samples, desc="Generate", unit="sample", dynamic_ncols=True)
@@ -770,11 +810,33 @@ def step_shuffle_and_generate(
             selected_rewrite = successful_rewrites[0]['rewrite_reasoning']
             stats['using_rewrite'] += 1
             using_original = False
-        else:
+        elif config.use_original_on_fail:
             # 没有成功的改写，使用原文
             selected_rewrite = original_thought
             stats['using_original'] += 1
             using_original = True
+        elif config.use_rewrite_output_as_fallback:
+            # 尝试从 rewrite_output 中提取标签内容作为 fallback
+            selected_rewrite = None
+            for r in rewrite_results:
+                rewrite_output = r.get('rewrite_output', '')
+                if '<rewrite_reasoning>' in rewrite_output and '</rewrite_reasoning>' in rewrite_output:
+                    extracted = rewrite_output.split('<rewrite_reasoning>')[1].split('</rewrite_reasoning>')[0].strip()
+                    if extracted:
+                        selected_rewrite = extracted
+                        break
+
+            if selected_rewrite:
+                stats['using_rewrite'] += 1
+                using_original = False
+            else:
+                # 无法提取有效内容，放弃该样本
+                stats['dropped_samples'] += 1
+                continue
+        else:
+            # 没有成功的改写，放弃该样本
+            stats['dropped_samples'] += 1
+            continue
 
         # 构建 assistant content
         assistant_content = f"<think>\n{selected_rewrite.strip()}\n</think>\n\n{answer.strip()}"
@@ -818,6 +880,9 @@ def step_shuffle_and_generate(
     with open(stats_path, 'w') as f:
         json.dump(stats, f, indent=2)
 
+    # 计算最终数据集大小
+    final_dataset_size = len(new_dataset)
+    
     print(f"\n  Dataset Statistics:")
     print(f"    Total samples: {stats['total_samples']}")
     print(f"    Total rewrites generated: {stats['total_rewrites']}")
@@ -825,6 +890,9 @@ def step_shuffle_and_generate(
     print(f"    Failed rewrites: {stats['failed_rewrites']}")
     print(f"    Using rewrite: {stats['using_rewrite']} ({stats['using_rewrite']/stats['total_samples']*100:.1f}%)")
     print(f"    Using original: {stats['using_original']} ({stats['using_original']/stats['total_samples']*100:.1f}%)")
+    if stats['dropped_samples'] > 0:
+        print(f"    Dropped samples: {stats['dropped_samples']} ({stats['dropped_samples']/stats['total_samples']*100:.1f}%)")
+    print(f"    Final dataset size: {final_dataset_size}")
     print(f"\n  Output saved to: {output_path}")
     print(f"  Stats saved to: {stats_path}")
 
@@ -876,6 +944,7 @@ def main():
     parser = argparse.ArgumentParser(description='Simple rewrite dataset generation')
     parser.add_argument('--config', type=str, required=True, help='Path to config YAML file')
     parser.add_argument('--no-shuffle', action='store_true', help='Disable shuffling')
+    parser.add_argument('--drop-on-fail', action='store_true', help='Drop sample when all rewrites fail (default: use original CoT)')
     args = parser.parse_args()
 
     # 加载配置
@@ -889,11 +958,14 @@ def main():
     # 命令行参数覆盖
     if args.no_shuffle:
         config.shuffle_rewrites = False
+    if args.drop_on_fail:
+        config.use_original_on_fail = False
 
     print(f"  Output directory: {config.output_dir}")
     print(f"  Shuffle rewrites: {config.shuffle_rewrites}")
     print(f"  Random seed: {config.random_seed}")
     print(f"  N rewrites per sample: {config.n_rewrites}")
+    print(f"  Use original on fail: {config.use_original_on_fail} (if False, drop sample)")
 
     # 创建输出目录
     os.makedirs(config.output_dir, exist_ok=True)
