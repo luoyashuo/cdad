@@ -47,9 +47,11 @@ class VLLMWorkerActor:
         max_model_len: int = 8192,
         micro_batch_size: int = 4,
         max_num_seqs: int = 1,
-        reward_mode: str = "ppl",  # "ppl", "ppl_delta", "logprob", "ppl_ratio", or "cot_effect_ratio": Reward calculation mode
+        reward_mode: str = "ppl",  # "ppl", "ppl_delta", "logprob", "ppl_ratio", "cot_effect_ratio", or "cot_effect_delta_sigmoid"
         ppl_ratio_ceiling: float = 0.95,  # Ceiling for ppl_ratio mode: R_cog = min(ratio, ceiling)
         cot_effect_ratio_ceiling: float = 0.95,  # Ceiling for cot_effect_ratio mode: R_cog = min(ratio, ceiling)
+        cot_effect_epsilon: float = 0.01,  # Epsilon for cot_effect_delta_sigmoid mode: avoids division by zero
+        cot_effect_temperature: float = 2.0,  # Temperature for cot_effect_delta_sigmoid mode: controls sigmoid steepness
     ):
         import os
         import subprocess
@@ -127,6 +129,8 @@ class VLLMWorkerActor:
         self.micro_batch_size = micro_batch_size
         self.ppl_ratio_ceiling = ppl_ratio_ceiling
         self.cot_effect_ratio_ceiling = cot_effect_ratio_ceiling
+        self.cot_effect_epsilon = cot_effect_epsilon
+        self.cot_effect_temperature = cot_effect_temperature
 
     def compute_logprobs(
         self,
@@ -249,9 +253,11 @@ class VLLMStudentRewardClient:
         devices: Optional[List[str]] = None,
         micro_batch_size: int = 4,
         max_num_seqs: int = 1,
-        reward_mode: str = "ppl",  # "ppl", "ppl_delta", "logprob", "ppl_ratio", or "cot_effect_ratio": Reward calculation mode
+        reward_mode: str = "ppl",  # "ppl", "ppl_delta", "logprob", "ppl_ratio", "cot_effect_ratio", or "cot_effect_delta_sigmoid"
         ppl_ratio_ceiling: float = 0.95,  # Ceiling for ppl_ratio mode: R_cog = min(ratio, ceiling)
         cot_effect_ratio_ceiling: float = 0.95,  # Ceiling for cot_effect_ratio mode: R_cog = min(ratio, ceiling)
+        cot_effect_epsilon: float = 0.01,  # Epsilon for cot_effect_delta_sigmoid mode: avoids division by zero
+        cot_effect_temperature: float = 2.0,  # Temperature for cot_effect_delta_sigmoid mode: controls sigmoid steepness
         use_reward_delta: bool = True,  # If True (default), R_cog = rewrite - original (delta).
                                       # If False, R_cog = rewrite only (absolute value).
         reward_only_use_logprob: bool = None,  # Deprecated: use use_reward_delta instead
@@ -803,6 +809,53 @@ class VLLMStudentRewardClient:
                 else:
                     # No original CoT available, reward = 0
                     reward = 0.0
+                    relative_improvement_rate = 0.0
+                    original_ppls.append(float('nan'))
+
+                rewrite_ppls.append(1.0 / rewrite_avg_prob if rewrite_avg_prob > 0 else float('inf'))
+                relative_improvement_rates.append(relative_improvement_rate)
+            elif self.reward_mode == "cot_effect_delta_sigmoid":
+                # CoT Effect Delta Sigmoid 模式
+                #
+                # 数学公式:
+                #   coe_orig = avg_prob(Q, original, A) - avg_prob(Q, A)
+                #   coe_rew  = avg_prob(Q, rewrite, A)  - avg_prob(Q, A)
+                #   delta    = avg_prob(rewrite) - avg_prob(original)
+                #   delta_clamped = max(0, delta)  # delta <= 0 时视为 0
+                #   Δ_norm = delta_clamped / (|coe_orig| + ε)
+                #   R_cog = sigmoid(Δ_norm / τ)
+                #
+                # 其中 ε = cot_effect_epsilon (默认 0.01), τ = cot_effect_temperature (默认 1.0)
+                # 奖励值域：[0.5, 1)，与其他 penalty 同量级
+                import math
+
+                # avg_prob = exp(mean_log_prob)
+                rewrite_avg_prob = math.exp(rewrite_mean)  # avg_prob(Q, rewrite_CoT, A)
+                no_cot_avg_prob = math.exp(no_cot_mean)     # avg_prob(Q, A) - baseline
+
+                if original_mean > -100:
+                    original_avg_prob = math.exp(original_mean)  # avg_prob(Q, original_CoT, A)
+
+                    # CoT effect for original
+                    cot_effect_original = original_avg_prob - no_cot_avg_prob
+
+                    # 改进量（delta <= 0 时视为 0）
+                    delta = rewrite_avg_prob - original_avg_prob
+                    delta_clamped = max(0.0, delta)
+
+                    epsilon = self.cot_effect_epsilon
+                    temperature = self.cot_effect_temperature
+
+                    normalized_delta = delta_clamped / (abs(cot_effect_original) + epsilon)
+
+                    # Sigmoid 映射到 [0.5, 1)
+                    reward = 1.0 / (1.0 + math.exp(-normalized_delta / temperature))
+                    relative_improvement_rate = delta  # 用于日志（原始 delta）
+
+                    original_ppls.append(1.0 / original_avg_prob if original_avg_prob > 0 else float('inf'))
+                else:
+                    # 没有 original，reward = 0.5
+                    reward = 0.5
                     relative_improvement_rate = 0.0
                     original_ppls.append(float('nan'))
 

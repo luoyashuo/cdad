@@ -205,14 +205,14 @@ custom_reward_function:
     vllm_gpu_memory_utilization: 0.3  # vLLM 显存利用率
     cleanup_after_compute: true       # 计算后清理缓存
     # 认知奖励模式
-    reward_mode: ppl_delta      # 奖励模式: cot_effect_ratio (COT效果比率，带天花板)
-                                      # - ppl: R_cog = avg_prob(rewrite) = 1 / PPL(rewrite)
-                                      # - ppl_delta: R_cog = max(0, avg_prob(rewrite) - avg_prob(original))
-                                      # - ppl_ratio: R_cog = min(PPL(original) / PPL(rewrite), ceiling)
-                                      # - logprob: R_cog = answer_log_prob(rewrite) - answer_log_prob(original)
-                                      # - cot_effect_ratio: R_cog = min(cot_effect(rewrite_cot) / cot_effect(original_cot), ceiling)
-    cot_effect_ratio_ceiling: 999 # 80 iter后有机会达到 0.9 因此调大些
-    ppl_ratio_ceiling: 999          # PPL比率天花板，防止奖励过大 (默认0.95)
+    reward_mode: cot_effect_delta_sigmoid  # 平滑奖励：delta <= 0 时视为 0，从 0.5 开始平滑增长
+                                      # 公式: delta_clamped = max(0, avg_prob(rewrite) - avg_prob(original))
+                                      #      R_cog = sigmoid(delta_clamped / (|cot_effect(original)| + ε) / τ)
+                                      # 值域：[0.5, 1)，与其他 penalty 同量级
+    cot_effect_epsilon: 0.01          # 避免除零的小常数
+    cot_effect_temperature: 1.0       # sigmoid 温度，控制曲线陡峭度 (越小越陡)
+    cot_effect_ratio_ceiling: 2       # cot_effect_ratio 模式的天花板 (当前模式不使用)
+    ppl_ratio_ceiling: 999            # ppl_ratio 模式的天花板 (当前模式不使用)
     ppl_on_full_response: false       # 是否对整个 response 计算 PPL (Q+CoT+A)
                                         # true: 对整个 response 计算 PPL
                                         # false: 只对 answer 部分计算 PPL (默认)
@@ -224,7 +224,7 @@ custom_reward_function:
     use_reward_delta: true            # 是否使用奖励差值 (rewrite - original)
     # ==================== 阶梯式奖励配置 (Tiered Reward) ====================
     # 当 rewrite 使困惑度降低达到一定阈值时给予额外奖励
-    use_tiered_reward: true           # 是否启用阶梯奖励
+    use_tiered_reward: false           # 是否启用阶梯奖励
     tier_step: 0.001                   # 阶梯步长 (5% 改善)
     tier_reward: 0.002                  # 每阶梯奖励值
     # ==================== 逻辑奖励 FSF 配置 (R_logic) ====================
