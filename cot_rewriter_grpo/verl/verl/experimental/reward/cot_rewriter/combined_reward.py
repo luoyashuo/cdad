@@ -247,7 +247,7 @@ class CombinedRewardComputer:
         use_tiered_reward: bool = True,  # Whether to use tiered reward for R_cog
         tier_step: float = 0.05,  # 区间大小：每个阶梯的 R_cog 范围
         tier_reward: float = 0.1,  # 每阶梯奖励值：第一阶梯得 tier_reward，第二阶梯得 2*tier_reward
-        reward_mode: str = "ppl",  # "ppl", "ppl_ratio", "cot_effect_ratio", or "logprob": Reward calculation mode
+        reward_mode: str = "ppl",  # "ppl", "ppl_delta", "ppl_ratio", "cot_effect_ratio", or "logprob": Reward calculation mode
                                    # - "ppl": R_cog = avg_prob(rewrite) = 1 / PPL(rewrite) [formula 2: absolute quality]
                                    #           Also logs formula 1: avg_prob(rewrite)/avg_prob(original) - 1 as observation
                                    #           where avg_prob = exp(mean_log_prob), PPL = 1/avg_prob
@@ -335,6 +335,8 @@ class CombinedRewardComputer:
             tier_reward: 每阶梯奖励值，第一阶梯得 tier_reward，第二阶梯得 2*tier_reward (default: 0.1).
             reward_mode: Reward calculation mode (default: "ppl").
                 - "ppl": R_cog = avg_prob(rewrite) = 1 / PPL(rewrite) (absolute quality)
+                - "ppl_delta": R_cog = max(0, avg_prob(rewrite) - avg_prob(original)) (delta with negative clamp)
+                  where avg_prob = exp(mean_log_prob), this rewards improvements and clamps negative deltas to 0
                 - "ppl_ratio": R_cog = min(PPL(original) / PPL(rewrite), ceiling)
                   where PPL = exp(-mean_log_prob), ceiling is controlled by ppl_ratio_ceiling (default: 0.95)
                 - "logprob": R_cog = answer_log_prob(rewrite) - answer_log_prob(original),

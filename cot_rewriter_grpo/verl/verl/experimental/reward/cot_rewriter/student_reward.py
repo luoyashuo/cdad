@@ -47,7 +47,7 @@ class VLLMWorkerActor:
         max_model_len: int = 8192,
         micro_batch_size: int = 4,
         max_num_seqs: int = 1,
-        reward_mode: str = "ppl",  # "ppl", "logprob", "ppl_ratio", or "cot_effect_ratio": Reward calculation mode
+        reward_mode: str = "ppl",  # "ppl", "ppl_delta", "logprob", "ppl_ratio", or "cot_effect_ratio": Reward calculation mode
         ppl_ratio_ceiling: float = 0.95,  # Ceiling for ppl_ratio mode: R_cog = min(ratio, ceiling)
         cot_effect_ratio_ceiling: float = 0.95,  # Ceiling for cot_effect_ratio mode: R_cog = min(ratio, ceiling)
     ):
@@ -249,7 +249,7 @@ class VLLMStudentRewardClient:
         devices: Optional[List[str]] = None,
         micro_batch_size: int = 4,
         max_num_seqs: int = 1,
-        reward_mode: str = "ppl",  # "ppl", "logprob", "ppl_ratio", or "cot_effect_ratio": Reward calculation mode
+        reward_mode: str = "ppl",  # "ppl", "ppl_delta", "logprob", "ppl_ratio", or "cot_effect_ratio": Reward calculation mode
         ppl_ratio_ceiling: float = 0.95,  # Ceiling for ppl_ratio mode: R_cog = min(ratio, ceiling)
         cot_effect_ratio_ceiling: float = 0.95,  # Ceiling for cot_effect_ratio mode: R_cog = min(ratio, ceiling)
         use_reward_delta: bool = True,  # If True (default), R_cog = rewrite - original (delta).
@@ -744,6 +744,28 @@ class VLLMStudentRewardClient:
                     original_ppls.append(1.0 / original_avg_prob if original_avg_prob > 0 else float('inf'))
                 else:
                     original_ppls.append(float('nan'))
+            elif self.reward_mode == "ppl_delta":
+                # PPL Delta 模式 (阶梯式 PPL): R_cog = max(0, 1/ppl(rewrite) - 1/ppl(original))
+                #   = max(0, avg_prob(rewrite) - avg_prob(original))
+                # 如果 rewrite 质量比 original 差（delta < 0），则 reward = 0（无奖励）
+                # 如果 rewrite 质量比 original 好（delta > 0），则 reward = delta（有奖励）
+                import math
+                rewrite_avg_prob = math.exp(rewrite_mean)  # avg_prob(rewrite) = 1/ppl(rewrite)
+
+                if original_mean > -100:
+                    original_avg_prob = math.exp(original_mean)  # avg_prob(original) = 1/ppl(original)
+                    delta = rewrite_avg_prob - original_avg_prob
+                    reward = max(0.0, delta)  # 负值截断为 0
+                    relative_improvement_rate = delta  # 用于日志（不截断）
+                    original_ppls.append(1.0 / original_avg_prob if original_avg_prob > 0 else float('inf'))
+                else:
+                    # 没有 original，reward = 0
+                    reward = 0.0
+                    relative_improvement_rate = 0.0
+                    original_ppls.append(float('nan'))
+
+                rewrite_ppls.append(1.0 / rewrite_avg_prob if rewrite_avg_prob > 0 else float('inf'))
+                relative_improvement_rates.append(relative_improvement_rate)
             elif self.reward_mode == "cot_effect_ratio":
                 # CoT Effect Ratio 模式
                 # cot_effect(cot) = 1/ppl(Q,CoT,A) - 1/ppl(Q,A) = avg_prob(Q,CoT,A) - avg_prob(Q,A)
