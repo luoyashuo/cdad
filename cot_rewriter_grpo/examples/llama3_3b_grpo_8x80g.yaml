@@ -225,8 +225,8 @@ custom_reward_function:
     # ==================== 阶梯式奖励配置 (Tiered Reward) ====================
     # 当 rewrite 使困惑度降低达到一定阈值时给予额外奖励
     use_tiered_reward: true           # 是否启用阶梯奖励
-    tier_step: 0.02                   # 阶梯步长 (5% 改善)
-    tier_reward: 0.04                  # 每阶梯奖励值
+    tier_step: 0.001                   # 阶梯步长 (5% 改善)
+    tier_reward: 0.002                  # 每阶梯奖励值
     # ==================== 逻辑奖励 FSF 配置 (R_logic) ====================
     # 使用 FSF (Free-Form Solver Feedback) 模型评估逻辑质量
     use_logic_reward: true             # 是否启用逻辑奖励
