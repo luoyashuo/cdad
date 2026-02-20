@@ -2,7 +2,7 @@
 # 注意: 训练完成后需要更新 checkpoint 路径
 
 # 模型路径 (训练完成后更新为实际的checkpoint路径)
-model_path: /data/luoys/checkpoints/cdad/warmup/llama3_2_1b_base_rv_optimal_top2000_rewrite/checkpoint-990
+model_path: /data/luoys/checkpoints/cdad/warmup/llama3_2_1b_rv_optimal_top50k_rewrite/checkpoint-10974
 
 # vLLM配置
 vllm:

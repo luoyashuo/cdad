@@ -23,10 +23,10 @@ rewrite_model_path: /data/luoys/checkpoints/cdad/cot_rewriter_grpo/llama3_3b_grp
 # 数据路径配置
 # -----------------------------------------------------------------------------
 # 输入数据路径 (JSONL 格式，需包含 conversations 字段)
-input_data_path: /data/luoys/data/cdad/omnithought_rv_optimal_top20k/train.jsonl
+input_data_path: /data/luoys/data/cdad/omnithought_rv_optimal_top50k/train.jsonl
 
 # 输出目录
-output_dir: /data/luoys/data/cdad/rewritten_output/llama3_3b_grpo_8x80g_top20k_iter180_train
+output_dir: /data/luoys/data/cdad/rewritten_output/llama3_3b_grpo_8x80g_top50k_iter180_train
 
 # -----------------------------------------------------------------------------
 # 改写参数

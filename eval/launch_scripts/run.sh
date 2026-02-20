@@ -11,12 +11,12 @@ python eval.py eval_configs/eval_random.yaml
 setsid env CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
 python eval.py \
     /data/luoys/projects/cdad/eval/eval_configs/eval_rv_optimal_top2000_rewrite.yaml \
-    > /data/luoys/projects/cdad/eval/vllm_logs/llama3_2_1b_rv_optimal_top2000_rewrite.log 2>&1 &
+    > /data/luoys/projects/cdad/eval/vllm_logs/llama3_2_1b_rv_optimal_top50k_rewrite.log 2>&1 &
 
 setsid env CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
 python eval.py \
     /data/luoys/projects/cdad/eval/eval_configs/eval_rv_optimal_top2000_rewrite_mix.yaml \
-    > /data/luoys/projects/cdad/eval/vllm_logs/llama3_1b_rv_optimal_top2000_rewrite.log 2>&1 &
+    > /data/luoys/projects/cdad/eval/vllm_logs/llama3_2_1b_rv_optimal_top50k_rewrite_mix_2k_2.log 2>&1 &
 
 setsid env CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
 python eval.py \
