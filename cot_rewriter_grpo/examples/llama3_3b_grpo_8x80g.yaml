@@ -98,7 +98,7 @@ actor_rollout_ref:
   # Rollout (推理) 配置
   rollout:
     name: vllm
-    tensor_model_parallel_size: 4
+    tensor_model_parallel_size: 2
     gpu_memory_utilization: 0.65
     dtype: bfloat16
     load_format: auto
@@ -231,14 +231,14 @@ custom_reward_function:
     # 使用 FSF (Free-Form Solver Feedback) 模型评估逻辑质量
     use_logic_reward: true             # 是否启用逻辑奖励
     fsf_model_path: /data/luoys/checkpoints/cdad/fsf_reward/qwen3_4b_fsf_grm
-    fsf_tensor_parallel_size: 4        # 降低TP以适配4卡环境 (Actor TP=4, FSF需要共享)
+    fsf_tensor_parallel_size: 2        # 降低TP以适配4卡环境 (Actor TP=4, FSF需要共享)
     fsf_temperature: 0.4
     fsf_top_k: 20
     fsf_top_p: 0.95
     fsf_max_new_tokens: 8000
     fsf_gpu_memory_utilization: 0.3    # 降低显存利用率以避免OOM (0.4->0.3)
     fsf_max_model_len: 12000
-    fsf_reward_scale: 0.5          # FSF 奖励缩放因子
+    fsf_reward_scale: 0.05          # FSF 奖励缩放因子
     fsf_micro_batch_size: 1           # FSF 推理微批次大小 (控制显存，默认4)
     fsf_skip_group_on_parse_error: true  # DOT解析失败时跳过整个group (默认true)
     save_fsf_dot_outputs: true        # 保存 FSF DOT 输出到 rollout_data
