@@ -265,6 +265,7 @@ class CombinedRewardComputer:
         cot_effect_ratio_ceiling: float = 0.95,  # Ceiling for cot_effect_ratio mode: R_cog = min(ratio, ceiling)
         cot_effect_epsilon: float = 0.01,  # Epsilon for cot_effect_delta_sigmoid mode: avoids division by zero
         cot_effect_temperature: float = 2.0,  # Temperature for cot_effect_delta_sigmoid mode: controls sigmoid steepness
+        ppl_delta_temperature: float = 1.0,  # Temperature for ppl_delta mode sigmoid (after group normalization)
         # ========== FSF Reward Configuration ==========
         # FSF reward using build_cot_rewrite_from_sharegpt.py message format
         # GPU devices are auto-detected based on fsf_tensor_parallel_size
@@ -411,6 +412,7 @@ class CombinedRewardComputer:
         self.cot_effect_ratio_ceiling = cot_effect_ratio_ceiling
         self.cot_effect_epsilon = cot_effect_epsilon
         self.cot_effect_temperature = cot_effect_temperature
+        self.ppl_delta_temperature = ppl_delta_temperature
 
         # Handle reward_only_use_logprob deprecation and map to use_reward_delta
         # reward_only_use_logprob has INVERTED logic compared to use_reward_delta
@@ -447,6 +449,7 @@ class CombinedRewardComputer:
                 cot_effect_ratio_ceiling=cot_effect_ratio_ceiling,
                 cot_effect_epsilon=cot_effect_epsilon,
                 cot_effect_temperature=cot_effect_temperature,
+                ppl_delta_temperature=ppl_delta_temperature,
             )
         else:
             from verl.experimental.reward.cot_rewriter.student_reward import VLLMStudentRewardClient
@@ -463,6 +466,7 @@ class CombinedRewardComputer:
                 cot_effect_ratio_ceiling=cot_effect_ratio_ceiling,
                 cot_effect_epsilon=cot_effect_epsilon,
                 cot_effect_temperature=cot_effect_temperature,
+                ppl_delta_temperature=ppl_delta_temperature,
             )
 
         # ========== Initialize FSF Reward ==========
@@ -1244,6 +1248,7 @@ def compute_cot_rewriter_reward(
     cot_effect_ratio_ceiling: float = 0.95,  # Ceiling for cot_effect_ratio mode: R_cog = min(ratio, ceiling)
     cot_effect_epsilon: float = 0.01,  # Epsilon for cot_effect_delta_sigmoid mode: avoids division by zero
     cot_effect_temperature: float = 2.0,  # Temperature for cot_effect_delta_sigmoid mode: controls sigmoid steepness
+    ppl_delta_temperature: float = 1.0,  # Temperature for ppl_delta mode sigmoid (after group normalization)
     use_reward_delta: bool = True,  # If True (default), compute delta (rewrite - original).
                                        # If False, use absolute value.
                                        # Deprecated alias: reward_only_use_logprob (inverted logic!)
@@ -1481,6 +1486,7 @@ def compute_cot_rewriter_reward(
         cot_effect_ratio_ceiling=cot_effect_ratio_ceiling,
         cot_effect_epsilon=cot_effect_epsilon,
         cot_effect_temperature=cot_effect_temperature,
+        ppl_delta_temperature=ppl_delta_temperature,
         use_reward_delta=use_reward_delta,
         reward_only_use_logprob=reward_only_use_logprob,  # For backward compatibility
         # ========== FSF Parameters ==========

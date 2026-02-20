@@ -57,6 +57,7 @@ class SGLangWorkerActor:
         cot_effect_ratio_ceiling: float = 0.95,  # Ceiling for cot_effect_ratio mode: R_cog = min(ratio, ceiling)
         cot_effect_epsilon: float = 0.01,  # Epsilon for cot_effect_delta_sigmoid mode: avoids division by zero
         cot_effect_temperature: float = 2.0,  # Temperature for cot_effect_delta_sigmoid mode: controls sigmoid steepness
+        ppl_delta_temperature: float = 1.0,  # Temperature for ppl_delta mode sigmoid (after group normalization)
         ppl_on_full_response: bool = False,  # If True, compute PPL on full response (Q+CoT+A)
     ):
         import os
@@ -76,6 +77,7 @@ class SGLangWorkerActor:
         self.cot_effect_ratio_ceiling = cot_effect_ratio_ceiling
         self.cot_effect_epsilon = cot_effect_epsilon
         self.cot_effect_temperature = cot_effect_temperature
+        self.ppl_delta_temperature = ppl_delta_temperature
         self._base_port = base_port  # Store base port for SGLang Engine
         worker_name = f"SGLangWorker-{gpu_ids}"
 
@@ -453,6 +455,7 @@ class SGLangStudentRewardClient:
         cot_effect_ratio_ceiling: float = 0.95,  # Ceiling for cot_effect_ratio mode: R_cog = min(ratio, ceiling)
         cot_effect_epsilon: float = 0.01,  # Epsilon for cot_effect_delta_sigmoid mode: avoids division by zero
         cot_effect_temperature: float = 2.0,  # Temperature for cot_effect_delta_sigmoid mode: controls sigmoid steepness
+        ppl_delta_temperature: float = 1.0,  # Temperature for ppl_delta mode sigmoid (after group normalization)
         use_reward_delta: bool = True,  # If True (default), R_cog = rewrite - original (delta).
                                       # If False, R_cog = rewrite only (absolute value).
         reward_only_use_logprob: bool = None,  # Deprecated: use use_reward_delta instead
@@ -504,6 +507,7 @@ class SGLangStudentRewardClient:
         self.cot_effect_ratio_ceiling = cot_effect_ratio_ceiling
         self.cot_effect_epsilon = cot_effect_epsilon
         self.cot_effect_temperature = cot_effect_temperature
+        self.ppl_delta_temperature = ppl_delta_temperature
         self.ppl_on_full_response = ppl_on_full_response
 
         # Handle reward_only_use_logprob deprecation and map to use_reward_delta
@@ -688,6 +692,7 @@ class SGLangStudentRewardClient:
                 cot_effect_ratio_ceiling=self.cot_effect_ratio_ceiling,
                 cot_effect_epsilon=self.cot_effect_epsilon,
                 cot_effect_temperature=self.cot_effect_temperature,
+                ppl_delta_temperature=self.ppl_delta_temperature,
                 ppl_on_full_response=self.ppl_on_full_response,
             )
             self.workers.append(worker)
@@ -1158,18 +1163,19 @@ class SGLangStudentRewardClient:
                 rewrite_ppls.append(1.0 / rewrite_avg_prob if rewrite_avg_prob > 0 else float('inf'))
                 relative_improvement_rates.append(relative_improvement_rate)
             elif self.reward_mode == "ppl_delta":
-                # PPL Delta 模式 (阶梯式 PPL): R_cog = max(0, 1/ppl(rewrite) - 1/ppl(original))
-                #   = max(0, avg_prob(rewrite) - avg_prob(original))
-                # 如果 rewrite 质量比 original 差（delta < 0），则 reward = 0（无奖励）
-                # 如果 rewrite 质量比 original 好（delta > 0），则 reward = delta（有奖励）
+                # PPL Delta 模式 (带组内归一化 + sigmoid)
+                # 原始 delta = avg_prob(rewrite) - avg_prob(original)
+                # 归一化: delta_norm = (delta - mean(delta)) / std(delta)
+                # Sigmoid: reward = sigmoid(delta_norm / temperature)
                 import math
                 rewrite_avg_prob = math.exp(rewrite_mean)  # avg_prob(rewrite) = 1/ppl(rewrite)
 
                 if original_mean > -100:
                     original_avg_prob = math.exp(original_mean)  # avg_prob(original) = 1/ppl(original)
                     delta = rewrite_avg_prob - original_avg_prob
-                    reward = max(0.0, delta)  # 负值截断为 0
-                    relative_improvement_rate = delta  # 用于日志（不截断）
+                    # 先保存原始 delta，稍后进行组内归一化
+                    reward = delta  # 临时值，稍后会被替换
+                    relative_improvement_rate = delta  # 用于日志
                     original_ppls.append(1.0 / original_avg_prob if original_avg_prob > 0 else float('inf'))
                 else:
                     # 没有 original，reward = 0
@@ -1223,6 +1229,42 @@ class SGLangStudentRewardClient:
             "token_log_probs": all_token_log_probs,
             "token_ids": all_token_ids,
         }
+
+        # ===== Post-processing for ppl_delta mode: Group normalization + Sigmoid =====
+        if self.reward_mode == "ppl_delta":
+            import math
+            # Extract raw deltas from rewards (which currently hold delta values)
+            raw_deltas = rewards[:]  # Copy
+
+            # Find valid deltas (from samples with original_cot)
+            # First apply max(0, delta) to clamp negative values
+            valid_deltas_raw = [raw_deltas[i] for i in range(batch_size) if i in original_results_map]
+            valid_deltas = [max(0.0, d) for d in valid_deltas_raw]
+            valid_indices = [i for i in range(batch_size) if i in original_results_map]
+
+            if valid_deltas:
+                # Compute mean and std of clamped deltas
+                mean_delta = sum(valid_deltas) / len(valid_deltas)
+                variance = sum((d - mean_delta) ** 2 for d in valid_deltas) / len(valid_deltas)
+                std_delta = math.sqrt(variance)
+
+                # Avoid division by zero (when all deltas are 0 or very similar)
+                if std_delta < 1e-8:
+                    std_delta = 1.0
+
+                temperature = self.ppl_delta_temperature
+
+                # Apply group normalization + sigmoid to valid samples
+                for i, idx in enumerate(valid_indices):
+                    clamped_delta = valid_deltas[i]
+                    normalized_delta = (clamped_delta - mean_delta) / std_delta
+                    # Sigmoid: reward = 1 / (1 + exp(-x))
+                    rewards[idx] = 1.0 / (1.0 + math.exp(-normalized_delta / temperature))
+
+                # For samples without original, set reward to 0.5 (sigmoid of 0)
+                for i in range(batch_size):
+                    if i not in valid_indices:
+                        rewards[i] = 0.5
 
         # Add saved prompts if requested
         if save_prompts and saved_prompts:
