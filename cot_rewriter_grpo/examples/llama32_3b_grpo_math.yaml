@@ -1,0 +1,198 @@
+hydra:
+  searchpath:
+  - file://verl/verl/trainer/config
+
+defaults:
+- ppo_trainer
+- _self_
+
+# ========== 基础训练配置 (保守配置，适合 8x40GB 或追求稳定训练) ==========
+trainer:
+  project_name: llama32_grpo_math
+  experiment_name: llama32_3b_grpo_gsm8k_math_safe
+  total_epochs: 15
+  total_training_steps: -1
+  save_freq: 20
+  test_freq: 5
+  val_before_train: false
+  device: cuda
+  log_freq: 10
+  max_actor_ckpt_to_keep: 3
+  default_local_dir: ${oc.env:CHECKPOINT_BASE_DIR}/llama32_grpo_math/${trainer.experiment_name}
+  n_gpus_per_node: 8
+  nnodes: 1
+  logger: [console, swanlab]
+  rollout_data_dir: ${oc.env:CHECKPOINT_BASE_DIR}/rollout_data/${trainer.experiment_name}
+  validation_data_dir: ${oc.env:CHECKPOINT_BASE_DIR}/validation_data/${trainer.experiment_name}
+
+# ========== 数据配置 (保守 batch size) ==========
+data:
+  train_files: 
+    - ${oc.env:DATA_BASE_DIR}/gsm8k/train.parquet
+    - ${oc.env:DATA_BASE_DIR}/math/train.parquet
+  val_files: 
+    - ${oc.env:DATA_BASE_DIR}/gsm8k/test.parquet
+    - ${oc.env:DATA_BASE_DIR}/math/test.parquet
+  train_batch_size: 128      # 保守：从 1024 降低到 128
+  val_batch_size: 64         # 验证批次
+  gen_batch_size: 128        # 生成批次
+  max_prompt_length: 4096
+  max_response_length: 4096
+  return_raw_chat: false
+  dataloader_num_workers: 4  # 降低 worker 数
+  reward_fn_key: data_source
+  prompt_key: prompt         # 使用 prompt 字段
+  filter_overlong_prompts: true
+  truncation: error
+  custom_cls:
+    path: ${oc.env:PROJECT_BASE_DIR}/verl/verl/utils/dataset/rl_dataset.py
+    name: RLHFDataset
+
+# ========== Actor & Rollout 配置 ==========
+actor_rollout_ref:
+  hybrid_engine: true
+
+  # 模型配置
+  model:
+    path: ${oc.env:MODEL_BASE_DIR}/LLM-Research/Llama-3.2-3B-Instruct
+    trust_remote_code: true
+    enable_gradient_checkpointing: true
+    use_remove_padding: true
+    lora_rank: 0
+
+  # Actor 训练配置
+  actor:
+    strategy: fsdp
+    ppo_epochs: 1
+    policy_loss:
+      loss_mode: grpo
+    clip_ratio: 0.2
+    clip_ratio_low: 0.2
+    clip_ratio_high: 0.28
+    entropy_coeff: 0.0
+    entropy_coeff_lower_bound: 0.0
+    grad_clip: 1.0
+    ppo_mini_batch_size: 32      # 保守：从 256 降低到 32
+    ppo_micro_batch_size_per_gpu: 4   # 保守：从 40 降低到 4
+    use_kl_in_reward: false
+    use_kl_loss: true
+    kl_loss_coef: 0.001
+    kl_loss_type: low_var_kl
+    entropy_from_logits_with_chunking: true
+    fsdp_config:
+      dtype: bfloat16
+      param_offload: true        # 开启 offload 更省显存
+      optimizer_offload: true    # 开启 optimizer offload
+      mixed_precision:
+        param_dtype: bf16
+        reduce_dtype: fp32
+        buffer_dtype: bf16
+      wrap_policy:
+        transformer_layer_cls_to_wrap: [LlamaDecoderLayer]
+        min_num_params: 0
+    optim:
+      lr: 1e-6
+      weight_decay: 0.01
+      lr_scheduler_type: cosine
+      lr_warmup_steps_ratio: 0.1
+      min_lr_ratio: 0.1
+      total_training_steps: -1
+
+  # Rollout (推理) 配置
+  rollout:
+    name: vllm
+    tensor_model_parallel_size: 2
+    gpu_memory_utilization: 0.5   # 保守：从 0.6 降低到 0.5
+    dtype: bfloat16
+    load_format: auto
+    log_prob_micro_batch_size_per_gpu: 4   # 保守
+    n: 5                         # GRPO group size
+    temperature: 1.0
+    top_k: -1
+    top_p: 1.0
+    prompt_length: 4096
+    response_length: 4096
+    max_num_batched_tokens: 8192  # 保守
+    max_model_len: 8192
+    enforce_eager: true
+    free_cache_engine: true
+    sleep_level: 1
+    agent:
+      num_workers: 4
+
+  # Ref 模型配置
+  ref:
+    enable: true
+    log_prob_micro_batch_size_per_gpu: 4
+    strategy: fsdp
+    fsdp_config:
+      dtype: bfloat16
+      param_offload: true         # 开启 offload
+      mixed_precision:
+        param_dtype: bf16
+        reduce_dtype: fp32
+        buffer_dtype: bf16
+      wrap_policy:
+        transformer_layer_cls_to_wrap: [LlamaDecoderLayer]
+        min_num_params: 0
+
+# ========== 算法配置 ==========
+algorithm:
+  adv_estimator: grpo
+  norm_adv_by_std_in_group: true
+  gamma: 1.0
+  lam: 1.0
+  use_kl_in_reward: false
+  kl_penalty: kl
+  kl_ctrl:
+    type: fixed
+    kl_coef: 0.0
+
+  filter_groups:
+    _target_: verl.trainer.config.FilterGroupsConfig
+    enable: false
+    metric: length_ratio
+    max_num_gen_batches: -1
+
+# ========== Critic 配置 (GRPO 不需要) ==========
+critic:
+  enable: false
+
+# ========== Reward Model 配置 ==========
+# naive reward manager 使用 rule-based 评分，不需要加载 RM 模型
+reward_model:
+  enable: false
+  reward_manager: naive
+  offload_rollout_for_reward: false
+  task_runner_num_gpus: 0
+
+# ========== Ray 配置 ==========
+ray_init:
+  num_cpus:
+  timeline_json_file:
+
+ray_kwargs:
+  ray_init:
+    _temp_dir:
+    include_dashboard: false
+    dashboard_host: ''
+    dashboard_port:
+    ignore_reinit_error: true
+    logging_level: warning
+    local_mode: false
+    namespace: llama32_grpo_math
+    _system_config:
+      enable_metrics_collection: false
+      agent_register_timeout_ms: 120000
+    runtime_env:
+      env_vars:
+        PYTHONPATH: ${oc.env:PROJECT_BASE_DIR}/.venv/lib/python3.12/site-packages:${oc.env:PROJECT_BASE_DIR}:${oc.env:PROJECT_BASE_DIR}/src:${oc.env:PROJECT_BASE_DIR}/verl
+        TOKENIZERS_PARALLELISM: 'false'
+        RAY_DEDUP_LOGS: '1'
+        RAY_DASHBOARD_HOST: ''
+        RAY_enable_dashboard: '0'
+        RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO: '0'
+        VLLM_USE_V1: '0'
+        VLLM_ATTENTION_BACKEND: FLASH_ATTN
+        SWANLAB_MODE: cloud
+        SWANLAB_API_KEY: xmtHYzg2Bw5uh1dprg81E

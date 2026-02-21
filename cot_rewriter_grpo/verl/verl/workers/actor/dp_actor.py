@@ -438,6 +438,10 @@ class DataParallelPPOActor(BasePPOActor):
                             log_prob=log_prob,
                             advantages=advantages,
                             response_mask=response_mask,
+                            cliprange=clip_ratio,
+                            cliprange_low=clip_ratio_low,
+                            cliprange_high=clip_ratio_high,
+                            clip_ratio_c=clip_ratio_c,
                             loss_agg_mode=loss_agg_mode,
                             config=self.config,
                         )
