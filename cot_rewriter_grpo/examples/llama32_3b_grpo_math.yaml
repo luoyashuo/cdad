@@ -11,9 +11,9 @@ trainer:
   project_name: llama32_grpo_math
   experiment_name: llama32_3b_grpo_gsm8k_math_safe
   total_epochs: 15
-  total_training_steps: -1
-  save_freq: 20
-  test_freq: 5
+  total_training_steps: 500
+  save_freq: 50
+  test_freq: 50
   val_before_train: false
   device: cuda
   log_freq: 10
@@ -31,10 +31,10 @@ data:
     - ${oc.env:DATA_BASE_DIR}/gsm8k/train.parquet
     - ${oc.env:DATA_BASE_DIR}/math/train.parquet
   val_files: 
+    # 只使用 GSM8K 验证，加快验证速度 (1319 vs 6319 条)
     - ${oc.env:DATA_BASE_DIR}/gsm8k/test.parquet
-    - ${oc.env:DATA_BASE_DIR}/math/test.parquet
   train_batch_size: 128      # 保守：从 1024 降低到 128
-  val_batch_size: 64         # 验证批次
+  val_batch_size: 256        # 验证批次增大，加速验证
   gen_batch_size: 128        # 生成批次
   max_prompt_length: 4096
   max_response_length: 4096
