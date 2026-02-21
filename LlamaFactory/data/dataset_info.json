@@ -1137,6 +1137,33 @@
       "user_tag": "user",
       "assistant_tag": "assistant"
     }
+  },
+  "llama3_3b_instruct_top2k_train": {
+    "file_name": "/data/luoys/data/cdad/cold_start/llama3_3b_instruct_top2k/train.jsonl",
+    "formatting": "sharegpt",
+    "columns": {
+      "messages": "messages"
+    },
+    "tags": {
+      "role_tag": "role",
+      "content_tag": "content",
+      "user_tag": "user",
+      "assistant_tag": "assistant",
+      "system_tag": "system"
+    }
+  },
+  "llama3_3b_instruct_top2k_val": {
+    "file_name": "/data/luoys/data/cdad/cold_start/llama3_3b_instruct_top2k/val.jsonl",
+    "formatting": "sharegpt",
+    "columns": {
+      "messages": "messages"
+    },
+    "tags": {
+      "role_tag": "role",
+      "content_tag": "content",
+      "user_tag": "user",
+      "assistant_tag": "assistant",
+      "system_tag": "system"
+    }
   }
-  
 }

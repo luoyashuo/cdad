@@ -30,7 +30,7 @@ data:
   train_files: ${oc.env:DATA_BASE_DIR}/omnithought_rv_optimal_cot_rewrite_top2000_v2/train.jsonl
   val_files: ${oc.env:DATA_BASE_DIR}/omnithought_rv_optimal_cot_rewrite_top2000_v2/val.jsonl
   train_batch_size: 64
-  val_batch_size: 4
+  val_batch_size: 64
   gen_batch_size: 64
   max_prompt_length: 4800
   max_response_length: 10000
@@ -50,7 +50,7 @@ actor_rollout_ref:
 
   # 模型配置
   model:
-    path: ${oc.env:MODEL_BASE_DIR}/LLM-Research/Llama-3.2-3B-Instruct
+    path: /data/luoys/checkpoints/cdad/cold_start/llama3_3b_instruct_top2k/checkpoint-182
     trust_remote_code: true
     enable_gradient_checkpointing: true
     use_remove_padding: false
@@ -98,7 +98,7 @@ actor_rollout_ref:
   # Rollout (推理) 配置
   rollout:
     name: vllm
-    tensor_model_parallel_size: 2
+    tensor_model_parallel_size: 1    # 3B 模型用 TP=1 减少通信问题
     gpu_memory_utilization: 0.6    # 降低到 0.6
     dtype: bfloat16
     load_format: auto
@@ -188,13 +188,13 @@ custom_reward_function:
     overworld_buffer_cfg:
       enable: true                    # 是否启用过冲缓冲区
       len: 3000                       # 缓冲区长度
-      penalty_factor: 1.0             # 惩罚因子
+      penalty_factor: 0.002             # 惩罚因子
       log: false                      # 是否记录日志
       max_resp_len: 10000             # 最大响应长度
     # ==================== Student Model 配置 (认知奖励 R_cog) ====================
     # 使用 student model 计算回答困惑度作为认知奖励
     student_model_path: ${oc.env:MODEL_BASE_DIR}/LLM-Research/Llama-3.2-1B-Instruct
-    student_tensor_parallel_size: 2
+    student_tensor_parallel_size: 1    # 1B 模型用 TP=1
     student_max_model_len: 12000
     student_micro_batch_size: 1
     student_max_num_seqs: 1
@@ -263,7 +263,7 @@ custom_reward_function:
     # 使用 Correct Judge 判断 rewrite_cot 是否导致正确的 solution
     use_correct_judge: true             # 是否启用 Correct Judge (默认: false)
     correct_judge_model_path: /data/luoys/modelscope_cache/models/Qwen/Qwen3-4B  # Correct Judge 模型路径
-    correct_judge_tensor_parallel_size: 2        # TP size for Correct Judge (适配 8x80G 环境)
+    correct_judge_tensor_parallel_size: 1        # TP=1 减少通信问题
     correct_judge_gpu_memory_utilization: 0.3    # GPU memory for Correct Judge
     correct_judge_max_model_len: 8192            # Max model len for Correct Judge
     correct_judge_micro_batch_size: 8            # Micro batch size for Correct Judge inference
@@ -279,7 +279,7 @@ custom_reward_function:
     similarity_threshold: 0.5   # 采用很低的相似度阈值，不许大量copy原文
     similarity_penalty: 0.0      # 惩罚系数
     truncation_penalty: 0.0           # 截断惩罚值， 开启overlong_buffer_cfg时候需要关闭该惩罚，不然会叠加
-    format_penalty: 0.5               # 格式错误惩罚值
+    format_penalty: 0.002               # 格式错误惩罚值
     # 过短惩罚阈值
     too_short_threshold_low: 0.2      # 过短下限阈值 (相比 original)
     too_short_threshold_high: 0.4     # 过短上限阈值
