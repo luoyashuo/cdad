@@ -52,12 +52,12 @@ class SGLangWorkerActor:
         micro_batch_size: int = 4,
         logprob_last_n_tokens: Optional[int] = None,  # 只计算最后 N 个 token 的 logprobs
         base_port: int = 30000,  # Base port for this worker (different per worker to avoid conflicts)
-        reward_mode: str = "ppl",  # "ppl", "ppl_delta", "ppl_ratio", "cot_effect_ratio", "cot_effect_delta_sigmoid", or "logprob"
+        reward_mode: str = "ppl",  # "ppl", "ppl_delta", "ppl_delta_norm_sigmoid", "ppl_ratio", "cot_effect_ratio", "cot_effect_delta_sigmoid", or "logprob"
         ppl_ratio_ceiling: float = 0.95,  # Ceiling for ppl_ratio mode: R_cog = min(ratio, ceiling)
         cot_effect_ratio_ceiling: float = 0.95,  # Ceiling for cot_effect_ratio mode: R_cog = min(ratio, ceiling)
         cot_effect_epsilon: float = 0.01,  # Epsilon for cot_effect_delta_sigmoid mode: avoids division by zero
         cot_effect_temperature: float = 2.0,  # Temperature for cot_effect_delta_sigmoid mode: controls sigmoid steepness
-        ppl_delta_temperature: float = 1.0,  # Temperature for ppl_delta mode sigmoid (after group normalization)
+        ppl_delta_temperature: float = 1.0,  # Temperature for ppl_delta_norm_sigmoid mode sigmoid (after group normalization)
         ppl_on_full_response: bool = False,  # If True, compute PPL on full response (Q+CoT+A)
     ):
         import os
@@ -77,7 +77,7 @@ class SGLangWorkerActor:
         self.cot_effect_ratio_ceiling = cot_effect_ratio_ceiling
         self.cot_effect_epsilon = cot_effect_epsilon
         self.cot_effect_temperature = cot_effect_temperature
-        self.ppl_delta_temperature = ppl_delta_temperature
+        self.ppl_delta_temperature = ppl_delta_norm_sigmoid_temperature
         self._base_port = base_port  # Store base port for SGLang Engine
         worker_name = f"SGLangWorker-{gpu_ids}"
 
@@ -450,12 +450,12 @@ class SGLangStudentRewardClient:
         devices: Optional[List[str]] = None,
         micro_batch_size: int = 4,
         logprob_last_n_tokens: Optional[int] = None,  # 只计算最后 N 个 token 的 logprobs
-        reward_mode: str = "ppl",  # "ppl", "ppl_delta", "ppl_ratio", "cot_effect_ratio", "cot_effect_delta_sigmoid", or "logprob"
+        reward_mode: str = "ppl",  # "ppl", "ppl_delta", "ppl_delta_norm_sigmoid", "ppl_ratio", "cot_effect_ratio", "cot_effect_delta_sigmoid", or "logprob"
         ppl_ratio_ceiling: float = 0.95,  # Ceiling for ppl_ratio mode: R_cog = min(ratio, ceiling)
         cot_effect_ratio_ceiling: float = 0.95,  # Ceiling for cot_effect_ratio mode: R_cog = min(ratio, ceiling)
         cot_effect_epsilon: float = 0.01,  # Epsilon for cot_effect_delta_sigmoid mode: avoids division by zero
         cot_effect_temperature: float = 2.0,  # Temperature for cot_effect_delta_sigmoid mode: controls sigmoid steepness
-        ppl_delta_temperature: float = 1.0,  # Temperature for ppl_delta mode sigmoid (after group normalization)
+        ppl_delta_temperature: float = 1.0,  # Temperature for ppl_delta_norm_sigmoid mode sigmoid (after group normalization)
         use_reward_delta: bool = True,  # If True (default), R_cog = rewrite - original (delta).
                                       # If False, R_cog = rewrite only (absolute value).
         reward_only_use_logprob: bool = None,  # Deprecated: use use_reward_delta instead
@@ -476,9 +476,10 @@ class SGLangStudentRewardClient:
             devices: List of CUDA devices (e.g., ["cuda:0", "cuda:1", "cuda:2", "cuda:3"])
             micro_batch_size: Batch size for each micro-batch to avoid OOM
             logprob_last_n_tokens: 只计算 answer 部分最后 N 个 token 的 logprobs，节省显存
-            reward_mode: Reward calculation mode - "ppl", "ppl_delta", "ppl_ratio", "cot_effect_ratio", "cot_effect_delta_sigmoid", or "logprob"
+            reward_mode: Reward calculation mode - "ppl", "ppl_delta", "ppl_delta_norm_sigmoid", "ppl_ratio", "cot_effect_ratio", "cot_effect_delta_sigmoid", or "logprob"
                 - "ppl": R_cog = avg_prob(rewrite) = 1 / PPL(rewrite) (absolute quality)
-                - "ppl_delta": R_cog = max(0, avg_prob(rewrite) - avg_prob(original)) (delta with negative clamp)
+                - "ppl_delta": R_cog = max(0, avg_prob(rewrite) - avg_prob(original)) (delta with negative clamp only)
+                - "ppl_delta_norm_sigmoid": R_cog = sigmoid(normalized_delta / temperature) with group normalization
                 - "ppl_ratio": R_cog = min(ppl_original / ppl_rewrite, ppl_ratio_ceiling)
                 - "cot_effect_ratio": R_cog = min(cot_effect(rewrite) / cot_effect(original), cot_effect_ratio_ceiling)
                 - "cot_effect_delta_sigmoid": R_cog = sigmoid((avg_prob(rewrite) - avg_prob(original)) / (|cot_effect(original)| + epsilon) / temperature)
@@ -507,7 +508,7 @@ class SGLangStudentRewardClient:
         self.cot_effect_ratio_ceiling = cot_effect_ratio_ceiling
         self.cot_effect_epsilon = cot_effect_epsilon
         self.cot_effect_temperature = cot_effect_temperature
-        self.ppl_delta_temperature = ppl_delta_temperature
+        self.ppl_delta_temperature = ppl_delta_norm_sigmoid_temperature
         self.ppl_on_full_response = ppl_on_full_response
 
         # Handle reward_only_use_logprob deprecation and map to use_reward_delta
@@ -692,7 +693,7 @@ class SGLangStudentRewardClient:
                 cot_effect_ratio_ceiling=self.cot_effect_ratio_ceiling,
                 cot_effect_epsilon=self.cot_effect_epsilon,
                 cot_effect_temperature=self.cot_effect_temperature,
-                ppl_delta_temperature=self.ppl_delta_temperature,
+                ppl_delta_norm_sigmoid_temperature=self.ppl_delta_temperature,
                 ppl_on_full_response=self.ppl_on_full_response,
             )
             self.workers.append(worker)
@@ -1163,6 +1164,27 @@ class SGLangStudentRewardClient:
                 rewrite_ppls.append(1.0 / rewrite_avg_prob if rewrite_avg_prob > 0 else float('inf'))
                 relative_improvement_rates.append(relative_improvement_rate)
             elif self.reward_mode == "ppl_delta":
+                # PPL Delta 模式 (仅负值截断)
+                # delta = avg_prob(rewrite) - avg_prob(original)
+                # R_cog = max(0, delta)
+                import math
+                rewrite_avg_prob = math.exp(rewrite_mean)  # avg_prob(rewrite) = 1/ppl(rewrite)
+
+                if original_mean > -100:
+                    original_avg_prob = math.exp(original_mean)  # avg_prob(original) = 1/ppl(original)
+                    delta = rewrite_avg_prob - original_avg_prob
+                    reward = max(0.0, delta)  # 负值截断
+                    relative_improvement_rate = delta  # 用于日志
+                    original_ppls.append(1.0 / original_avg_prob if original_avg_prob > 0 else float('inf'))
+                else:
+                    # 没有 original，reward = 0
+                    reward = 0.0
+                    relative_improvement_rate = 0.0
+                    original_ppls.append(float('nan'))
+
+                rewrite_ppls.append(1.0 / rewrite_avg_prob if rewrite_avg_prob > 0 else float('inf'))
+                relative_improvement_rates.append(relative_improvement_rate)
+            elif self.reward_mode == "ppl_delta_norm_sigmoid":
                 # PPL Delta 模式 (带组内归一化 + sigmoid)
                 # 原始 delta = avg_prob(rewrite) - avg_prob(original)
                 # 归一化: delta_norm = (delta - mean(delta)) / std(delta)
@@ -1230,8 +1252,8 @@ class SGLangStudentRewardClient:
             "token_ids": all_token_ids,
         }
 
-        # ===== Post-processing for ppl_delta mode: Group normalization + Sigmoid =====
-        if self.reward_mode == "ppl_delta":
+        # ===== Post-processing for ppl_delta_norm_sigmoid mode: Group normalization + Sigmoid =====
+        if self.reward_mode == "ppl_delta_norm_sigmoid":
             import math
             # Extract raw deltas from rewards (which currently hold delta values)
             raw_deltas = rewards[:]  # Copy

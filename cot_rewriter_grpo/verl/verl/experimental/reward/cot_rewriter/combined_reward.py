@@ -247,11 +247,12 @@ class CombinedRewardComputer:
         use_tiered_reward: bool = True,  # Whether to use tiered reward for R_cog
         tier_step: float = 0.05,  # 区间大小：每个阶梯的 R_cog 范围
         tier_reward: float = 0.1,  # 每阶梯奖励值：第一阶梯得 tier_reward，第二阶梯得 2*tier_reward
-        reward_mode: str = "ppl",  # "ppl", "ppl_delta", "ppl_ratio", "cot_effect_ratio", "cot_effect_delta_sigmoid", or "logprob"
+        reward_mode: str = "ppl",  # "ppl", "ppl_delta", "ppl_delta_norm_sigmoid", "ppl_ratio", "cot_effect_ratio", "cot_effect_delta_sigmoid", or "logprob"
                                    # - "ppl": R_cog = avg_prob(rewrite) = 1 / PPL(rewrite) [formula 2: absolute quality]
                                    #           Also logs formula 1: avg_prob(rewrite)/avg_prob(original) - 1 as observation
                                    #           where avg_prob = exp(mean_log_prob), PPL = 1/avg_prob
-                                   # - "ppl_delta": R_cog = max(0, avg_prob(rewrite) - avg_prob(original)) (delta with negative clamp)
+                                   # - "ppl_delta": R_cog = max(0, avg_prob(rewrite) - avg_prob(original)) (delta with negative clamp only)
+                                   # - "ppl_delta_norm_sigmoid": R_cog = sigmoid(normalized_delta / temperature) with group normalization
                                    # - "ppl_ratio": R_cog = min(PPL(original) / PPL(rewrite), ceiling)
                                    # - "cot_effect_ratio": R_cog = min(cot_effect(rewrite) / cot_effect(original), ceiling)
                                    # - "cot_effect_delta_sigmoid": R_cog = sigmoid(max(0, delta) / (|cot_effect(original)| + ε) / τ), delta = avg_prob(rewrite) - avg_prob(original)
@@ -265,7 +266,7 @@ class CombinedRewardComputer:
         cot_effect_ratio_ceiling: float = 0.95,  # Ceiling for cot_effect_ratio mode: R_cog = min(ratio, ceiling)
         cot_effect_epsilon: float = 0.01,  # Epsilon for cot_effect_delta_sigmoid mode: avoids division by zero
         cot_effect_temperature: float = 2.0,  # Temperature for cot_effect_delta_sigmoid mode: controls sigmoid steepness
-        ppl_delta_temperature: float = 1.0,  # Temperature for ppl_delta mode sigmoid (after group normalization)
+        ppl_delta_temperature: float = 1.0,  # Temperature for ppl_delta_norm_sigmoid mode sigmoid (after group normalization)
         # ========== FSF Reward Configuration ==========
         # FSF reward using build_cot_rewrite_from_sharegpt.py message format
         # GPU devices are auto-detected based on fsf_tensor_parallel_size
@@ -342,7 +343,7 @@ class CombinedRewardComputer:
             tier_reward: 每阶梯奖励值，第一阶梯得 tier_reward，第二阶梯得 2*tier_reward (default: 0.1).
             reward_mode: Reward calculation mode (default: "ppl").
                 - "ppl": R_cog = avg_prob(rewrite) = 1 / PPL(rewrite) (absolute quality)
-                - "ppl_delta": R_cog = max(0, avg_prob(rewrite) - avg_prob(original)) (delta with negative clamp)
+                - "ppl_delta_norm_sigmoid": R_cog = max(0, avg_prob(rewrite) - avg_prob(original)) (delta with negative clamp)
                   where avg_prob = exp(mean_log_prob), this rewards improvements and clamps negative deltas to 0
                 - "ppl_ratio": R_cog = min(PPL(original) / PPL(rewrite), ceiling)
                   where PPL = exp(-mean_log_prob), ceiling is controlled by ppl_ratio_ceiling (default: 0.95)
@@ -412,7 +413,7 @@ class CombinedRewardComputer:
         self.cot_effect_ratio_ceiling = cot_effect_ratio_ceiling
         self.cot_effect_epsilon = cot_effect_epsilon
         self.cot_effect_temperature = cot_effect_temperature
-        self.ppl_delta_temperature = ppl_delta_temperature
+        self.ppl_delta_temperature = ppl_delta_norm_sigmoid_temperature
 
         # Handle reward_only_use_logprob deprecation and map to use_reward_delta
         # reward_only_use_logprob has INVERTED logic compared to use_reward_delta
@@ -1243,12 +1244,12 @@ def compute_cot_rewriter_reward(
     use_tiered_reward: bool = True,  # Whether to use tiered (step-wise) reward for R_cog
     tier_step: float = 0.05,  # 区间大小：每个阶梯的 R_cog 范围
     tier_reward: float = 0.1,  # 每阶梯奖励值：第一阶梯得 tier_reward，第二阶梯得 2*tier_reward
-    reward_mode: str = "ppl",  # "ppl", "ppl_delta", "ppl_ratio", "cot_effect_ratio", "cot_effect_delta_sigmoid", or "logprob"
+    reward_mode: str = "ppl",  # "ppl", "ppl_delta", "ppl_delta_norm_sigmoid", "ppl_ratio", "cot_effect_ratio", "cot_effect_delta_sigmoid", or "logprob"
     ppl_ratio_ceiling: float = 0.95,  # Ceiling for ppl_ratio mode: R_cog = min(ratio, ceiling)
     cot_effect_ratio_ceiling: float = 0.95,  # Ceiling for cot_effect_ratio mode: R_cog = min(ratio, ceiling)
     cot_effect_epsilon: float = 0.01,  # Epsilon for cot_effect_delta_sigmoid mode: avoids division by zero
     cot_effect_temperature: float = 2.0,  # Temperature for cot_effect_delta_sigmoid mode: controls sigmoid steepness
-    ppl_delta_temperature: float = 1.0,  # Temperature for ppl_delta mode sigmoid (after group normalization)
+    ppl_delta_temperature: float = 1.0,  # Temperature for ppl_delta_norm_sigmoid mode sigmoid (after group normalization)
     use_reward_delta: bool = True,  # If True (default), compute delta (rewrite - original).
                                        # If False, use absolute value.
                                        # Deprecated alias: reward_only_use_logprob (inverted logic!)

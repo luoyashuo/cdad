@@ -27,7 +27,7 @@ trainer:
 
 # ========== 数据配置 ==========
 data:
-  train_files: ${oc.env:DATA_BASE_DIR}/omnithought_rv_optimal_cot_rewrite_top2000_v2/train.jsonl
+  train_files: ${oc.env:DATA_BASE_DIR}/omnithought_rv_optimal_cot_rewrite_top2000_v2/train_5.jsonl
   val_files: ${oc.env:DATA_BASE_DIR}/omnithought_rv_optimal_cot_rewrite_top2000_v2/val.jsonl
   train_batch_size: 1
   val_batch_size: 4
@@ -205,7 +205,7 @@ custom_reward_function:
     vllm_gpu_memory_utilization: 0.3  # vLLM 显存利用率
     cleanup_after_compute: true       # 计算后清理缓存
     # 认知奖励模式
-    reward_mode: ppl_delta  # ppl_delta 模式：先对 delta 进行负值截断，再组内归一化，最后 sigmoid
+    reward_mode: ppl_delta  # ppl_delta_norm_sigmoid 模式：先对 delta 进行负值截断，再组内归一化，最后 sigmoid
                             # 公式:
                             #   1. delta = avg_prob(rewrite) - avg_prob(original)
                             #   2. clamped_delta = max(0, delta)
@@ -213,7 +213,7 @@ custom_reward_function:
                             #   4. R_cog = sigmoid(normalized / temperature)
                             # 值域：[0, 1]，0.5 表示平均表现
     ppl_delta_temperature: 1.0       # sigmoid 温度，控制曲线陡峭度 (越小越陡)
-    # 以下参数为其他 mode 使用，ppl_delta 模式下不生效
+    # 以下参数为其他 mode 使用，ppl_delta_norm_sigmoid 模式下不生效
     cot_effect_epsilon: 0.01          # cot_effect_delta_sigmoid 模式：避免除零的小常数
     cot_effect_temperature: 1.0       # cot_effect_delta_sigmoid 模式：sigmoid 温度
     cot_effect_ratio_ceiling: 2       # cot_effect_ratio 模式的天花板
