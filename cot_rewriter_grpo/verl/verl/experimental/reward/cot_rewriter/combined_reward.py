@@ -24,6 +24,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import re
 from difflib import SequenceMatcher
 
+import numpy as np
 import torch
 
 from verl import DataProto
@@ -1836,11 +1837,11 @@ def compute_cot_rewriter_reward(
             # Relative improvement rates (formula 1 observation value)
             "relative_improvement_rates": result.get("relative_improvement_rates", [float('nan')] * batch_size),
             # FSF: Parse failure count and group skip flag
-            "fsf_parse_failed_count": result.get("fsf_parse_failed_count", 0),  # Number of samples with parse failures
-            "fsf_group_skipped": result.get("fsf_group_skipped", False),  # Whether FSF reward was skipped for entire group
+            "fsf_parse_failed_count": np.array(result.get("fsf_parse_failed_count", 0), dtype=object),  # Number of samples with parse failures
+            "fsf_group_skipped": np.array(result.get("fsf_group_skipped", False), dtype=object),  # Whether FSF reward was skipped for entire group
             # Correct Judge: Results and penalties
             "is_correct_results": result.get("is_correct_results", [True] * batch_size),  # Correct Judge results
-            "correct_judge_parse_failed_count": result.get("correct_judge_parse_failed_count", 0),  # Number of parse failures
+            "correct_judge_parse_failed_count": np.array(result.get("correct_judge_parse_failed_count", 0), dtype=object),  # Number of parse failures
             "r_cog_before_correct_judge": result.get("r_cog_before_correct_judge", cognitive_rewards),  # R_cog before penalty
             "correct_judge_penalties": result.get("correct_judge_penalties", [0.0] * batch_size),  # Penalties applied
         },

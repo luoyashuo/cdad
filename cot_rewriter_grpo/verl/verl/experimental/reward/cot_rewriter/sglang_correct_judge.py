@@ -233,7 +233,7 @@ Output <judge>Yes</judge> if the reasoning results in the given solution; otherw
         rewrite_cots: List[str],
         solutions: List[str],
         micro_batch_size: int = 8,
-        save_prompts: bool = False,  # Whether to save request prompts
+        save_prompts: bool = False,  # Whether to save request prompts and responses
     ) -> Tuple[List[Optional[bool]], Optional[Dict[str, List[str]]]]:
         """
         Batch computation of correct judge results.
@@ -243,12 +243,14 @@ Output <judge>Yes</judge> if the reasoning results in the given solution; otherw
             rewrite_cots: List of rewritten CoT reasonings
             solutions: List of ground truth solutions
             micro_batch_size: Max number of prompts per SGLang call
-            save_prompts: If True, also return saved prompts dict
+            save_prompts: If True, also return saved prompts and responses dict
 
         Returns:
             Tuple of:
             - List of boolean results (True=correct, False=incorrect, None=parse failure)
-            - Saved prompts dict (if save_prompts=True) or None
+            - Saved data dict (if save_prompts=True) or None, containing:
+                - "correct_judge_prompts": List of request prompts
+                - "correct_judge_responses": List of raw judge responses
         """
         # Initialize engine on first use
         self._init_engine()
@@ -263,12 +265,13 @@ Output <judge>Yes</judge> if the reasoning results in the given solution; otherw
             prompts.append(prompt)
 
         # Save prompts for debugging if requested
-        saved_prompts = {}
+        saved_data = {}
         if save_prompts:
-            saved_prompts["correct_judge_prompts"] = prompts
+            saved_data["correct_judge_prompts"] = prompts
 
         # Process in micro-batches to avoid OOM
         results = []
+        responses = []  # Store raw responses if save_prompts=True
         for i in range(0, len(prompts), micro_batch_size):
             batch_prompts = prompts[i:i + micro_batch_size]
 
@@ -290,15 +293,20 @@ Output <judge>Yes</judge> if the reasoning results in the given solution; otherw
                     else:
                         generated_text = str(output)
                     results.append(self._parse_judge_result(generated_text))
+                    if save_prompts:
+                        responses.append(generated_text)
 
             except Exception as e:
                 logger.error(f"[SGLangCorrectJudgeActor-{self.gpu_ids}] Micro-batch compute error at batch {i}: {e}")
                 # Fill remaining with None for this batch
                 remaining = len(batch_prompts)
                 results.extend([None] * remaining)
+                if save_prompts:
+                    responses.extend([""] * remaining)  # Empty string for errors
 
         if save_prompts:
-            return results, saved_prompts
+            saved_data["correct_judge_responses"] = responses
+            return results, saved_data
         return results, None
 
     def release_memory(self):

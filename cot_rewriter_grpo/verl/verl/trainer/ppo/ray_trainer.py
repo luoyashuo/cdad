@@ -659,30 +659,52 @@ class RayPPOTrainer:
 
         for k, v in reward_extra_infos_dict.items():
             # Handle both list-like values and scalar values (bool, int, float, str)
-            if hasattr(v, '__len__') and len(v) == n:
+            # Check if v is a numpy scalar (0-dimensional array) - treat as scalar
+            is_numpy_scalar = hasattr(v, 'ndim') and getattr(v, 'ndim', None) == 0
+            if hasattr(v, '__len__') and not is_numpy_scalar and len(v) == n:
                 base_data[k] = v
-            elif not hasattr(v, '__len__'):
-                # Scalar value (bool, int, float, str, etc.) - broadcast to all samples
+            elif not hasattr(v, '__len__') or is_numpy_scalar:
+                # Scalar value (bool, int, float, str, numpy scalar, etc.) - broadcast to all samples
                 base_data[k] = v
             elif k == "saved_prompts" and isinstance(v, dict) and len(v) > 0:
                 # Special handling for saved_prompts: it's a dict of lists
                 # Flatten it into individual fields with "saved_prompts." prefix
                 for inner_key, inner_list in v.items():
+                    # Check if inner_list is a numpy scalar (0-dimensional array)
+                    is_numpy_scalar = hasattr(inner_list, 'ndim') and getattr(inner_list, 'ndim', None) == 0
                     if isinstance(inner_list, (list, tuple)) and len(inner_list) == n:
                         base_data[f"saved_prompts.{inner_key}"] = inner_list
-                    elif not hasattr(inner_list, '__len__'):
+                    elif not hasattr(inner_list, '__len__') or is_numpy_scalar:
                         # Scalar value - broadcast to all samples
                         base_data[f"saved_prompts.{inner_key}"] = inner_list
+
+        def convert_to_json_serializable(obj):
+            """Convert numpy types to Python native types for JSON serialization."""
+            import numpy as np
+            if isinstance(obj, np.ndarray):
+                # For ndarrays, convert to nested list
+                return obj.tolist()
+            elif isinstance(obj, (np.integer, np.floating, np.bool_)):
+                # For numpy scalars, convert to Python native types
+                return obj.item()
+            elif isinstance(obj, dict):
+                return {k: convert_to_json_serializable(v) for k, v in obj.items()}
+            elif isinstance(obj, (list, tuple)):
+                return [convert_to_json_serializable(item) for item in obj]
+            else:
+                return obj
 
         lines = []
         for i in range(n):
             entry = {}
             for k, v in base_data.items():
-                if hasattr(v, '__getitem__') and i < len(v):
-                    entry[k] = v[i]
-                elif not hasattr(v, '__getitem__'):
+                # Check if v is a numpy scalar (0-dimensional array)
+                is_numpy_scalar = hasattr(v, 'ndim') and getattr(v, 'ndim', None) == 0
+                if hasattr(v, '__getitem__') and not is_numpy_scalar and i < len(v):
+                    entry[k] = convert_to_json_serializable(v[i])
+                elif not hasattr(v, '__getitem__') or is_numpy_scalar:
                     # Scalar value - add to every entry
-                    entry[k] = v
+                    entry[k] = convert_to_json_serializable(v)
             lines.append(json.dumps(entry, ensure_ascii=False))
 
         with open(filename, "w") as f:
