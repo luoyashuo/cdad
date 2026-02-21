@@ -132,7 +132,7 @@ class VLLMWorkerActor:
         self.cot_effect_ratio_ceiling = cot_effect_ratio_ceiling
         self.cot_effect_epsilon = cot_effect_epsilon
         self.cot_effect_temperature = cot_effect_temperature
-        self.ppl_delta_temperature = ppl_delta_norm_sigmoid_temperature
+        self.ppl_delta_temperature = ppl_delta_temperature
 
     def compute_logprobs(
         self,
@@ -305,7 +305,7 @@ class VLLMStudentRewardClient:
         self.reward_mode = reward_mode
         self.ppl_ratio_ceiling = ppl_ratio_ceiling
         self.cot_effect_ratio_ceiling = cot_effect_ratio_ceiling
-        self.ppl_delta_temperature = ppl_delta_norm_sigmoid_temperature
+        self.ppl_delta_temperature = ppl_delta_temperature
 
         # Handle reward_only_use_logprob deprecation and map to use_reward_delta
         # reward_only_use_logprob has INVERTED logic compared to use_reward_delta
@@ -429,7 +429,7 @@ class VLLMStudentRewardClient:
                 reward_mode=self.reward_mode,
                 ppl_ratio_ceiling=self.ppl_ratio_ceiling,
                 cot_effect_ratio_ceiling=self.cot_effect_ratio_ceiling,
-                ppl_delta_norm_sigmoid_temperature=self.ppl_delta_temperature,
+                ppl_delta_temperature=self.ppl_delta_temperature,
             )
             self.workers.append(worker)
 

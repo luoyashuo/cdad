@@ -77,7 +77,7 @@ class SGLangWorkerActor:
         self.cot_effect_ratio_ceiling = cot_effect_ratio_ceiling
         self.cot_effect_epsilon = cot_effect_epsilon
         self.cot_effect_temperature = cot_effect_temperature
-        self.ppl_delta_temperature = ppl_delta_norm_sigmoid_temperature
+        self.ppl_delta_temperature = ppl_delta_temperature
         self._base_port = base_port  # Store base port for SGLang Engine
         worker_name = f"SGLangWorker-{gpu_ids}"
 
@@ -508,7 +508,7 @@ class SGLangStudentRewardClient:
         self.cot_effect_ratio_ceiling = cot_effect_ratio_ceiling
         self.cot_effect_epsilon = cot_effect_epsilon
         self.cot_effect_temperature = cot_effect_temperature
-        self.ppl_delta_temperature = ppl_delta_norm_sigmoid_temperature
+        self.ppl_delta_temperature = ppl_delta_temperature
         self.ppl_on_full_response = ppl_on_full_response
 
         # Handle reward_only_use_logprob deprecation and map to use_reward_delta
@@ -693,7 +693,7 @@ class SGLangStudentRewardClient:
                 cot_effect_ratio_ceiling=self.cot_effect_ratio_ceiling,
                 cot_effect_epsilon=self.cot_effect_epsilon,
                 cot_effect_temperature=self.cot_effect_temperature,
-                ppl_delta_norm_sigmoid_temperature=self.ppl_delta_temperature,
+                ppl_delta_temperature=self.ppl_delta_temperature,
                 ppl_on_full_response=self.ppl_on_full_response,
             )
             self.workers.append(worker)

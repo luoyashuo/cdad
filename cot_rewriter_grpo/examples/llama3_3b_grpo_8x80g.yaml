@@ -9,8 +9,8 @@ defaults:
 # ========== 基础训练配置 ==========
 trainer:
   project_name: cot_rewriter_grpo
-  experiment_name: llama3_3b_grpo_8x80g_top2k_v2
-  total_epochs: 1
+  experiment_name: llama3_3b_grpo_8x80g_top2k_v3
+  total_epochs: 1000
   total_training_steps: 500
   save_freq: 60
   test_freq: 20
@@ -259,6 +259,15 @@ custom_reward_function:
     # 评估 rewrite 相对于 original 的有用性
     use_useful_reward: false          # 是否启用 useful 奖励
     lambda_useful: 1.0                # useful 奖励权重 λ_useful
+    # ==================== Correct Judge 配置 (正确性检测) ====================
+    # 使用 Correct Judge 判断 rewrite_cot 是否导致正确的 solution
+    use_correct_judge: true             # 是否启用 Correct Judge (默认: false)
+    correct_judge_model_path: /data/luoys/modelscope_cache/models/Qwen/Qwen3-4B  # Correct Judge 模型路径
+    correct_judge_tensor_parallel_size: 2        # TP size for Correct Judge (适配 8x80G 环境)
+    correct_judge_gpu_memory_utilization: 0.3    # GPU memory for Correct Judge
+    correct_judge_max_model_len: 8192            # Max model len for Correct Judge
+    correct_judge_micro_batch_size: 8            # Micro batch size for Correct Judge inference
+    correct_judge_penalty_value: 0.0             # 当判断为错误时，R_cog 强制设置的值 (ppl_delta 模式下为 0)
     # ==================== 数据字段映射配置 ====================
     field_mapping:
       prompt_key: problem             # 问题字段名

@@ -30,6 +30,8 @@ from verl import DataProto
 
 from verl.experimental.reward.cot_rewriter.training_logger import get_logger
 
+# Import Correct Judge (lazy import in code to avoid circular dependency)
+
 # Training logger for reward computation
 logger = get_logger("reward")
 
@@ -296,6 +298,15 @@ class CombinedRewardComputer:
                                             # original_cot and rewrite_cot exceeds this, apply penalty.
         similarity_penalty: float = 0.5,  # Penalty coefficient for high similarity (default: 0.5).
                                           # Applied when similarity > similarity_threshold.
+        # ========== Correct Judge Configuration ==========
+        # Determines if the reasoning process leads to the correct solution
+        use_correct_judge: bool = False,  # Whether to use Correct Judge (default: False)
+        correct_judge_model_path: str = "/data/luoys/modelscope_cache/models/Qwen/Qwen3-4B",  # Model path for Correct Judge
+        correct_judge_tensor_parallel_size: int = 1,  # TP size for Correct Judge
+        correct_judge_gpu_memory_utilization: float = 0.4,  # GPU memory for Correct Judge
+        correct_judge_max_model_len: int = 8192,  # Max model len for Correct Judge
+        correct_judge_micro_batch_size: int = 8,  # Micro batch size for Correct Judge inference
+        correct_judge_penalty_value: float = 0.0,  # R_cog value when correct judge says "No" (ppl_delta mode: 0)
         **kwargs,  # Ignore deprecated params
     ):
         """
@@ -379,6 +390,16 @@ class CombinedRewardComputer:
                 this value, a penalty is applied to discourage near-identical rewrites.
             similarity_penalty: Penalty coefficient for high similarity (default: 0.5). Applied
                 when similarity > similarity_threshold, scaled by penalty_mode if "relative".
+            use_correct_judge: Whether to use Correct Judge to verify if the reasoning leads to
+                the correct solution (default: False). When enabled, Correct Judge is loaded
+                after Student Model is cleaned up, and checks if rewrite_cot leads to solution.
+            correct_judge_model_path: Model path for Correct Judge (default: Qwen3-4B).
+            correct_judge_tensor_parallel_size: Tensor parallelism size for Correct Judge (default: 1).
+            correct_judge_gpu_memory_utilization: GPU memory fraction for Correct Judge (default: 0.4).
+            correct_judge_max_model_len: Maximum sequence length for Correct Judge (default: 8192).
+            correct_judge_micro_batch_size: Micro batch size for Correct Judge inference (default: 8).
+            correct_judge_penalty_value: R_cog value to use when Correct Judge returns "No"
+                (reasoning doesn't lead to solution). Default is 0.0 for ppl_delta mode.
 
         阶梯式奖励配置示例:
         - tier_step=0.05, tier_reward=0.1:
@@ -413,7 +434,7 @@ class CombinedRewardComputer:
         self.cot_effect_ratio_ceiling = cot_effect_ratio_ceiling
         self.cot_effect_epsilon = cot_effect_epsilon
         self.cot_effect_temperature = cot_effect_temperature
-        self.ppl_delta_temperature = ppl_delta_norm_sigmoid_temperature
+        self.ppl_delta_temperature = ppl_delta_temperature
 
         # Handle reward_only_use_logprob deprecation and map to use_reward_delta
         # reward_only_use_logprob has INVERTED logic compared to use_reward_delta
@@ -494,6 +515,16 @@ class CombinedRewardComputer:
         # ========== Repeat Penalty Parameters ==========
         self.similarity_threshold = similarity_threshold
         self.similarity_penalty = similarity_penalty
+
+        # ========== Correct Judge Parameters ==========
+        self.use_correct_judge = use_correct_judge
+        self.correct_judge_model_path = correct_judge_model_path
+        self.correct_judge_tensor_parallel_size = correct_judge_tensor_parallel_size
+        self.correct_judge_gpu_memory_utilization = correct_judge_gpu_memory_utilization
+        self.correct_judge_max_model_len = correct_judge_max_model_len
+        self.correct_judge_micro_batch_size = correct_judge_micro_batch_size
+        self.correct_judge_penalty_value = correct_judge_penalty_value
+        self.correct_judge = None  # Created on-demand in compute_reward
 
     def compute_reward(
         self,
@@ -819,6 +850,73 @@ class CombinedRewardComputer:
                     self.fsf_judge.shutdown()
                     self.fsf_judge = None
 
+        # ========== Correct Judge Computation ==========
+        # Correct Judge is computed after FSF (if enabled) with proper memory management
+        # Memory management: student -> FSF -> cleanup -> Correct Judge -> cleanup
+        is_correct_results = [True] * batch_size  # Default: all correct (no penalty)
+        correct_judge_parse_failed_count = 0  # Count of samples with parse failures
+
+        if self.use_correct_judge:
+            # Create Correct Judge Client on-demand
+            from verl.experimental.reward.cot_rewriter.sglang_correct_judge import SGLangCorrectJudgeClient
+
+            logger.info("[CORRECT_JUDGE] Creating Correct Judge client after Student Model cleanup...")
+            self.correct_judge = SGLangCorrectJudgeClient(
+                model_path=self.correct_judge_model_path,
+                tensor_parallel_size=self.correct_judge_tensor_parallel_size,
+                mem_fraction_static=self.correct_judge_gpu_memory_utilization,
+                max_model_len=self.correct_judge_max_model_len,
+                micro_batch_size=self.correct_judge_micro_batch_size,
+            )
+
+            try:
+                logger.info(f"[CORRECT_JUDGE] Computing correct judge for {len(questions)} samples "
+                           f"(save_prompts={self.save_prompts})...")
+
+                judge_result = self.correct_judge.compute_correct_judge(
+                    questions=questions,
+                    rewrite_cots=rewrite_cots,
+                    solutions=answers,
+                    save_prompts=self.save_prompts,
+                )
+
+                is_correct_results = judge_result["is_correct"]
+
+                # Extract saved prompts if needed
+                if self.save_prompts and "saved_prompts" in judge_result:
+                    if saved_prompts is None:
+                        saved_prompts = judge_result["saved_prompts"]
+                    else:
+                        # Merge saved prompts
+                        for key, values in judge_result["saved_prompts"].items():
+                            if key not in saved_prompts:
+                                saved_prompts[key] = []
+                            saved_prompts[key].extend(values)
+
+                # Count parse failures and apply penalty
+                correct_judge_parse_failed_count = sum(1 for x in is_correct_results if x is None)
+
+                # Log statistics
+                correct_count = sum(1 for x in is_correct_results if x is True)
+                incorrect_count = sum(1 for x in is_correct_results if x is False)
+                logger.info(
+                    f"[CORRECT_JUDGE] Statistics: "
+                    f"{correct_count} correct, {incorrect_count} incorrect, "
+                    f"{correct_judge_parse_failed_count} parse failures"
+                )
+
+                # Log first few samples
+                for i in range(min(3, batch_size)):
+                    if is_correct_results[i] is not None:
+                        result_str = "correct" if is_correct_results[i] else "incorrect"
+                        logger.info(f"[CORRECT_JUDGE] Sample {i}: {result_str}")
+
+            finally:
+                # Correct Judge cleanup - shutdown workers after computation
+                if self.correct_judge is not None:
+                    self.correct_judge.shutdown()
+                    self.correct_judge = None
+
         # Compute too_short_penalty and too_long_penalty based on length ratio
         # Penalty formula with low/high thresholds:
         #   ratio = rewrite_token_len / original_token_len
@@ -947,6 +1045,38 @@ class CombinedRewardComputer:
             logger.info(
                 f"[FSF_PENALTY_MODE] absolute, fsf_reward_scale={self.fsf_reward_scale:.4f}"
             )
+
+        # ========== Apply Correct Judge Penalty ==========
+        # If Correct Judge returns False (incorrect), force R_cog to penalty value
+        r_cog_before_correct_judge = r_cog.copy()  # Keep copy for logging
+        correct_judge_penalties = [0.0] * batch_size  # Track penalties for logging
+
+        if self.use_correct_judge:
+            for i in range(batch_size):
+                if is_correct_results[i] is False:
+                    # Incorrect: force R_cog to penalty value
+                    original_r_cog = r_cog[i]
+                    r_cog[i] = self.correct_judge_penalty_value
+                    penalty = original_r_cog - self.correct_judge_penalty_value
+                    correct_judge_penalties[i] = penalty
+                    if i < 3:  # Log first few samples
+                        logger.info(
+                            f"[CORRECT_JUDGE] Sample {i}: Incorrect! "
+                            f"R_cog forced from {original_r_cog:.4f} to {self.correct_judge_penalty_value:.4f} "
+                            f"(penalty={penalty:.4f})"
+                        )
+                elif is_correct_results[i] is None:
+                    # Parse failure: treat as incorrect
+                    original_r_cog = r_cog[i]
+                    r_cog[i] = self.correct_judge_penalty_value
+                    penalty = original_r_cog - self.correct_judge_penalty_value
+                    correct_judge_penalties[i] = penalty
+                    if i < 3:  # Log first few samples
+                        logger.info(
+                            f"[CORRECT_JUDGE] Sample {i}: Parse failure! "
+                            f"R_cog forced from {original_r_cog:.4f} to {self.correct_judge_penalty_value:.4f} "
+                            f"(penalty={penalty:.4f})"
+                        )
 
         # Compute base rewards: R_base = R_cog + lambda_useful * R_useful + fsf_scale * R_logic
         # Note: R_useful is only included if use_useful_reward is True. fsf_scale is computed based on fsf_penalty_mode.
@@ -1096,6 +1226,11 @@ class CombinedRewardComputer:
             # Note: original_dot_outputs is omitted (original cot does not call FSF judge)
             "fsf_parse_failed_count": fsf_parse_failed_count,  # Number of samples with FSF parse failures
             "fsf_group_skipped": fsf_group_skipped,  # Whether FSF reward was skipped for entire group
+            # === Correct Judge Keys ===
+            "is_correct_results": is_correct_results,  # Correct Judge results (True=correct, False=incorrect, None=parse failure)
+            "correct_judge_parse_failed_count": correct_judge_parse_failed_count,  # Number of samples with parse failures
+            "r_cog_before_correct_judge": r_cog_before_correct_judge,  # R_cog values before Correct Judge penalty
+            "correct_judge_penalties": correct_judge_penalties,  # Penalties applied by Correct Judge
             # === TOP-LEVEL KEYS for compute_cot_rewriter_reward to access ===
             "too_short_penalties": too_short_penalties,  # Penalty coefficients (0-0.5)
             "too_long_penalties": too_long_penalties,  # Penalty coefficients (0-0.5)
@@ -1279,6 +1414,14 @@ def compute_cot_rewriter_reward(
                                         # original_cot and rewrite_cot exceeds this, apply penalty.
     similarity_penalty: float = 0.5,  # Penalty coefficient for high similarity (default: 0.5).
                                       # Applied when similarity > similarity_threshold.
+    # ========== Correct Judge Parameters ==========
+    use_correct_judge: bool = False,  # Whether to use Correct Judge (default: False)
+    correct_judge_model_path: str = "/data/luoys/modelscope_cache/models/Qwen/Qwen3-4B",  # Model path for Correct Judge
+    correct_judge_tensor_parallel_size: int = 1,  # TP size for Correct Judge
+    correct_judge_gpu_memory_utilization: float = 0.4,  # GPU memory for Correct Judge
+    correct_judge_max_model_len: int = 8192,  # Max model len for Correct Judge
+    correct_judge_micro_batch_size: int = 8,  # Micro batch size for Correct Judge inference
+    correct_judge_penalty_value: float = 0.0,  # R_cog value when correct judge says "No" (ppl_delta mode: 0)
     **kwargs,
 ) -> Dict[str, Any]:
     # Use alpha if provided (from config), otherwise use alpha_cog
@@ -1322,6 +1465,16 @@ def compute_cot_rewriter_reward(
             this value, a penalty is applied to discourage near-identical rewrites.
         similarity_penalty: Penalty coefficient for high similarity (default: 0.5). Applied
             when similarity > similarity_threshold, scaled by penalty_mode if "relative".
+        use_correct_judge: Whether to use Correct Judge to verify if the reasoning leads to
+            the correct solution (default: False). When enabled, Correct Judge is loaded
+            after Student Model is cleaned up, and checks if rewrite_cot leads to solution.
+        correct_judge_model_path: Model path for Correct Judge (default: Qwen3-4B).
+        correct_judge_tensor_parallel_size: Tensor parallelism size for Correct Judge (default: 1).
+        correct_judge_gpu_memory_utilization: GPU memory fraction for Correct Judge (default: 0.4).
+        correct_judge_max_model_len: Maximum sequence length for Correct Judge (default: 8192).
+        correct_judge_micro_batch_size: Micro batch size for Correct Judge inference (default: 8).
+        correct_judge_penalty_value: R_cog value to use when Correct Judge returns "No"
+            (reasoning doesn't lead to solution). Default is 0.0 for ppl_delta mode.
 
     Returns:
         Dictionary with:
@@ -1509,6 +1662,14 @@ def compute_cot_rewriter_reward(
         # ========== Repeat Penalty Parameters ==========
         similarity_threshold=similarity_threshold,
         similarity_penalty=similarity_penalty,
+        # ========== Correct Judge Parameters ==========
+        use_correct_judge=use_correct_judge,
+        correct_judge_model_path=correct_judge_model_path,
+        correct_judge_tensor_parallel_size=correct_judge_tensor_parallel_size,
+        correct_judge_gpu_memory_utilization=correct_judge_gpu_memory_utilization,
+        correct_judge_max_model_len=correct_judge_max_model_len,
+        correct_judge_micro_batch_size=correct_judge_micro_batch_size,
+        correct_judge_penalty_value=correct_judge_penalty_value,
     )
 
     # Compute rewards for all samples
@@ -1677,6 +1838,11 @@ def compute_cot_rewriter_reward(
             # FSF: Parse failure count and group skip flag
             "fsf_parse_failed_count": result.get("fsf_parse_failed_count", 0),  # Number of samples with parse failures
             "fsf_group_skipped": result.get("fsf_group_skipped", False),  # Whether FSF reward was skipped for entire group
+            # Correct Judge: Results and penalties
+            "is_correct_results": result.get("is_correct_results", [True] * batch_size),  # Correct Judge results
+            "correct_judge_parse_failed_count": result.get("correct_judge_parse_failed_count", 0),  # Number of parse failures
+            "r_cog_before_correct_judge": result.get("r_cog_before_correct_judge", cognitive_rewards),  # R_cog before penalty
+            "correct_judge_penalties": result.get("correct_judge_penalties", [0.0] * batch_size),  # Penalties applied
         },
     }
 
