@@ -10,4 +10,4 @@ source /data/luoys/projects/cdad/cot_rewriter_grpo/.venv/bin/activate
 4. 你不能修改数据的长度， response长度
 
 # 问题
-如何在保证不OOM的前提下，提高训练稳定性？
+告诉我目前配置下的Reward计算

@@ -170,7 +170,7 @@ reward_model:
     overlong_buffer_cfg:
       enable: true
       len: 2000
-      penalty_factor: 0.5
+      penalty_factor: 0.2
       log: false
     max_resp_len: 10000
 
@@ -184,13 +184,6 @@ custom_reward_function:
   name: compute_cot_rewriter_reward
 
   reward_kwargs:
-    # ==================== 全局配置 ====================
-    overworld_buffer_cfg:
-      enable: true                    # 是否启用过冲缓冲区
-      len: 3000                       # 缓冲区长度
-      penalty_factor: 0.002             # 惩罚因子
-      log: false                      # 是否记录日志
-      max_resp_len: 10000             # 最大响应长度
     # ==================== Student Model 配置 (认知奖励 R_cog) ====================
     # 使用 student model 计算回答困惑度作为认知奖励
     student_model_path: ${oc.env:MODEL_BASE_DIR}/LLM-Research/Llama-3.2-1B-Instruct
@@ -205,13 +198,7 @@ custom_reward_function:
     vllm_gpu_memory_utilization: 0.3  # vLLM 显存利用率
     cleanup_after_compute: true       # 计算后清理缓存
     # 认知奖励模式
-    reward_mode: ppl_delta  # ppl_delta_norm_sigmoid 模式：先对 delta 进行负值截断，再组内归一化，最后 sigmoid
-                            # 公式:
-                            #   1. delta = avg_prob(rewrite) - avg_prob(original)
-                            #   2. clamped_delta = max(0, delta)
-                            #   3. normalized = (clamped_delta - mean(clamped_deltas)) / std(clamped_deltas)
-                            #   4. R_cog = sigmoid(normalized / temperature)
-                            # 值域：[0, 1]，0.5 表示平均表现
+    reward_mode: ppl  
     ppl_delta_temperature: 1.0       # sigmoid 温度，控制曲线陡峭度 (越小越陡)
     # 以下参数为其他 mode 使用，ppl_delta_norm_sigmoid 模式下不生效
     cot_effect_epsilon: 0.01          # cot_effect_delta_sigmoid 模式：避免除零的小常数
@@ -279,7 +266,7 @@ custom_reward_function:
     similarity_threshold: 0.5   # 采用很低的相似度阈值，不许大量copy原文
     similarity_penalty: 0.0      # 惩罚系数
     truncation_penalty: 0.0           # 截断惩罚值， 开启overlong_buffer_cfg时候需要关闭该惩罚，不然会叠加
-    format_penalty: 0.002               # 格式错误惩罚值
+    format_penalty: 0.2               # 格式错误惩罚值
     # 过短惩罚阈值
     too_short_threshold_low: 0.2      # 过短下限阈值 (相比 original)
     too_short_threshold_high: 0.4     # 过短上限阈值
