@@ -255,6 +255,8 @@ custom_reward_function:
     correct_judge_max_model_len: 8192            # Max model len for Correct Judge
     correct_judge_micro_batch_size: 8            # Micro batch size for Correct Judge inference
     correct_judge_penalty_value: 0.0             # 当判断为错误时，R_cog 强制设置的值 (ppl_delta 模式下为 0)
+    correct_judge_max_new_tokens: 10  # 限制输出长度为 10 个 token
+    correct_judge_filter_no_samples: true  # 过滤 judges 结果为 "No" 的样本
     # ==================== 数据字段映射配置 ====================
     field_mapping:
       prompt_key: problem             # 问题字段名

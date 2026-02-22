@@ -10,4 +10,4 @@ source /data/luoys/projects/cdad/cot_rewriter_grpo/.venv/bin/activate
 4. 你不能修改数据的长度， response长度
 
 # 问题
-告诉我目前配置下的Reward计算
+我希望correct_judge_model的功能多一个可以在config中配置的功能，用来控制是否过滤judges结果是No的样本（不参与GRPO优势计算）； 另外可以对correct_judge_model的输出长度限制一下，最多10个token，加快速度

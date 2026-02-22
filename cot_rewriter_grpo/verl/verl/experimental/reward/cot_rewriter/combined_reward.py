@@ -308,6 +308,8 @@ class CombinedRewardComputer:
         correct_judge_max_model_len: int = 8192,  # Max model len for Correct Judge
         correct_judge_micro_batch_size: int = 8,  # Micro batch size for Correct Judge inference
         correct_judge_penalty_value: float = 0.0,  # R_cog value when correct judge says "No" (ppl_delta mode: 0)
+        correct_judge_max_new_tokens: int = 10,  # Max tokens for Correct Judge output (short output for speed)
+        correct_judge_filter_no_samples: bool = False,  # If True, filter out samples where judge says "No" from GRPO training
         **kwargs,  # Ignore deprecated params
     ):
         """
@@ -401,6 +403,12 @@ class CombinedRewardComputer:
             correct_judge_micro_batch_size: Micro batch size for Correct Judge inference (default: 8).
             correct_judge_penalty_value: R_cog value to use when Correct Judge returns "No"
                 (reasoning doesn't lead to solution). Default is 0.0 for ppl_delta mode.
+            correct_judge_max_new_tokens: Max tokens for Correct Judge output (default: 10).
+                Shorter output speeds up inference. Typical output is <judge>Yes</judge> or <judge>No</judge>.
+            correct_judge_filter_no_samples: If True, filter out samples where Correct Judge returns "No"
+                from GRPO advantage calculation (default: False). When enabled, samples marked as incorrect
+                (is_correct=False) or parse failed (is_correct=None) will have train_mask=False and won't
+                participate in GRPO training.
 
         阶梯式奖励配置示例:
         - tier_step=0.05, tier_reward=0.1:
@@ -525,6 +533,8 @@ class CombinedRewardComputer:
         self.correct_judge_max_model_len = correct_judge_max_model_len
         self.correct_judge_micro_batch_size = correct_judge_micro_batch_size
         self.correct_judge_penalty_value = correct_judge_penalty_value
+        self.correct_judge_max_new_tokens = correct_judge_max_new_tokens
+        self.correct_judge_filter_no_samples = correct_judge_filter_no_samples
         self.correct_judge = None  # Created on-demand in compute_reward
 
     def compute_reward(
@@ -868,6 +878,7 @@ class CombinedRewardComputer:
                 mem_fraction_static=self.correct_judge_gpu_memory_utilization,
                 max_model_len=self.correct_judge_max_model_len,
                 micro_batch_size=self.correct_judge_micro_batch_size,
+                max_new_tokens=self.correct_judge_max_new_tokens,
             )
 
             try:
@@ -1208,6 +1219,26 @@ class CombinedRewardComputer:
             max_samples=2
         )
 
+        # ========== Generate train_mask based on correct_judge_filter_no_samples ==========
+        # train_mask: True = sample participates in GRPO training, False = sample is filtered out
+        if self.correct_judge_filter_no_samples:
+            train_mask = []
+            filtered_count = 0
+            for i in range(batch_size):
+                # Filter out samples where judge says "No" (False) or parse failed (None)
+                if is_correct_results[i] is False or is_correct_results[i] is None:
+                    train_mask.append(False)
+                    filtered_count += 1
+                else:
+                    train_mask.append(True)
+            logger.info(
+                f"[CORRECT_JUDGE_FILTER] Filtered {filtered_count}/{batch_size} samples "
+                f"({100*filtered_count/batch_size:.1f}%) from GRPO training"
+            )
+        else:
+            # No filtering: all samples participate
+            train_mask = [True] * batch_size
+
         return {
             "cognitive_rewards": r_cog,
             "useful_rewards": r_useful,  # R_useful: CoT有用程度
@@ -1232,6 +1263,7 @@ class CombinedRewardComputer:
             "correct_judge_parse_failed_count": correct_judge_parse_failed_count,  # Number of samples with parse failures
             "r_cog_before_correct_judge": r_cog_before_correct_judge,  # R_cog values before Correct Judge penalty
             "correct_judge_penalties": correct_judge_penalties,  # Penalties applied by Correct Judge
+            "train_mask": train_mask,  # Training mask: True=participate in GRPO, False=filtered out (when correct_judge_filter_no_samples=True)
             # === TOP-LEVEL KEYS for compute_cot_rewriter_reward to access ===
             "too_short_penalties": too_short_penalties,  # Penalty coefficients (0-0.5)
             "too_long_penalties": too_long_penalties,  # Penalty coefficients (0-0.5)
@@ -1423,6 +1455,8 @@ def compute_cot_rewriter_reward(
     correct_judge_max_model_len: int = 8192,  # Max model len for Correct Judge
     correct_judge_micro_batch_size: int = 8,  # Micro batch size for Correct Judge inference
     correct_judge_penalty_value: float = 0.0,  # R_cog value when correct judge says "No" (ppl_delta mode: 0)
+    correct_judge_max_new_tokens: int = 10,  # Max tokens for Correct Judge output (short output for speed)
+    correct_judge_filter_no_samples: bool = False,  # If True, filter out samples where judge says "No" from GRPO training
     **kwargs,
 ) -> Dict[str, Any]:
     # Use alpha if provided (from config), otherwise use alpha_cog
@@ -1476,6 +1510,12 @@ def compute_cot_rewriter_reward(
         correct_judge_micro_batch_size: Micro batch size for Correct Judge inference (default: 8).
         correct_judge_penalty_value: R_cog value to use when Correct Judge returns "No"
             (reasoning doesn't lead to solution). Default is 0.0 for ppl_delta mode.
+        correct_judge_max_new_tokens: Max tokens for Correct Judge output (default: 10).
+            Shorter output speeds up inference. Typical output is <judge>Yes</judge> or <judge>No</judge>.
+        correct_judge_filter_no_samples: If True, filter out samples where Correct Judge returns "No"
+            from GRPO advantage calculation (default: False). When enabled, samples marked as incorrect
+            (is_correct=False) or parse failed (is_correct=None) will have train_mask=False and won't
+            participate in GRPO training. The train_mask is returned in rollout_data for use by the trainer.
 
     Returns:
         Dictionary with:
@@ -1671,6 +1711,8 @@ def compute_cot_rewriter_reward(
         correct_judge_max_model_len=correct_judge_max_model_len,
         correct_judge_micro_batch_size=correct_judge_micro_batch_size,
         correct_judge_penalty_value=correct_judge_penalty_value,
+        correct_judge_max_new_tokens=correct_judge_max_new_tokens,
+        correct_judge_filter_no_samples=correct_judge_filter_no_samples,
     )
 
     # Compute rewards for all samples
@@ -1844,6 +1886,7 @@ def compute_cot_rewriter_reward(
             "correct_judge_parse_failed_count": np.array(result.get("correct_judge_parse_failed_count", 0), dtype=object),  # Number of parse failures
             "r_cog_before_correct_judge": result.get("r_cog_before_correct_judge", cognitive_rewards),  # R_cog before penalty
             "correct_judge_penalties": result.get("correct_judge_penalties", [0.0] * batch_size),  # Penalties applied
+            "train_mask": result.get("train_mask", [True] * batch_size),  # Training mask for GRPO (True=participate, False=filtered)
         },
     }
 
