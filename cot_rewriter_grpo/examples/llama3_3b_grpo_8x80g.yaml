@@ -9,7 +9,7 @@ defaults:
 # ========== 基础训练配置 ==========
 trainer:
   project_name: cot_rewriter_grpo
-  experiment_name: llama3_3b_grpo_8x80g_top2k_v4
+  experiment_name: llama3_3b_grpo_8x80g_top2k_v5
   total_epochs: 1000
   total_training_steps: 500
   save_freq: 60
@@ -205,7 +205,7 @@ custom_reward_function:
     cot_effect_temperature: 1.0       # cot_effect_delta_sigmoid 模式：sigmoid 温度
     cot_effect_ratio_ceiling: 2       # cot_effect_ratio 模式的天花板
     ppl_ratio_ceiling: 999            # ppl_ratio 模式的天花板
-    ppl_on_full_response: false       # 是否对整个 response 计算 PPL (Q+CoT+A)
+    ppl_on_full_response: true       # 是否对整个 response 计算 PPL (Q+CoT+A)
                                         # true: 对整个 response 计算 PPL
                                         # false: 只对 answer 部分计算 PPL (默认)
     print_samples: 2                  # 打印样本数
@@ -221,7 +221,7 @@ custom_reward_function:
     tier_reward: 0.002                  # 每阶梯奖励值
     # ==================== 逻辑奖励 FSF 配置 (R_logic) ====================
     # 使用 FSF (Free-Form Solver Feedback) 模型评估逻辑质量
-    use_logic_reward: false             # 是否启用逻辑奖励
+    use_logic_reward: true             # 是否启用逻辑奖励
     fsf_model_path: /data/luoys/checkpoints/cdad/fsf_reward/qwen3_4b_fsf_grm
     fsf_tensor_parallel_size: 2        # 降低TP以适配4卡环境 (Actor TP=4, FSF需要共享)
     fsf_temperature: 0.4
