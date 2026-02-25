@@ -82,7 +82,7 @@ source .venv/bin/activate
 # 安装 VERL 框架（在父目录的 verl 中）
 cd verl
 uv pip install -e .
-uv pip install vllm==0.8.4
+uv pip install vllm==0.8.5.post1
 uv pip install "sglang[all]==0.4.6.post5"
 uv pip install transformers==4.55.0
 uv pip install zmq
