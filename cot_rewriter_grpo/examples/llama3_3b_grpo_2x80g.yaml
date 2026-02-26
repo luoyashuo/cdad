@@ -213,7 +213,7 @@ custom_reward_function:
     # R_cog = answer_log_prob(rewrite) - answer_log_prob(original)
     # answer_log_prob = mean(token_log_probs) + alpha * min(token_log_probs)
     alpha: 0.01                       # min-log-prob 的权重系数
-    use_reward_delta: true            # 是否使用奖励差值 (rewrite - original)
+    use_reward_delta: false            # 是否使用奖励差值 (rewrite - original)
     # ==================== 阶梯式奖励配置 (Tiered Reward) ====================
     # 当 rewrite 使困惑度降低达到一定阈值时给予额外奖励
     use_tiered_reward: false           # 是否启用阶梯奖励
@@ -230,13 +230,13 @@ custom_reward_function:
     fsf_max_new_tokens: 3072
     fsf_gpu_memory_utilization: 0.3    # 降低显存利用率以避免OOM (0.4->0.3)
     fsf_max_model_len: 12000
-    fsf_reward_scale: 0.05          # FSF 奖励缩放因子
-    fsf_micro_batch_size: 8           # FSF 推理微批次大小 (控制显存，默认4)
+    fsf_reward_scale: 1.0          # FSF 奖励缩放因子
+    fsf_micro_batch_size: 4           # FSF 推理微批次大小 (控制显存，默认4)
     fsf_skip_group_on_parse_error: true  # DOT解析失败时跳过整个group (默认true)
     save_fsf_dot_outputs: true        # 保存 FSF DOT 输出到 rollout_data
     save_prompts: true                 # 是否保存 student_model 和 fsf_judge 的请求 prompt (用于调试)
     r_logic_repeat_n: 1               # FSF 重复计算次数 (已修复多次调用问题，现在可以安全使用3)
-    fsf_reward_mode: "threshold"          # FSF 奖励计算模式: "direct" (默认) 或 "threshold"
+    fsf_reward_mode: "direct"          # FSF 奖励计算模式: "direct" (默认) 或 "threshold"
                                       # - "direct": R_logic = -rewrite_fsf (与失败分支成正比的负奖励)
                                       # - "threshold": R_logic = -1 if fsf > 0 else 0 (有失败分支时的固定惩罚)
     fsf_penalty_mode: "absolute"      # FSF 惩罚模式: "absolute" (默认) 或 "relative"
@@ -253,7 +253,7 @@ custom_reward_function:
     correct_judge_tensor_parallel_size: 2        # TP=1 减少通信问题
     correct_judge_gpu_memory_utilization: 0.3    # GPU memory for Correct Judge
     correct_judge_max_model_len: 8192            # Max model len for Correct Judge
-    correct_judge_micro_batch_size: 8            # Micro batch size for Correct Judge inference
+    correct_judge_micro_batch_size: 4            # Micro batch size for Correct Judge inference
     correct_judge_penalty_value: 0.0             # 当判断为错误时，R_cog 强制设置的值 (ppl_delta 模式下为 0)
     correct_judge_max_new_tokens: 10  # 限制输出长度为 10 个 token
     correct_judge_filter_no_samples: true  # 过滤 judges 结果为 "No" 的样本
