@@ -1085,7 +1085,7 @@
       "user_tag": "user",
       "assistant_tag": "assistant"
     }
-  },  
+  },
   "omnithought_rv_optimal_top50k_train-llama3-3b_rewrite": {
     "file_name": "/data/luoys/data/cdad/rewritten_output/llama3_3b_grpo_8x80g_top50k_iter180_train/final_dataset.jsonl",
     "formatting": "sharegpt",
@@ -1164,6 +1164,58 @@
       "user_tag": "user",
       "assistant_tag": "assistant",
       "system_tag": "system"
+    }
+  },
+  "ultrachat_10k_train": {
+    "file_name": "/fs/fast/u20240075/hf_home/datasets/Yaseal/CDAD_EXP/cold_start/ultrachat_10k/train.jsonl",
+    "formatting": "sharegpt",
+    "columns": {
+      "messages": "conversations"
+    },
+    "tags": {
+      "role_tag": "role",
+      "content_tag": "content",
+      "user_tag": "user",
+      "assistant_tag": "assistant"
+    }
+  },
+  "ultrachat_10k_val": {
+    "file_name": "/fs/fast/u20240075/hf_home/datasets/Yaseal/CDAD_EXP/cold_start/ultrachat_10k/val.jsonl",
+    "formatting": "sharegpt",
+    "columns": {
+      "messages": "conversations"
+    },
+    "tags": {
+      "role_tag": "role",
+      "content_tag": "content",
+      "user_tag": "user",
+      "assistant_tag": "assistant"
+    }
+  },
+  "metamath_40k_train": {
+    "file_name": "/fs/fast/u20240075/hf_home/datasets/Yaseal/CDAD_EXP/cold_start/metamath_40k/train.jsonl",
+    "formatting": "sharegpt",
+    "columns": {
+      "messages": "conversations"
+    },
+    "tags": {
+      "role_tag": "role",
+      "content_tag": "content",
+      "user_tag": "user",
+      "assistant_tag": "assistant"
+    }
+  },
+  "metamath_40k_val": {
+    "file_name": "/fs/fast/u20240075/hf_home/datasets/Yaseal/CDAD_EXP/cold_start/metamath_40k/val.jsonl",
+    "formatting": "sharegpt",
+    "columns": {
+      "messages": "conversations"
+    },
+    "tags": {
+      "role_tag": "role",
+      "content_tag": "content",
+      "user_tag": "user",
+      "assistant_tag": "assistant"
     }
   }
 }

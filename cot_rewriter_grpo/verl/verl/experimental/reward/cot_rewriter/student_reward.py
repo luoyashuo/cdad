@@ -17,12 +17,18 @@ Uses Ray actors for multi-GPU parallelism. Supports two modes:
 """
 
 from typing import Any, Dict, List, Optional
+import os
+
+# IMPORTANT: Set PYTORCH_NVML_BASED_CUDA_CHECK=1 BEFORE importing torch.
+# Prevents torch.cuda.is_available() from caching False when Ray sets
+# CUDA_VISIBLE_DEVICES="" for actors with num_gpus=0.
+os.environ.setdefault('PYTORCH_NVML_BASED_CUDA_CHECK', '1')
+
 import ray
 
 from verl.experimental.reward.cot_rewriter.logging_config import logger
 from vllm import LLM
 from transformers import AutoTokenizer
-import os
 import torch
 
 
@@ -67,12 +73,9 @@ class VLLMWorkerActor:
         self.tensor_parallel_size = tensor_parallel_size
         worker_name = f"VLLMWorker-{gpu_ids}"
 
-        # Ray actor inherits CUDA_VISIBLE_DEVICES from parent process
-        parent_cuda_devices = os.environ.get("CUDA_VISIBLE_DEVICES", "")
-
-        # Set CUDA_VISIBLE_DEVICES to all logical GPUs for this actor
-        # e.g., logical_gpu_ids=[0, 1] → "0,1" for TP=2
-        cuda_devices_str = ",".join(map(str, logical_gpu_ids))
+        # Ray actor may have CUDA_VISIBLE_DEVICES="" when created with num_gpus=0.
+        # Set CUDA_VISIBLE_DEVICES to the physical GPU IDs for this actor.
+        cuda_devices_str = ",".join(map(str, gpu_ids))
         os.environ["CUDA_VISIBLE_DEVICES"] = cuda_devices_str
 
         # Force vLLM V0 engine to avoid V1 serialization bugs
@@ -413,12 +416,17 @@ class VLLMStudentRewardClient:
 
         # Create Ray actors, one per GPU group
         for group_idx, gpu_group in enumerate(gpu_groups):
-            # Compute logical GPU IDs for this group
-            logical_gpu_ids = [physical_to_logical.get(gpu, 0) for gpu in gpu_group]
+            # gpu_group contains logical device indices. Convert to physical GPU IDs.
+            if cuda_visible_devices:
+                physical_gpu_ids = [available_gpus[g] for g in gpu_group]
+            else:
+                physical_gpu_ids = list(gpu_group)
+            # Actor-local logical IDs are always 0, 1, ..., tp_size-1
+            logical_gpu_ids = list(range(len(gpu_group)))
             # Note: num_gpus=0 because we set CUDA_VISIBLE_DEVICES inside the actor
             worker = VLLMWorkerActor.options(num_gpus=0, num_cpus=1).remote(
                 model_path=self.model_path,
-                gpu_ids=gpu_group,
+                gpu_ids=physical_gpu_ids,
                 logical_gpu_ids=logical_gpu_ids,
                 tensor_parallel_size=self.tensor_parallel_size,
                 gpu_memory_utilization=self.gpu_memory_utilization,

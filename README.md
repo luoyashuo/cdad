@@ -37,7 +37,7 @@ uv pip install flashinfer-python -i https://flashinfer.ai/whl/cu124/torch2.6
 
 ### vLLM（高性能推理引擎）
 ```bash
-uv pip install vllm==0.10.2
+uv pip install vllm==0.8.5.post1
 ```
 
 ### 其他特殊依赖

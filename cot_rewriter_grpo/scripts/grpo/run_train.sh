@@ -89,6 +89,9 @@ export NCCL_SHM_DISABLE=0
 export TOKENIZERS_PARALLELISM=false
 export PYTORCH_CUDA_ALLOC_CONF=backend:native,expandable_segments:False
 export TORCH_COMPILE_DISABLE=1
+# 防止 torch.cuda.is_available() 在 Ray actor (num_gpus=0) 中缓存 False
+# 使用 NVML 检测，支持 CUDA_VISIBLE_DEVICES 动态更改
+export PYTORCH_NVML_BASED_CUDA_CHECK=1
 
 # vLLM/SGLang 配置
 export VLLM_ATTENTION_BACKEND=FLASH_ATTN

@@ -22,11 +22,19 @@ SGLang 特有优化：
 
 import asyncio
 from typing import Any, Dict, List, Optional
+import os
+
+# IMPORTANT: Set PYTORCH_NVML_BASED_CUDA_CHECK=1 BEFORE importing torch.
+# This prevents torch.cuda.is_available() from caching False when
+# CUDA_VISIBLE_DEVICES is temporarily empty (e.g., when Ray spawns actors
+# with num_gpus=0). With this flag, is_available() uses NVML-based detection
+# which correctly re-evaluates device availability after CUDA_VISIBLE_DEVICES changes.
+os.environ.setdefault('PYTORCH_NVML_BASED_CUDA_CHECK', '1')
+
 import ray
 
 from verl.experimental.reward.cot_rewriter.logging_config import logger
 from transformers import AutoTokenizer
-import os
 import torch
 
 
@@ -81,12 +89,11 @@ class SGLangWorkerActor:
         self._base_port = base_port  # Store base port for SGLang Engine
         worker_name = f"SGLangWorker-{gpu_ids}"
 
-        # Ray actor inherits CUDA_VISIBLE_DEVICES from parent process
-        parent_cuda_devices = os.environ.get("CUDA_VISIBLE_DEVICES", "")
-
-        # Set CUDA_VISIBLE_DEVICES to all logical GPUs for this actor
-        # e.g., logical_gpu_ids=[0, 1] → "0,1" for TP=2
-        cuda_devices_str = ",".join(map(str, logical_gpu_ids))
+        # Ray actor may have CUDA_VISIBLE_DEVICES="" when created with num_gpus=0.
+        # Set CUDA_VISIBLE_DEVICES to the physical GPU IDs for this actor.
+        # gpu_ids contains physical GPU IDs (e.g., [2, 3]), so the actor can
+        # directly access the correct physical GPUs regardless of Ray's env setup.
+        cuda_devices_str = ",".join(map(str, gpu_ids))
         os.environ["CUDA_VISIBLE_DEVICES"] = cuda_devices_str
 
         # Log GPU memory status BEFORE loading model
@@ -672,14 +679,22 @@ class SGLangStudentRewardClient:
             logger.info(f"[SGLangStudentReward] Worker {group_idx}: using port {port} (preferred: {preferred_port})")
 
         for group_idx, gpu_group in enumerate(gpu_groups):
-            # Compute logical GPU IDs for this group
-            logical_gpu_ids = [physical_to_logical.get(gpu, 0) for gpu in gpu_group]
+            # gpu_group contains logical device indices (e.g., [0, 1]).
+            # Convert to physical GPU IDs using available_gpus mapping.
+            if cuda_visible_devices:
+                physical_gpu_ids = [available_gpus[g] for g in gpu_group]
+            else:
+                physical_gpu_ids = list(gpu_group)
+            # Actor-local logical IDs are always 0, 1, ..., tp_size-1
+            # (the actor sets CUDA_VISIBLE_DEVICES to physical_gpu_ids,
+            # so within the actor, these GPUs appear as logical 0, 1, ...)
+            logical_gpu_ids = list(range(len(gpu_group)))
             # Assign unique base_port for each worker
             base_port = assigned_ports[group_idx]
             # Note: num_gpus=0 because we set CUDA_VISIBLE_DEVICES inside the actor
             worker = SGLangWorkerActor.options(num_gpus=0, num_cpus=1).remote(
                 model_path=self.model_path,
-                gpu_ids=gpu_group,
+                gpu_ids=physical_gpu_ids,
                 logical_gpu_ids=logical_gpu_ids,
                 tensor_parallel_size=self.tensor_parallel_size,
                 mem_fraction_static=self.mem_fraction_static,
@@ -697,7 +712,7 @@ class SGLangStudentRewardClient:
                 ppl_on_full_response=self.ppl_on_full_response,
             )
             self.workers.append(worker)
-            logger.info(f"[SGLangStudentReward] Created worker {group_idx} on GPUs {gpu_group} with base_port={base_port}")
+            logger.info(f"[SGLangStudentReward] Created worker {group_idx} on physical GPUs {physical_gpu_ids} with base_port={base_port}")
 
         # IMPORTANT: Initialize workers IN PARALLEL using unique ports
         # Each worker has a different base_port, so their random port ranges don't overlap:
@@ -707,7 +722,7 @@ class SGLangStudentRewardClient:
         logger.info(f"[SGLangStudentReward] Initializing {len(self.workers)} workers IN PARALLEL with unique ports...")
         init_futures = []
         for i, worker in enumerate(self.workers):
-            logger.info(f"[SGLangStudentReward] Submitting init for worker {i}/{len(self.workers)} on GPUs {gpu_groups[i]} (base_port={assigned_ports[i]})...")
+            logger.info(f"[SGLangStudentReward] Submitting init for worker {i}/{len(self.workers)} (base_port={assigned_ports[i]})...")
             init_futures.append(worker.compute_logprobs.remote(["test"], [0]))
 
         # Wait for all workers to complete initialization in parallel

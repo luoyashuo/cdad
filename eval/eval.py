@@ -90,7 +90,7 @@ class VLLMServiceManager:
         self.model_path = model_path
         self.tp = tp
         self.gpu_memory_utilization = gpu_memory_utilization
-        self.timeout = timeout or 600  # 默认10分钟超时
+        self.timeout = timeout or 60  # 默认10分钟超时
         self.max_model_len = max_model_len  # 最大模型长度，与benchmark的max_tokens保持一致
         self.process = None
         self.api_url = "http://localhost:8000"
@@ -102,8 +102,8 @@ class VLLMServiceManager:
         else:
             self.model_name = path_parts[-1]
 
-        # 设置vLLM日志目录
-        self.log_dir = Path("/home/luoyashuo/research/graph_kd/cdad/eval/vllm_logs")
+        # 设置vLLM日志目录（相对于脚本所在目录）
+        self.log_dir = Path(os.path.dirname(os.path.abspath(__file__))) / "vllm_logs"
         self.log_dir.mkdir(parents=True, exist_ok=True)
 
     def start(self, timeout: int = 300) -> bool:
@@ -116,7 +116,8 @@ class VLLMServiceManager:
             "--gpu-memory-utilization", str(self.gpu_memory_utilization),
             "--port", "8000",
             "--host", "0.0.0.0",
-            "--generation-config", "vllm"  # 使用vLLM的生成配置而不是模型自带的
+            "--generation-config", "vllm",  # 使用vLLM的生成配置而不是模型自带的
+            "--enforce-eager"  # 禁用torch.compile和CUDA graph，避免V1 Engine编译问题
         ]
 
         # 如果设置了max_model_len，添加到启动命令
@@ -206,13 +207,22 @@ class VLLMServiceManager:
 class BenchmarkEvaluator:
     """benchmark测评器"""
 
-    def __init__(self, config_file: str):
+    def __init__(self, config_file: str, run_id: int = None, version: str = None, vllm_manager: Optional['VLLMServiceManager'] = None):
         self.config_file = config_file
         self.config = self._load_config()
+        self.vllm_manager = vllm_manager
         self.results = {}
         self.base_dir = Path(self.config['model_path'])
-        self.version = datetime.now().strftime("version_%Y%m%d_%H%M%S")
-        self.output_dir = self.base_dir / "evalscope" / self.version
+        self.version = version or datetime.now().strftime("version_%Y%m%d_%H%M%S")
+
+        # 支持多次运行，每次运行有独立的输出目录
+        if run_id is not None:
+            self.output_dir = self.base_dir / "evalscope" / self.version / f"run_{run_id}"
+            self.run_id = run_id
+        else:
+            self.output_dir = self.base_dir / "evalscope" / self.version
+            self.run_id = None
+            
         self.debug_mode = self.config.get('debug', False)  # 支持debug模式
 
         # 提取模型名称用于日志显示
@@ -353,8 +363,9 @@ class BenchmarkEvaluator:
 
     def run_evaluation(self):
         """运行评测"""
+        run_info = f" (第 {self.run_id} 次运行)" if self.run_id else ""
         logger.info(f"\n{'='*60}")
-        logger.info(f"开始运行评估 - 模型: {self.model_name}")
+        logger.info(f"开始运行评估{run_info} - 模型: {self.model_name}")
         logger.info(f"配置文件: {self.config_file}")
         logger.info(f"输出目录: {self.output_dir}")
         logger.info(f"调试模式: {self.debug_mode}")
@@ -370,17 +381,20 @@ class BenchmarkEvaluator:
         if max_model_len:
             logger.info(f"vLLM max_model_len 设置为: {max_model_len}")
 
-        # 启动vLLM服务
-        vllm_manager = VLLMServiceManager(
-            model_path=self.config['model_path'],
-            tp=self.config.get('vllm', {}).get('tp', 1),
-            gpu_memory_utilization=self.config.get('vllm', {}).get('gpu_memory_utilization', 0.9),
-            max_model_len=max_model_len
-        )
+        manage_vllm = False
+        if self.vllm_manager is None:
+            # 启动vLLM服务
+            self.vllm_manager = VLLMServiceManager(
+                model_path=self.config['model_path'],
+                tp=self.config.get('vllm', {}).get('tp', 1),
+                gpu_memory_utilization=self.config.get('vllm', {}).get('gpu_memory_utilization', 0.9),
+                max_model_len=max_model_len
+            )
+            manage_vllm = True
 
-        if not vllm_manager.start():
-            logger.error("vLLM服务启动失败，评测终止")
-            return
+            if not self.vllm_manager.start():
+                logger.error("vLLM服务启动失败，评测终止")
+                return
 
         try:
             # 运行所有benchmark - 先检查哪些benchmarks可以使用规则验证
@@ -438,8 +452,9 @@ class BenchmarkEvaluator:
         except Exception as e:
             logger.error(f"评测过程中出错: {str(e)}")
         finally:
-            # 停止vLLM服务
-            vllm_manager.stop()
+            if manage_vllm and self.vllm_manager:
+                # 停止vLLM服务
+                self.vllm_manager.stop()
 
     def _convert_to_serializable(self, obj):
         """将对象转换为JSON可序列化的格式"""
@@ -511,24 +526,215 @@ class BenchmarkEvaluator:
         return pd.DataFrame(summary_data)
 
 
+class MultiRunEvaluator:
+    """多次运行评测器，用于统计方差"""
+    
+    def __init__(self, config_file: str, num_runs: int = 1):
+        self.config_file = config_file
+        self.num_runs = num_runs
+        self.version = datetime.now().strftime("version_%Y%m%d_%H%M%S")
+        
+        # 加载配置获取模型路径
+        with open(config_file, 'r', encoding='utf-8') as f:
+            self.config = yaml.safe_load(f)
+        self.base_dir = Path(self.config['model_path'])
+        self.output_dir = self.base_dir / "evalscope" / self.version
+        self.all_results = []  # 存储所有运行的结果
+        
+    def run_all(self):
+        """运行多次评测"""
+        logger.info(f"\n{'='*70}")
+        logger.info(f"开始多次运行评测 - 共 {self.num_runs} 次")
+        logger.info(f"总输出目录: {self.output_dir}")
+        logger.info(f"{'='*70}\n")
+
+        # 初始化并启动vLLM服务
+        max_model_len = self.config.get('vllm', {}).get('max_model_len', None)
+        vllm_manager = VLLMServiceManager(
+            model_path=self.config['model_path'],
+            tp=self.config.get('vllm', {}).get('tp', 1),
+            gpu_memory_utilization=self.config.get('vllm', {}).get('gpu_memory_utilization', 0.9),
+            max_model_len=max_model_len
+        )
+
+        try:
+            if not vllm_manager.start():
+                logger.error("vLLM服务启动失败，评测终止")
+                return
+            for run_id in range(1, self.num_runs + 1):
+                logger.info(f"\n{'#'*70}")
+                logger.info(f"# 第 {run_id}/{self.num_runs} 次运行")
+                logger.info(f"{'#'*70}\n")
+
+                evaluator = BenchmarkEvaluator(self.config_file, run_id=run_id, version=self.version, vllm_manager=vllm_manager)
+                evaluator.run_evaluation()
+                evaluator.save_results()
+
+                # 保存结果用于后续统计
+                self.all_results.append({
+                    'run_id': run_id,
+                    'results': evaluator.results,
+                    'output_dir': evaluator.output_dir
+                })
+
+                logger.info(f"第 {run_id} 次运行完成")
+
+                # 如果不是最后一次运行，等待一段时间再开始下一次
+                if run_id < self.num_runs:
+                    wait_time = 5
+                    logger.info(f"等待 {wait_time} 秒后开始下一次运行...")
+                    time.sleep(wait_time)
+
+            # 汇总所有结果
+            self._summarize_results()
+
+        finally:
+            # 停止vLLM服务
+            vllm_manager.stop()
+        
+    def _summarize_results(self):
+        """汇总多次运行的结果并计算统计信息"""
+        logger.info(f"\n{'='*70}")
+        logger.info("汇总多次运行结果")
+        logger.info(f"{'='*70}\n")
+        
+        # 收集每个benchmark在所有运行中的分数
+        benchmark_scores = {}
+        
+        for run_data in self.all_results:
+            run_id = run_data['run_id']
+            results = run_data['results']
+            
+            for benchmark_name, result in results.items():
+                if benchmark_name not in benchmark_scores:
+                    benchmark_scores[benchmark_name] = {}
+                    
+                # 解析结果获取分数
+                if isinstance(result, dict):
+                    for dataset_name, dataset_result in result.items():
+                        key = f"{benchmark_name}/{dataset_name}"
+                        if key not in benchmark_scores[benchmark_name]:
+                            benchmark_scores[benchmark_name][key] = {
+                                'scores': [],
+                                'dataset_name': dataset_name
+                            }
+                        
+                        if isinstance(dataset_result, dict):
+                            if 'score' in dataset_result:
+                                score = dataset_result['score']
+                            elif 'accuracy' in dataset_result:
+                                score = dataset_result['accuracy']
+                            else:
+                                score = None
+                        else:
+                            score = None
+                            
+                        if score is not None:
+                            benchmark_scores[benchmark_name][key]['scores'].append(score)
+        
+        # 计算统计信息
+        import numpy as np
+        
+        summary_rows = []
+        for benchmark_name, datasets in benchmark_scores.items():
+            for key, data in datasets.items():
+                scores = data['scores']
+                dataset_name = data['dataset_name']
+                
+                if len(scores) > 0:
+                    mean_score = np.mean(scores)
+                    std_score = np.std(scores, ddof=1) if len(scores) > 1 else 0.0
+                    min_score = np.min(scores)
+                    max_score = np.max(scores)
+                    
+                    row = {
+                        'benchmark': benchmark_name,
+                        'dataset': dataset_name,
+                        'run_count': len(scores),
+                        'mean': round(mean_score, 4),
+                        'std': round(std_score, 4),
+                        'std_percent': round(std_score / mean_score * 100, 2) if mean_score > 0 else 0,
+                        'min': round(min_score, 4),
+                        'max': round(max_score, 4),
+                        'range': round(max_score - min_score, 4)
+                    }
+                    
+                    # 添加每次运行的详细分数
+                    for i, score in enumerate(scores, 1):
+                        row[f'run_{i}'] = round(score, 4)
+                        
+                    summary_rows.append(row)
+        
+        # 创建汇总DataFrame
+        summary_df = pd.DataFrame(summary_rows)
+        
+        # 保存Excel汇总
+        excel_path = self.output_dir / "multi_run_summary.xlsx"
+        excel_path.parent.mkdir(parents=True, exist_ok=True)
+        summary_df.to_excel(excel_path, index=False)
+        logger.info(f"多次运行汇总结果已保存至: {excel_path}")
+        
+        # 保存JSON格式的详细结果
+        json_path = self.output_dir / "multi_run_summary.json"
+        summary_data = {
+            'num_runs': self.num_runs,
+            'version': self.version,
+            'config_file': self.config_file,
+            'results': summary_rows
+        }
+        with open(json_path, 'w', encoding='utf-8') as f:
+            json.dump(summary_data, f, ensure_ascii=False, indent=2)
+        logger.info(f"详细汇总结果已保存至: {json_path}")
+        
+        # 打印汇总表格
+        logger.info("\n多次运行结果汇总:")
+        logger.info("-" * 100)
+        for _, row in summary_df.iterrows():
+            logger.info(f"{row['benchmark']}/{row['dataset']}: "
+                       f"均值={row['mean']:.4f}, 标准差={row['std']:.4f} ({row['std_percent']:.2f}%), "
+                       f"范围=[{row['min']:.4f}, {row['max']:.4f}]")
+        logger.info("-" * 100)
+        
+        return summary_df
+
+
 def main():
     """主函数"""
-    if len(sys.argv) != 2:
-        print("用法: python eval.py <config_file>")
+    if len(sys.argv) < 2:
+        print("用法: python eval.py <config_file> [num_runs]")
         print("例如: python eval.py eval_configs/example.yaml")
+        print("例如: python eval.py eval_configs/example.yaml 5  # 运行5次")
         sys.exit(1)
 
     config_file = sys.argv[1]
+    
+    # 获取运行次数，默认为1
+    num_runs = 1
+    if len(sys.argv) >= 3:
+        try:
+            num_runs = int(sys.argv[2])
+            if num_runs < 1:
+                print("运行次数必须大于等于1")
+                sys.exit(1)
+        except ValueError:
+            print(f"无效的运行次数: {sys.argv[2]}")
+            sys.exit(1)
 
     if not os.path.exists(config_file):
         print(f"配置文件不存在: {config_file}")
         sys.exit(1)
 
-    logger.info(f"开始运行评测，配置文件: {config_file}")
+    logger.info(f"开始运行评测，配置文件: {config_file}, 运行次数: {num_runs}")
 
-    evaluator = BenchmarkEvaluator(config_file)
-    evaluator.run_evaluation()
-    evaluator.save_results()
+    if num_runs > 1:
+        # 多次运行模式
+        multi_evaluator = MultiRunEvaluator(config_file, num_runs=num_runs)
+        multi_evaluator.run_all()
+    else:
+        # 单次运行模式
+        evaluator = BenchmarkEvaluator(config_file)
+        evaluator.run_evaluation()
+        evaluator.save_results()
 
     logger.info("评测完成")
 

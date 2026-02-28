@@ -1,0 +1,46 @@
+### model
+model_name_or_path: /fs/fast/u20240075/luoyashuo/modelscope_cache/models/AI-ModelScope/Mistral-7B-v0.1
+trust_remote_code: true
+
+### method
+stage: sft
+do_train: true
+finetuning_type: full
+deepspeed: /home/u20240075/luoyashuo/projects/cdad/LlamaFactory/examples/deepspeed/ds_z3_config.json
+
+### dataset
+dataset: metamath_40k_train
+template: mistral
+resize_vocab: true
+cutoff_len: 8192
+max_samples: 9999999999
+preprocessing_num_workers: 16
+dataloader_num_workers: 4
+
+
+### output
+output_dir: /fs/fast/u20240075/luoyashuo/checkpoints/cold_start/mistral_7b_meta_math_40k
+logging_steps: 10
+save_strategy: epoch
+plot_loss: true
+overwrite_output_dir: true
+save_only_model: false
+report_to: swanlab
+
+### train
+# 7B model requires smaller batch size to fit in GPU memory
+per_device_train_batch_size: 1
+gradient_accumulation_steps: 8
+learning_rate: 2.0e-5
+num_train_epochs: 1.0
+lr_scheduler_type: cosine
+warmup_ratio: 0.1
+bf16: true
+ddp_timeout: 180000000
+resume_from_checkpoint: null
+
+### eval
+eval_dataset: metamath_40k_val
+per_device_eval_batch_size: 1
+eval_strategy: steps
+eval_steps: 100

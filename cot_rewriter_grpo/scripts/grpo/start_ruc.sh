@@ -27,7 +27,7 @@ export PROJECT_BASE_DIR="${PROJECT_ROOT}"
 # DEFAULT_CONFIG="qwen3_4b_grpo_2x80g_vllm_rollout_sglang_reward"
 
 
-DEFAULT_GPUS="0,1"
+DEFAULT_GPUS="2,3"
 
 DEFAULT_CONFIG="llama3_3b_grpo_2x80g"
 # 解析参数

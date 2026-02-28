@@ -15,6 +15,11 @@ import re
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
+# IMPORTANT: Set PYTORCH_NVML_BASED_CUDA_CHECK=1 BEFORE importing torch.
+# Prevents torch.cuda.is_available() from caching False when Ray sets
+# CUDA_VISIBLE_DEVICES="" for actors with num_gpus=0.
+os.environ.setdefault('PYTORCH_NVML_BASED_CUDA_CHECK', '1')
+
 import ray
 import torch
 
@@ -63,9 +68,8 @@ class SGLangFSFActor:
         self._base_port = base_port
         worker_name = f"SGLangFSFActor-{gpu_ids}"
 
-        # Set CUDA_VISIBLE_DEVICES
-        parent_cuda_devices = os.environ.get("CUDA_VISIBLE_DEVICES", "")
-        cuda_devices_str = ",".join(map(str, logical_gpu_ids))
+        # Set CUDA_VISIBLE_DEVICES to physical GPU IDs for this actor
+        cuda_devices_str = ",".join(map(str, gpu_ids))
         os.environ["CUDA_VISIBLE_DEVICES"] = cuda_devices_str
 
         # Log GPU memory status
@@ -523,12 +527,18 @@ class SGLangFSFClient:
 
         # Create Ray actors
         for group_idx, gpu_group in enumerate(gpu_groups):
-            logical_gpu_ids = [physical_to_logical.get(gpu, 0) for gpu in gpu_group]
+            # gpu_group contains logical device indices. Convert to physical GPU IDs.
+            if cuda_visible_devices:
+                physical_gpu_ids = [available_gpus[g] for g in gpu_group]
+            else:
+                physical_gpu_ids = list(gpu_group)
+            # Actor-local logical IDs are always 0, 1, ..., tp_size-1
+            logical_gpu_ids = list(range(len(gpu_group)))
             base_port = assigned_ports[group_idx]
-            
+
             worker = SGLangFSFActor.options(num_gpus=0, num_cpus=1).remote(
                 model_path=self.model_path,
-                gpu_ids=gpu_group,
+                gpu_ids=physical_gpu_ids,
                 logical_gpu_ids=logical_gpu_ids,
                 tensor_parallel_size=self.tensor_parallel_size,
                 mem_fraction_static=self.mem_fraction_static,
