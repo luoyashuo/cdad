@@ -1584,11 +1584,72 @@ class RayPPOTrainer:
                                     
                                     # Flatten back to [batch_size]
                                     r_cog_01_flat = r_cog_01.view(-1)
-                                    
-                                    # Update token_level_rewards with KL reward
-                                    # R_cog is in [0,1], use as final reward
-                                    batch.batch["token_level_rewards"] = r_cog_01_flat.unsqueeze(-1) * response_mask
-                                    
+
+                                    # --- Fix: Preserve penalties and assign to last valid token ---
+                                    # 1. Extract old total reward from token_level_scores
+                                    #    (only last valid token is non-zero, so sum gives the scalar)
+                                    token_level_scores = batch.batch["token_level_scores"]
+                                    old_total = token_level_scores.sum(dim=-1)  # [batch_size]
+
+                                    # 2. Extract old R_cog (already includes correct_judge penalty)
+                                    old_r_cog_np = batch.non_tensor_batch["cognitive_rewards"]
+                                    old_r_cog = torch.tensor(
+                                        [float(x) for x in old_r_cog_np],
+                                        dtype=r_cog_01_flat.dtype,
+                                        device=r_cog_01_flat.device,
+                                    )
+
+                                    # 3. penalty_portion = everything except R_cog
+                                    #    (format, truncation, length, FSF R_logic, etc.)
+                                    penalty_portion = old_total - old_r_cog
+
+                                    # 4. Apply correct_judge penalty to r_cog_01
+                                    correct_judge_penalty_value = reward_kwargs.get(
+                                        "correct_judge_penalty_value", 0.0
+                                    )
+                                    if "is_correct_results" in batch.non_tensor_batch:
+                                        is_correct_results = batch.non_tensor_batch["is_correct_results"]
+                                        for i in range(r_cog_01_flat.shape[0]):
+                                            if is_correct_results[i] is False or is_correct_results[i] is None:
+                                                r_cog_01_flat[i] = correct_judge_penalty_value
+
+                                    # 5. Rebuild total reward: new R_cog + preserved penalties
+                                    new_total = r_cog_01_flat + penalty_portion
+
+                                    # 6. Assign to last valid token (consistent with non-KL path)
+                                    seq_lengths = response_mask.sum(dim=1).long() - 1
+                                    seq_lengths = seq_lengths.clamp(min=0, max=response_mask.shape[1] - 1)
+                                    new_token_level_rewards = torch.zeros_like(token_level_scores)
+                                    for i in range(new_total.shape[0]):
+                                        new_token_level_rewards[i, seq_lengths[i]] = new_total[i]
+                                    batch.batch["token_level_rewards"] = new_token_level_rewards
+
+                                    # 7. Also update token_level_scores so that
+                                    #    critic/score/mean reflects the KL-normalized total
+                                    batch.batch["token_level_scores"] = new_token_level_rewards.clone()
+
+                                    # 8. Sync cognitive_rewards so logs/metrics reflect r_cog_01
+                                    r_cog_01_list = r_cog_01_flat.detach().cpu().tolist()
+                                    batch.non_tensor_batch["cognitive_rewards"] = np.array(
+                                        r_cog_01_list, dtype=object
+                                    )
+
+                                    # 9. Override stale metrics from compute_reward_breakdown_metrics
+                                    #    (it ran before the KL block and recorded old values)
+                                    metrics["reward/cognitive/mean"] = float(np.mean(r_cog_01_list))
+                                    metrics["reward/cognitive/max"] = float(np.max(r_cog_01_list))
+                                    metrics["reward/cognitive/min"] = float(np.min(r_cog_01_list))
+
+                                    new_total_list = new_total.detach().cpu().tolist()
+                                    metrics["reward/total/mean"] = float(np.mean(new_total_list))
+                                    metrics["reward/total/max"] = float(np.max(new_total_list))
+                                    metrics["reward/total/min"] = float(np.min(new_total_list))
+
+                                    # 10. Sync total_rewards in non_tensor_batch for rollout dump
+                                    batch.non_tensor_batch["total_rewards"] = np.array(
+                                        new_total_list, dtype=object
+                                    )
+
                                     # Log metrics
                                     metrics["reward/r_kl_min"] = r_kl_raw.min().item()
                                     metrics["reward/r_kl_max"] = r_kl_raw.max().item()
@@ -1596,10 +1657,15 @@ class RayPPOTrainer:
                                     metrics["reward/r_cog_01_min"] = r_cog_01_flat.min().item()
                                     metrics["reward/r_cog_01_max"] = r_cog_01_flat.max().item()
                                     metrics["reward/r_cog_01_mean"] = r_cog_01_flat.mean().item()
-                                    
+                                    metrics["reward/penalty_portion_mean"] = penalty_portion.mean().item()
+                                    metrics["reward/new_total_mean"] = new_total.mean().item()
+
                                     training_logger.info(
                                         f"[KL-v2] Applied group-wise KL reward normalization: "
-                                        f"r_kl_mean={r_kl_raw.mean().item():.4f} → r_cog_01_mean={r_cog_01_flat.mean().item():.4f}"
+                                        f"r_kl_mean={r_kl_raw.mean().item():.4f} → "
+                                        f"r_cog_01_mean={r_cog_01_flat.mean().item():.4f}, "
+                                        f"penalty_portion_mean={penalty_portion.mean().item():.4f}, "
+                                        f"new_total_mean={new_total.mean().item():.4f}"
                                     )
                             else:
                                 training_logger.warning(
