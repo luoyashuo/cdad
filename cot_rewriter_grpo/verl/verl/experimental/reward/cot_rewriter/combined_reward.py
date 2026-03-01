@@ -250,7 +250,7 @@ class CombinedRewardComputer:
         use_tiered_reward: bool = True,  # Whether to use tiered reward for R_cog
         tier_step: float = 0.05,  # 区间大小：每个阶梯的 R_cog 范围
         tier_reward: float = 0.1,  # 每阶梯奖励值：第一阶梯得 tier_reward，第二阶梯得 2*tier_reward
-        reward_mode: str = "ppl",  # "ppl", "ppl_delta", "ppl_delta_norm_sigmoid", "ppl_ratio", "cot_effect_ratio", "cot_effect_delta_sigmoid", or "logprob"
+        reward_mode: str = "ppl",  # "ppl", "ppl_delta", "ppl_delta_norm_sigmoid", "ppl_ratio", "cot_effect_ratio", "cot_effect_delta_sigmoid", "logprob", or "kl"
                                    # - "ppl": R_cog = avg_prob(rewrite) = 1 / PPL(rewrite) [formula 2: absolute quality]
                                    #           Also logs formula 1: avg_prob(rewrite)/avg_prob(original) - 1 as observation
                                    #           where avg_prob = exp(mean_log_prob), PPL = 1/avg_prob
@@ -299,6 +299,11 @@ class CombinedRewardComputer:
                                             # original_cot and rewrite_cot exceeds this, apply penalty.
         similarity_penalty: float = 0.5,  # Penalty coefficient for high similarity (default: 0.5).
                                           # Applied when similarity > similarity_threshold.
+        # ========== KL Reward Configuration ==========
+        alpha_kl: float = 0.01,  # Weight for max(kl_t) term in r_KL = avg(kl_t) + alpha_kl * max(kl_t)
+        kl_adaptive_beta: float = 0.5,  # Balance factor for tau = range + beta * mean
+        kl_eps: float = 1e-6,  # Epsilon to prevent division by zero
+        kl_fallback_tau: float = 3.0,  # Fallback tau value when group_size=1
         # ========== Correct Judge Configuration ==========
         # Determines if the reasoning process leads to the correct solution
         use_correct_judge: bool = False,  # Whether to use Correct Judge (default: False)
@@ -363,6 +368,9 @@ class CombinedRewardComputer:
                   where PPL = exp(-mean_log_prob), ceiling is controlled by ppl_ratio_ceiling (default: 0.95)
                 - "logprob": R_cog = answer_log_prob(rewrite) - answer_log_prob(original),
                   where answer_log_prob = mean(token_log_probs) + alpha_cog * min(token_log_probs)
+                - "kl": Use KL-based reward with group-wise adaptive normalization.
+                  Computes r_KL = avg(kl_t) + alpha_kl * max(kl_t), then R_cog = exp(-r_KL / tau).
+                  Requires student_log_probs to be computed and returned for use in ray_trainer.
             ppl_ratio_ceiling: Ceiling for ppl_ratio mode (default: 0.95). When reward_mode="ppl_ratio",
                 R_cog = min(PPL(original) / PPL(rewrite), ppl_ratio_ceiling). This prevents the reward
                 from growing too large when PPL(rewrite) is much smaller than PPL(original).
@@ -525,6 +533,12 @@ class CombinedRewardComputer:
         self.similarity_threshold = similarity_threshold
         self.similarity_penalty = similarity_penalty
 
+        # ========== KL Reward Parameters ==========
+        self.alpha_kl = alpha_kl
+        self.kl_adaptive_beta = kl_adaptive_beta
+        self.kl_eps = kl_eps
+        self.kl_fallback_tau = kl_fallback_tau
+
         # ========== Correct Judge Parameters ==========
         self.use_correct_judge = use_correct_judge
         self.correct_judge_model_path = correct_judge_model_path
@@ -544,6 +558,7 @@ class CombinedRewardComputer:
         rewrite_cots: List[str],
         answers: List[str],
         data: Any = None,  # Optional: DataProto for accessing pre-computed FSF values
+        response_length: int = None,  # Actor response token length (needed for KL mode)
     ) -> Dict[str, Any]:
         """
         Compute combined reward.
@@ -650,6 +665,30 @@ class CombinedRewardComputer:
 
         # Extract saved_prompts if available (for debugging)
         saved_prompts = cog_result.get("saved_prompts", None) if self.save_prompts else None
+
+        # === KL mode: compute student log probs on CoT tokens ===
+        # This must happen BEFORE student client cleanup (which releases GPU memory)
+        kl_student_log_probs = None
+        if self.reward_mode == "kl" and response_length is not None:
+            if hasattr(self.student_client, 'compute_kl_logprobs_batch'):
+                logger.info(
+                    f"[KL] Computing student log probs for KL reward mode "
+                    f"(batch_size={batch_size}, response_length={response_length})..."
+                )
+                kl_student_log_probs = self.student_client.compute_kl_logprobs_batch(
+                    questions=questions,
+                    rewrite_cots=rewrite_cots,
+                    response_length=response_length,
+                )
+                logger.info(
+                    f"[KL] Student log probs computed: shape={kl_student_log_probs.shape}, "
+                    f"mean={kl_student_log_probs.mean().item():.4f}"
+                )
+            else:
+                logger.warning(
+                    "[KL] Student client does not support compute_kl_logprobs_batch. "
+                    "KL reward will not be available."
+                )
 
         # Compute logic reward (if enabled)
         # FSF is computed on-demand with proper memory management
@@ -1264,6 +1303,8 @@ class CombinedRewardComputer:
             "r_cog_before_correct_judge": r_cog_before_correct_judge,  # R_cog values before Correct Judge penalty
             "correct_judge_penalties": correct_judge_penalties,  # Penalties applied by Correct Judge
             "train_mask": train_mask,  # Training mask: True=participate in GRPO, False=filtered out (when correct_judge_filter_no_samples=True)
+            # === KL mode: student log probs tensor ===
+            "kl_student_log_probs": kl_student_log_probs,  # torch.Tensor [batch_size, response_length] or None
             # === TOP-LEVEL KEYS for compute_cot_rewriter_reward to access ===
             "too_short_penalties": too_short_penalties,  # Penalty coefficients (0-0.5)
             "too_long_penalties": too_long_penalties,  # Penalty coefficients (0-0.5)
@@ -1447,6 +1488,12 @@ def compute_cot_rewriter_reward(
                                         # original_cot and rewrite_cot exceeds this, apply penalty.
     similarity_penalty: float = 0.5,  # Penalty coefficient for high similarity (default: 0.5).
                                       # Applied when similarity > similarity_threshold.
+    # ========== KL Reward Parameters ==========
+    # KL reward using group-wise adaptive normalization
+    alpha_kl: float = 0.01,  # Weight for max(kl_t) term in r_KL = avg(kl_t) + alpha_kl * max(kl_t)
+    kl_adaptive_beta: float = 0.5,  # Balance factor for tau = range + beta * mean
+    kl_eps: float = 1e-6,  # Epsilon to prevent division by zero
+    kl_fallback_tau: float = 3.0,  # Fallback tau value when group_size=1
     # ========== Correct Judge Parameters ==========
     use_correct_judge: bool = False,  # Whether to use Correct Judge (default: False)
     correct_judge_model_path: str = "/data/luoys/modelscope_cache/models/Qwen/Qwen3-4B",  # Model path for Correct Judge
@@ -1703,6 +1750,11 @@ def compute_cot_rewriter_reward(
         # ========== Repeat Penalty Parameters ==========
         similarity_threshold=similarity_threshold,
         similarity_penalty=similarity_penalty,
+        # ========== KL Reward Parameters ==========
+        alpha_kl=alpha_kl,
+        kl_adaptive_beta=kl_adaptive_beta,
+        kl_eps=kl_eps,
+        kl_fallback_tau=kl_fallback_tau,
         # ========== Correct Judge Parameters ==========
         use_correct_judge=use_correct_judge,
         correct_judge_model_path=correct_judge_model_path,
@@ -1722,6 +1774,7 @@ def compute_cot_rewriter_reward(
         rewrite_cots=extracted_rewrite_cots,
         answers=answers,
         data=data,
+        response_length=data.batch["responses"].shape[1],
     )
 
     # Fill in results for all samples
@@ -1887,6 +1940,8 @@ def compute_cot_rewriter_reward(
             "r_cog_before_correct_judge": result.get("r_cog_before_correct_judge", cognitive_rewards),  # R_cog before penalty
             "correct_judge_penalties": result.get("correct_judge_penalties", [0.0] * batch_size),  # Penalties applied
             "train_mask": result.get("train_mask", [True] * batch_size),  # Training mask for GRPO (True=participate, False=filtered)
+            # KL mode: student log probs tensor (torch.Tensor or None)
+            "student_log_probs": result.get("kl_student_log_probs", None),
         },
     }
 
@@ -1988,3 +2043,129 @@ def compute_length_ratio_only(
         "length_ratio": length_ratios,
         "format_valid": format_valid_flags,
     }
+
+
+def compute_group_wise_kl_reward(
+    r_kl_matrix: torch.Tensor,
+    beta: float = 0.5,
+    eps: float = 1e-6,
+    fallback_tau: float = 3.0,
+) -> torch.Tensor:
+    """
+    Group-wise 自适应归一化 KL Reward
+    
+    对于每个 group（对应一个 question，包含 G 个 samples）：
+    - r_min = min(r_KL[0], ..., r_KL[G-1])
+    - r_max = max(r_KL[0], ..., r_KL[G-1])
+    - r_mean = mean(r_KL[0], ..., r_KL[G-1])
+    - τ = max(r_max - r_min, ε) + β · r_mean
+    - R_cog = 1 / (1 + exp(r_KL / τ))  = sigmoid(-r_KL / τ)
+
+    物理意义：
+    - r_KL 表示 Student 面对 CoT 的"惊讶程度"（信息泄漏/跳步的量化）
+    - 每个 group 独立归一化，适配不同难度的问题
+    - r_KL=0 时 R_cog=0.5，r_KL 越大 R_cog 越接近 0
+    - 最终 reward 严格在 (0, 0.5] 区间（r_KL≥0）
+    
+    Args:
+        r_kl_matrix: [num_groups, group_size] 原始 r_KL 值（每个 sample 的 KL 聚合值）
+        beta: τ 计算中 range 与 mean 的平衡因子（默认 0.5）
+        eps: 防止除零的小量（默认 1e-6）
+        fallback_tau: group_size=1 时的 fallback tau 值（默认 3.0）
+        
+    Returns:
+        r_cog_01: [num_groups, group_size] 归一化后的 [0,1] reward
+    """
+    num_groups, group_size = r_kl_matrix.shape
+    r_cog_01 = torch.zeros_like(r_kl_matrix)
+    
+    # 记录调试信息
+    r_kl_stats = {
+        "r_kl_min": r_kl_matrix.min().item(),
+        "r_kl_max": r_kl_matrix.max().item(),
+        "r_kl_mean": r_kl_matrix.mean().item(),
+    }
+    
+    for g in range(num_groups):
+        r_group = r_kl_matrix[g]
+        
+        # Group 统计量
+        r_min = r_group.min()
+        r_max = r_group.max()
+        r_mean = r_group.mean()
+        
+        # 自适应 tau
+        if group_size == 1:
+            # group_size=1 时使用 fallback_tau
+            tau = fallback_tau
+        else:
+            tau = torch.maximum(r_max - r_min, torch.tensor(eps, device=r_group.device)) + beta * r_mean
+        
+        # 防止 tau 为 0 或负数
+        tau = torch.clamp(tau, min=eps)
+        
+        # 归一化: R_cog = 1 / (1 + exp(r_KL / τ)) = sigmoid(-r_KL / τ)
+        r_cog_01[g] = torch.sigmoid(-r_group / tau)
+    
+    # 记录归一化后的统计信息
+    r_cog_stats = {
+        "r_cog_01_min": r_cog_01.min().item(),
+        "r_cog_01_max": r_cog_01.max().item(),
+        "r_cog_01_mean": r_cog_01.mean().item(),
+    }
+    
+    # 打印调试日志
+    logger.info(
+        f"[KL-v2] r_kl: min={r_kl_stats['r_kl_min']:.4f}, mean={r_kl_stats['r_kl_mean']:.4f}, max={r_kl_stats['r_kl_max']:.4f} "
+        f"→ r_cog_01: min={r_cog_stats['r_cog_01_min']:.4f}, mean={r_cog_stats['r_cog_01_mean']:.4f}, max={r_cog_stats['r_cog_01_max']:.4f}"
+    )
+    
+    return r_cog_01
+
+
+def compute_kl_reward_from_logprobs(
+    actor_log_probs: torch.Tensor,
+    student_log_probs: torch.Tensor,
+    response_mask: torch.Tensor,
+    alpha_kl: float = 0.01,
+) -> torch.Tensor:
+    """
+    计算逐 token KL，然后聚合成每个 sample 的 r_KL
+    
+    公式:
+    - kl_t = max(0, log π_actor(cot_t) - log π_student(cot_t))
+    - r_KL = avg(kl_t) + α_kl · max(kl_t)
+    
+    Args:
+        actor_log_probs: [batch_size, response_length] Actor 的 log probs
+        student_log_probs: [batch_size, response_length] Student 的 log probs
+        response_mask: [batch_size, response_length] response 的 mask
+        alpha_kl: max(kl_t) 的权重系数（默认 0.01）
+        
+    Returns:
+        r_kl: [batch_size] 每个 sample 的 KL reward 聚合值
+    """
+    # 逐 token KL: max(0, log π_actor - log π_student)
+    kl_per_token = torch.maximum(
+        torch.zeros_like(actor_log_probs),
+        actor_log_probs - student_log_probs
+    )
+    
+    # 应用 mask
+    kl_per_token = kl_per_token * response_mask
+    
+    # 计算每个 sample 的统计量
+    batch_size = actor_log_probs.shape[0]
+    r_kl = torch.zeros(batch_size, device=actor_log_probs.device, dtype=actor_log_probs.dtype)
+    
+    for i in range(batch_size):
+        mask = response_mask[i].bool()
+        if mask.sum() > 0:
+            kl_valid = kl_per_token[i][mask]
+            avg_kl = kl_valid.mean()
+            max_kl = kl_valid.max()
+            r_kl[i] = avg_kl + alpha_kl * max_kl
+        else:
+            r_kl[i] = 0.0
+    
+    return r_kl

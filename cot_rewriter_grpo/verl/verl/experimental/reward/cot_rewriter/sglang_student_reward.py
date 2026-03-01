@@ -782,6 +782,47 @@ class SGLangStudentRewardClient:
 
         return full_text, answer_start_idx
 
+    def _build_prompt_for_kl(self, question: str, cot: str) -> tuple[str, int]:
+        """
+        Build prompt for KL reward mode: Question + CoT only (no answer).
+
+        The student model sees only Q + CoT and computes log probs on the CoT tokens.
+        This measures how "surprising" the CoT is to a model that only knows the question.
+
+        Returns:
+            tuple: (full_prompt, cot_start_token_idx)
+        """
+        # Build full prompt: Q + CoT (no answer content)
+        messages = [
+            {'role': 'user', 'content': question},
+            {'role': 'assistant', 'content': '', 'reasoning_content': cot}
+        ]
+        full_text = self.tokenizer.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=False
+        )
+
+        # Find where CoT tokens start using the dummy technique
+        # (same approach as _build_prompt for answer_start)
+        dummy_cot = "X"
+        messages_with_dummy = [
+            {'role': 'user', 'content': question},
+            {'role': 'assistant', 'content': '', 'reasoning_content': dummy_cot}
+        ]
+        text_with_dummy = self.tokenizer.apply_chat_template(
+            messages_with_dummy, tokenize=False, add_generation_prompt=False
+        )
+        tokens_with_dummy = self.tokenizer.encode(text_with_dummy, add_special_tokens=False)
+
+        dummy_token_id = self.tokenizer.encode(dummy_cot, add_special_tokens=False)[0]
+        # Search from back to front (in case "X" appears in the question)
+        cot_start_idx = 0
+        for i in range(len(tokens_with_dummy) - 1, -1, -1):
+            if tokens_with_dummy[i] == dummy_token_id:
+                cot_start_idx = i
+                break
+
+        return full_text, cot_start_idx
+
     def _build_prompt_without_cot(self, question: str, answer: str) -> tuple[str, int]:
         """
         Build prompt without CoT for computing R_useful baseline.
@@ -1222,7 +1263,7 @@ class SGLangStudentRewardClient:
 
                 rewrite_ppls.append(1.0 / rewrite_avg_prob if rewrite_avg_prob > 0 else float('inf'))
                 relative_improvement_rates.append(relative_improvement_rate)
-            else:  # "logprob" 模式
+            else:  # "logprob" or "kl" 模式
                 # Logprob 模式: R_cog = answer_log_prob(rewrite) - answer_log_prob(original)
                 # 其中 answer_log_prob = mean(token_log_probs) + alpha_cog * min(token_log_probs)
                 rewrite_answer_log_prob = rewrite_mean + alpha_cog * rewrite_min
@@ -1233,6 +1274,11 @@ class SGLangStudentRewardClient:
                     # Default: compute delta from original
                     original_answer_log_prob = original_mean + alpha_cog * original_min
                     reward = rewrite_answer_log_prob - original_answer_log_prob
+
+                # Populate PPL and improvement rate with NaN (not applicable for logprob/kl mode)
+                rewrite_ppls.append(float('nan'))
+                original_ppls.append(float('nan'))
+                relative_improvement_rates.append(float('nan'))
 
             # ===== R_useful 计算公式 =====
             # R_useful = answer_log_prob(Q, Rewrite_CoT, A) - answer_log_prob(Q, A)
@@ -1308,6 +1354,90 @@ class SGLangStudentRewardClient:
             result_dict["saved_prompts"] = saved_prompts
 
         return result_dict
+
+    def compute_kl_logprobs_batch(
+        self,
+        questions: List[str],
+        rewrite_cots: List[str],
+        response_length: int,
+    ) -> torch.Tensor:
+        """
+        Compute per-token student log probs for KL reward mode.
+
+        The student model sees only Q + CoT (no answer, no original_cot) and computes
+        log probs on the CoT tokens. This is used to measure how "surprising" the CoT
+        is to the student — higher KL means the actor is using information the student
+        cannot predict from the question alone.
+
+        Args:
+            questions: List of questions
+            rewrite_cots: List of rewritten CoTs (extracted content, no tags)
+            response_length: Length of actor response tokens (for output tensor shape)
+
+        Returns:
+            torch.Tensor of shape [batch_size, response_length] with student log probs.
+            Each row has student log probs at the first N positions (N = number of CoT tokens),
+            and 0.0 at the remaining positions (handled by response_mask in KL computation).
+        """
+        import time
+
+        self.initialize()
+        self.resume_memory()
+
+        batch_size = len(questions)
+        start_time = time.time()
+
+        # Phase 1: Build all KL prompts (CPU)
+        kl_prompts = []
+        kl_cot_starts = []
+        for i in range(batch_size):
+            prompt, cot_start = self._build_prompt_for_kl(questions[i], rewrite_cots[i])
+            kl_prompts.append(prompt)
+            kl_cot_starts.append(cot_start)
+
+        prep_time = time.time() - start_time
+
+        # Phase 2: Distribute to workers in parallel
+        inference_start = time.time()
+        kl_chunks = self._split_into_chunks(kl_prompts, self.num_actors)
+        kl_cot_start_chunks = self._split_into_chunks(kl_cot_starts, self.num_actors)
+
+        kl_futures = []
+        for worker_idx, (prompts_chunk, starts_chunk) in enumerate(
+            zip(kl_chunks, kl_cot_start_chunks)
+        ):
+            if prompts_chunk:
+                future = self.workers[worker_idx].compute_logprobs.remote(
+                    prompts_chunk, starts_chunk
+                )
+                kl_futures.append((worker_idx, len(prompts_chunk), future))
+
+        # Gather results
+        kl_results = [None] * batch_size
+        for worker_idx, chunk_size, future in kl_futures:
+            chunk_results = ray.get(future)
+            start_idx = sum(len(kl_chunks[i]) for i in range(worker_idx))
+            for i, result in enumerate(chunk_results):
+                kl_results[start_idx + i] = result
+
+        inference_time = time.time() - inference_start
+
+        # Phase 3: Build output tensor [batch_size, response_length]
+        student_log_probs = torch.zeros(batch_size, response_length)
+        for i in range(batch_size):
+            if kl_results[i] is not None:
+                token_lps = kl_results[i].get("token_log_probs", [])
+                n = min(len(token_lps), response_length)
+                if n > 0:
+                    student_log_probs[i, :n] = torch.tensor(token_lps[:n])
+
+        total_time = time.time() - start_time
+        logger.info(
+            f"[KL] Student log probs computed for {batch_size} samples in {total_time:.2f}s "
+            f"(prep={prep_time:.2f}s, inference={inference_time:.2f}s)"
+        )
+
+        return student_log_probs
 
     def release_memory(self):
         """

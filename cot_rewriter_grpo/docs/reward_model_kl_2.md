@@ -40,7 +40,7 @@ r_mean = mean(r_KL[0], ..., r_KL[G-1])
 
 τ = max(r_max - r_min, ε) + β · r_mean
 
-R_cog = exp(-r_KL / τ)
+R_cog = 1 / (1 + exp(r_KL / τ))  即 sigmoid(-r_KL / τ)
 ```
 
 - $\beta$：平衡因子（默认 0.5）
@@ -90,7 +90,7 @@ def compute_group_wise_kl_reward(r_kl_matrix, beta=0.5, eps=1e-6):
         tau = max(r_max - r_min, eps) + beta * r_mean
         
         # 归一化
-        r_cog_01[g] = torch.exp(-r_group / tau)
+        r_cog_01[g] = torch.sigmoid(-r_group / tau)
     
     return r_cog_01
 ```

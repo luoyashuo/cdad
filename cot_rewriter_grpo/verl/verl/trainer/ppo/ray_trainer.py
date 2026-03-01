@@ -62,6 +62,10 @@ from verl.utils.seqlen_balancing import get_seqlen_balanced_partitions, log_seql
 from verl.utils.torch_functional import masked_mean
 from verl.utils.tracking import ValidationGenerationsLogger
 from verl.experimental.reward.cot_rewriter.training_logger import get_logger as get_training_logger
+from verl.experimental.reward.cot_rewriter.combined_reward import (
+    compute_group_wise_kl_reward,
+    compute_kl_reward_from_logprobs,
+)
 
 WorkerType = type[Worker]
 
@@ -1363,6 +1367,43 @@ class RayPPOTrainer:
                     # compute global_valid tokens
                     batch.meta_info["global_token_num"] = torch.sum(batch.batch["attention_mask"], dim=-1).tolist()
 
+                    # recompute old_log_probs BEFORE reward (for KL reward computation)
+                    with marked_timer("old_log_prob", timing_raw, color="blue"):
+                        old_log_prob = self.actor_rollout_wg.compute_log_prob(batch)
+                        entropys = old_log_prob.batch["entropys"]
+                        response_masks = batch.batch["response_mask"]
+                        loss_agg_mode = self.config.actor_rollout_ref.actor.loss_agg_mode
+                        entropy_agg = agg_loss(loss_mat=entropys, loss_mask=response_masks, loss_agg_mode=loss_agg_mode)
+                        old_log_prob_metrics = {"actor/entropy": entropy_agg.detach().item()}
+                        metrics.update(old_log_prob_metrics)
+                        old_log_prob.batch.pop("entropys")
+                        batch = batch.union(old_log_prob)
+
+                        if "rollout_log_probs" in batch.batch.keys():
+                            # TODO: we may want to add diff of probs too.
+                            rollout_old_log_probs = batch.batch["rollout_log_probs"]
+                            actor_old_log_probs = batch.batch["old_log_probs"]
+                            attention_mask = batch.batch["attention_mask"]
+                            responses = batch.batch["responses"]
+                            response_length = responses.size(1)
+                            response_mask = attention_mask[:, -response_length:]
+
+                            rollout_probs = torch.exp(rollout_old_log_probs)
+                            actor_probs = torch.exp(actor_old_log_probs)
+                            rollout_probs_diff = torch.abs(rollout_probs - actor_probs)
+                            rollout_probs_diff = torch.masked_select(rollout_probs_diff, response_mask.bool())
+                            rollout_probs_diff_max = torch.max(rollout_probs_diff)
+                            rollout_probs_diff_mean = torch.mean(rollout_probs_diff)
+                            rollout_probs_diff_std = torch.std(rollout_probs_diff)
+                            metrics.update(
+                                {
+                                    "training/rollout_probs_diff_max": rollout_probs_diff_max.detach().item(),
+                                    "training/rollout_probs_diff_mean": rollout_probs_diff_mean.detach().item(),
+                                    "training/rollout_probs_diff_std": rollout_probs_diff_std.detach().item(),
+                                }
+                            )
+
+                    # === REWARD COMPUTATION (after old_log_prob) ===
                     with marked_timer("reward", timing_raw, color="yellow"):
                         # === REWARD START ===
                         training_logger.log_gpu_memory(f"[STEP_{self.global_steps}][REWARD_START]")
@@ -1415,42 +1456,7 @@ class RayPPOTrainer:
                             tokenizer=self.tokenizer,
                             field="prompts"
                         )
-
-                    # recompute old_log_probs
-                    with marked_timer("old_log_prob", timing_raw, color="blue"):
-                        old_log_prob = self.actor_rollout_wg.compute_log_prob(batch)
-                        entropys = old_log_prob.batch["entropys"]
-                        response_masks = batch.batch["response_mask"]
-                        loss_agg_mode = self.config.actor_rollout_ref.actor.loss_agg_mode
-                        entropy_agg = agg_loss(loss_mat=entropys, loss_mask=response_masks, loss_agg_mode=loss_agg_mode)
-                        old_log_prob_metrics = {"actor/entropy": entropy_agg.detach().item()}
-                        metrics.update(old_log_prob_metrics)
-                        old_log_prob.batch.pop("entropys")
-                        batch = batch.union(old_log_prob)
-
-                        if "rollout_log_probs" in batch.batch.keys():
-                            # TODO: we may want to add diff of probs too.
-                            rollout_old_log_probs = batch.batch["rollout_log_probs"]
-                            actor_old_log_probs = batch.batch["old_log_probs"]
-                            attention_mask = batch.batch["attention_mask"]
-                            responses = batch.batch["responses"]
-                            response_length = responses.size(1)
-                            response_mask = attention_mask[:, -response_length:]
-
-                            rollout_probs = torch.exp(rollout_old_log_probs)
-                            actor_probs = torch.exp(actor_old_log_probs)
-                            rollout_probs_diff = torch.abs(rollout_probs - actor_probs)
-                            rollout_probs_diff = torch.masked_select(rollout_probs_diff, response_mask.bool())
-                            rollout_probs_diff_max = torch.max(rollout_probs_diff)
-                            rollout_probs_diff_mean = torch.mean(rollout_probs_diff)
-                            rollout_probs_diff_std = torch.std(rollout_probs_diff)
-                            metrics.update(
-                                {
-                                    "training/rollout_probs_diff_max": rollout_probs_diff_max.detach().item(),
-                                    "training/rollout_probs_diff_mean": rollout_probs_diff_mean.detach().item(),
-                                    "training/rollout_probs_diff_std": rollout_probs_diff_std.detach().item(),
-                                }
-                            )
+                    # === END REWARD COMPUTATION ===
 
                     if self.use_reference_policy:
                         # compute reference log_prob
@@ -1476,6 +1482,17 @@ class RayPPOTrainer:
                             reward_breakdown = compute_reward_breakdown_metrics(reward_extra_infos_dict)
                             metrics.update(reward_breakdown)
                         batch.batch["token_level_scores"] = reward_tensor
+
+                        # === Extract student_log_probs tensor BEFORE non_tensor_batch conversion ===
+                        # student_log_probs is a torch.Tensor that must go into batch.batch (not non_tensor_batch).
+                        # We pop it from reward_extra_infos_dict to prevent the loop below from
+                        # converting it to a numpy array in non_tensor_batch.
+                        if reward_extra_infos_dict and "student_log_probs" in reward_extra_infos_dict:
+                            slp = reward_extra_infos_dict.pop("student_log_probs")
+                            if slp is not None and isinstance(slp, torch.Tensor):
+                                batch.batch["student_log_probs"] = slp.to(
+                                    device=batch.batch["responses"].device
+                                )
 
                         if reward_extra_infos_dict:
                             # Ensure all values are arrays (handle scalars from reward functions)
@@ -1510,6 +1527,85 @@ class RayPPOTrainer:
                             metrics.update(kl_metrics)
                         else:
                             batch.batch["token_level_rewards"] = batch.batch["token_level_scores"]
+
+                        # === KL Reward: Group-wise Adaptive Normalization ===
+                        # Check if reward_mode is "kl" from custom_reward_function.reward_kwargs
+                        # (not reward_model.reward_kwargs — that path doesn't exist in the config)
+                        reward_kwargs = {}
+                        if hasattr(self.config, 'custom_reward_function') and self.config.custom_reward_function is not None:
+                            reward_kwargs = self.config.custom_reward_function.get("reward_kwargs", {})
+                        if not reward_kwargs:
+                            reward_kwargs = self.config.reward_model.get("reward_kwargs", {})
+                        if reward_kwargs.get("reward_mode") == "kl":
+                            # Get configuration
+                            alpha_kl = reward_kwargs.get("alpha_kl", 0.01)
+                            kl_adaptive_beta = reward_kwargs.get("kl_adaptive_beta", 0.5)
+                            kl_eps = reward_kwargs.get("kl_eps", 1e-6)
+                            group_size = self.config.actor_rollout_ref.rollout.n
+                            
+                            # Get old_log_probs (Actor) - computed before reward
+                            actor_log_probs = batch.batch["old_log_probs"]  # [batch_size, response_length]
+                            response_mask = batch.batch["response_mask"]  # [batch_size, response_length]
+                            
+                            # Get student_log_probs from reward_extra_infos_dict if available
+                            # Student computes log probs on CoT tokens with only question as context
+                            student_log_probs = None
+                            if reward_extra_infos_dict and "student_log_probs" in reward_extra_infos_dict:
+                                student_log_probs = reward_extra_infos_dict["student_log_probs"]
+                            elif "student_log_probs" in batch.batch:
+                                student_log_probs = batch.batch["student_log_probs"]
+                            
+                            if student_log_probs is not None:
+                                # Compute raw KL reward per sample
+                                r_kl_raw = compute_kl_reward_from_logprobs(
+                                    actor_log_probs=actor_log_probs,
+                                    student_log_probs=student_log_probs,
+                                    response_mask=response_mask,
+                                    alpha_kl=alpha_kl,
+                                )
+                                
+                                # Reshape to [num_groups, group_size]
+                                batch_size = r_kl_raw.shape[0]
+                                num_groups = batch_size // group_size
+                                if batch_size % group_size != 0:
+                                    training_logger.warning(
+                                        f"[KL-v2] Batch size {batch_size} is not divisible by group_size {group_size}. "
+                                        f"Skipping KL reward normalization."
+                                    )
+                                else:
+                                    r_kl_grouped = r_kl_raw.view(num_groups, group_size)
+                                    
+                                    # Apply group-wise adaptive normalization
+                                    r_cog_01 = compute_group_wise_kl_reward(
+                                        r_kl_matrix=r_kl_grouped,
+                                        beta=kl_adaptive_beta,
+                                        eps=kl_eps,
+                                    )
+                                    
+                                    # Flatten back to [batch_size]
+                                    r_cog_01_flat = r_cog_01.view(-1)
+                                    
+                                    # Update token_level_rewards with KL reward
+                                    # R_cog is in [0,1], use as final reward
+                                    batch.batch["token_level_rewards"] = r_cog_01_flat.unsqueeze(-1) * response_mask
+                                    
+                                    # Log metrics
+                                    metrics["reward/r_kl_min"] = r_kl_raw.min().item()
+                                    metrics["reward/r_kl_max"] = r_kl_raw.max().item()
+                                    metrics["reward/r_kl_mean"] = r_kl_raw.mean().item()
+                                    metrics["reward/r_cog_01_min"] = r_cog_01_flat.min().item()
+                                    metrics["reward/r_cog_01_max"] = r_cog_01_flat.max().item()
+                                    metrics["reward/r_cog_01_mean"] = r_cog_01_flat.mean().item()
+                                    
+                                    training_logger.info(
+                                        f"[KL-v2] Applied group-wise KL reward normalization: "
+                                        f"r_kl_mean={r_kl_raw.mean().item():.4f} → r_cog_01_mean={r_cog_01_flat.mean().item():.4f}"
+                                    )
+                            else:
+                                training_logger.warning(
+                                    "[KL-v2] student_log_probs not found. "
+                                    "Make sure Student Model is configured to return log_probs."
+                                )
 
                         # compute advantages, executed on the driver process
 

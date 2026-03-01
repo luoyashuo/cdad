@@ -186,7 +186,7 @@ custom_reward_function:
   reward_kwargs:
     # ==================== Student Model 配置 (认知奖励 R_cog) ====================
     # 使用 student model 计算回答困惑度作为认知奖励
-    student_model_path: /fs/fast/u20240075/luoyashuo/modelscope_cache/models/LLM-Research/Llama-3.2-1B
+    student_model_path: /fs/fast/u20240075/luoyashuo/checkpoints/cold_start/llama3_1b_meta_math_40k
     student_tensor_parallel_size: 2    # 1B 模型用 TP=1
     student_max_model_len: 12000
     student_micro_batch_size: 1
@@ -198,7 +198,7 @@ custom_reward_function:
     vllm_gpu_memory_utilization: 0.3  # vLLM 显存利用率
     cleanup_after_compute: true       # 计算后清理缓存
     # 认知奖励模式
-    reward_mode: ppl  
+    reward_mode: kl
     ppl_delta_temperature: 1.0       # sigmoid 温度，控制曲线陡峭度 (越小越陡)
     # 以下参数为其他 mode 使用，ppl_delta_norm_sigmoid 模式下不生效
     cot_effect_epsilon: 0.01          # cot_effect_delta_sigmoid 模式：避免除零的小常数
@@ -209,6 +209,15 @@ custom_reward_function:
                                         # true: 对整个 response 计算 PPL
                                         # false: 只对 answer 部分计算 PPL (默认)
     print_samples: 2                  # 打印样本数
+    # ==================== KL Reward 配置 (reward_mode: kl) ====================
+    # KL reward 使用 Group-wise 自适应归一化
+    # 公式: r_KL = avg(kl_t) + alpha_kl * max(kl_t)
+    #       R_cog = exp(-r_KL / τ), 其中 τ = max(range, ε) + beta * mean
+    # 当 reward_mode = "kl" 时启用
+    alpha_kl: 0.01                   # max(kl_t) 的权重系数 (默认 0.01)
+    kl_adaptive_beta: 0.5            # τ 计算中 range 与 mean 的平衡因子 (默认 0.5)
+    kl_eps: 1e-6                     # 防止除零的小量 (默认 1e-6)
+    kl_fallback_tau: 3.0             # group_size=1 时的 fallback tau 值
     # ==================== 认知奖励公式配置 ====================
     # R_cog = answer_log_prob(rewrite) - answer_log_prob(original)
     # answer_log_prob = mean(token_log_probs) + alpha * min(token_log_probs)

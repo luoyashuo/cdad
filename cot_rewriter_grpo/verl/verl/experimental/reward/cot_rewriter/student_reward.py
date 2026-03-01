@@ -896,7 +896,7 @@ class VLLMStudentRewardClient:
 
                 rewrite_ppls.append(1.0 / rewrite_avg_prob if rewrite_avg_prob > 0 else float('inf'))
                 relative_improvement_rates.append(relative_improvement_rate)
-            else:  # "logprob" 模式
+            else:  # "logprob" or "kl" 模式
                 # Logprob 模式: R_cog = answer_log_prob(rewrite) - answer_log_prob(original)
                 # 其中 answer_log_prob = mean(token_log_probs) + alpha_cog * min(token_log_probs)
                 rewrite_answer_log_prob = rewrite_mean + alpha_cog * rewrite_min
@@ -907,6 +907,11 @@ class VLLMStudentRewardClient:
                     # Default: compute delta from original
                     original_answer_log_prob = original_mean + alpha_cog * original_min
                     reward = rewrite_answer_log_prob - original_answer_log_prob
+
+                # Populate PPL and improvement rate with NaN (not applicable for logprob/kl mode)
+                rewrite_ppls.append(float('nan'))
+                original_ppls.append(float('nan'))
+                relative_improvement_rates.append(float('nan'))
 
             # ===== R_useful 计算公式 =====
             # R_useful = answer_log_prob(Q, Rewrite_CoT, A) - answer_log_prob(Q, A)
