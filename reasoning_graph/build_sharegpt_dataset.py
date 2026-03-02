@@ -117,12 +117,13 @@ def parse_arguments():
             "cd_optimal",           # CD 范围筛选
             "rv_optimal",           # RV 范围筛选
             "combined",             # 双规则概率采样
+            "random",               # 随机筛选（在CD/RV范围内随机选择）
             # 旧策略（直接使用预选字段）
             "selected_by_cognitive_difficulty",
             "selected_by_lowest_fsf",
             "selected_by_reasoning_verbosity"
         ],
-        help="选择策略: cd_optimal/rv_optimal/combined（论文方法）或旧字段选择器"
+        help="选择策略: cd_optimal/rv_optimal/combined/random（论文方法）或旧字段选择器"
     )
     parser.add_argument(
         "--output", "-o",
@@ -457,6 +458,40 @@ def select_combined(
     return candidates[selected_idx]['thought']
 
 
+def select_random(
+    reasoning: List[Dict[str, Any]],
+    cd_min: int,
+    cd_max: int,
+    rv_min: int,
+    rv_max: int
+) -> Optional[Dict[str, Any]]:
+    """
+    Random 策略：在符合 CD 和 RV 范围的 CoT 中随机选择一个
+
+    Args:
+        reasoning: CoT 候选列表
+        cd_min: CD 范围下限
+        cd_max: CD 范围上限
+        rv_min: RV 范围下限
+        rv_max: RV 范围上限
+
+    Returns:
+        随机选中的 thought，如果没有候选则返回 None
+    """
+    # 筛选同时满足 CD 和 RV 范围的候选
+    candidates = []
+    for thought in reasoning:
+        cd, rv, fsf = get_thought_metrics(thought)
+        if cd_min <= cd <= cd_max and rv_min <= rv <= rv_max:
+            candidates.append(thought)
+
+    if not candidates:
+        return None
+
+    # 随机选择一个
+    return random.choice(candidates)
+
+
 def select_thought_by_strategy(
     item: Dict[str, Any],
     strategy: str,
@@ -495,6 +530,8 @@ def select_thought_by_strategy(
         return select_combined(
             reasoning, cd_min, cd_max, rv_min, rv_max, mu_cd, beta, fsf_lowest
         )
+    elif strategy == "random":
+        return select_random(reasoning, cd_min, cd_max, rv_min, rv_max)
     else:
         # 旧策略：直接使用预选字段
         return item.get(strategy, None)
@@ -605,7 +642,7 @@ def convert_to_sharegpt_with_strategy(
 
 def is_new_strategy(selector: str) -> bool:
     """判断是否为新策略（论文方法）"""
-    return selector in ["cd_optimal", "rv_optimal", "combined"]
+    return selector in ["cd_optimal", "rv_optimal", "combined", "random"]
 
 
 def register_to_dataset_info(dataset_info_path: str, dataset_name: str, file_path: str) -> bool:
@@ -874,176 +911,33 @@ def main():
 
 if __name__ == "__main__":
     exit(main())
-
-# ============================================================================
-# 使用示例
-# ============================================================================
-
-# --- 新策略（OmniThought 论文方法）---
-
-# 1. CD Optimal 策略（7B 模型配置：CD 范围 0-6）
 """
-python build_sharegpt_dataset.py \
-    -i /data-share/yeesuanAI08/lihaitao/luoys/data/cdad/omnithought_math_all/train_merge_level1.jsonl \
-       /data-share/yeesuanAI08/lihaitao/luoys/data/cdad/omnithought_code_all/train_merge_level1.jsonl \
-    -s cd_optimal \
-    --cd_min 0 --cd_max 6 \
-    -o /data-share/yeesuanAI08/lihaitao/luoys/data/cdad/omnithought_cd_optimal \
-    --train-ratio 0.99 \
-    -r ../LlamaFactory/data/dataset_info.json
-"""
-
-# 2. RV Optimal 策略（7B 模型配置：RV 范围 3-5）
-"""
-python build_sharegpt_dataset.py \
-    -i /data/luoys/data/cdad/omnithought_math_all/train_merge_level1.jsonl \
-       /data/luoys/data/cdad/omnithought_code_all/train_merge_level1.jsonl \
-    -s rv_optimal \
-    --rv_min 3 --rv_max 5 \
-    -o /data/luoys/data/cdad/omnithought_rv_optimal \
-    --train-ratio 0.99 \
-    -r ../LlamaFactory/data/dataset_info.json
-"""
-
-# 3. Combined 双规则概率采样（7B 模型配置）
-"""
-python build_sharegpt_dataset.py \
-    -i /data-share/yeesuanAI08/lihaitao/luoys/data/cdad/omnithought_math_all/train_merge_level1.jsonl \
-       /data-share/yeesuanAI08/lihaitao/luoys/data/cdad/omnithought_code_all/train_merge_level1.jsonl \
-    -s combined \
-    --cd_min 0 --cd_max 6 \
-    --rv_min 3 --rv_max 5 \
-    --mu_cd 6 \
-    --beta 0.5 \
-    -o /data-share/yeesuanAI08/lihaitao/luoys/data/cdad/omnithought_combined \
-    --train-ratio 0.99 \
-    -r ../LlamaFactory/data/dataset_info.json
-"""
-
-# 4. Combined + FSF 最低（在候选范围内选择 FSF 最低的）
-"""
-python build_sharegpt_dataset.py \
-    -i /data-share/yeesuanAI08/lihaitao/luoys/data/cdad/omnithought_math_all/train_merge_level1.jsonl \
-       /data-share/yeesuanAI08/lihaitao/luoys/data/cdad/omnithought_code_all/train_merge_level1.jsonl \
-    -s combined \
-    --cd_min 0 --cd_max 6 \
-    --rv_min 3 --rv_max 5 \
-    --fsf_lowest \
-    -o /data-share/yeesuanAI08/lihaitao/luoys/data/cdad/omnithought_combined_fsf \
-    --train-ratio 0.99 \
-    -r ../LlamaFactory/data/dataset_info.json
-"""
-
-# --- 旧策略（直接使用预选字段）---
-
-# 5. 使用预选的 CG 最高字段
-"""
-python build_sharegpt_dataset.py \
-    -i /data-share/yeesuanAI08/lihaitao/luoys/data/cdad/omnithought_math_all/train_merge_level1.jsonl \
-       /data-share/yeesuanAI08/lihaitao/luoys/data/cdad/omnithought_code_all/train_merge_level1.jsonl \
-    -s selected_by_cognitive_difficulty \
-    -o /data-share/yeesuanAI08/lihaitao/luoys/data/cdad/omnithought_level1_cg \
-    --train-ratio 0.99 \
-    -r ../LlamaFactory/data/dataset_info.json
-"""
-
-# 6. 使用预选的 RV 最高字段
-"""
-python build_sharegpt_dataset.py \
-    -i /data-share/yeesuanAI08/lihaitao/luoys/data/cdad/omnithought_math_all/train_merge_level1.jsonl \
-       /data-share/yeesuanAI08/lihaitao/luoys/data/cdad/omnithought_code_all/train_merge_level1.jsonl \
-    -s selected_by_reasoning_verbosity \
-    -o /data-share/yeesuanAI08/lihaitao/luoys/data/cdad/omnithought_level1_rv \
-    --train-ratio 0.99 \
-    -r ../LlamaFactory/data/dataset_info.json
-"""
-
-# 7. 使用预选的 FSF 最低字段
-"""
-python build_sharegpt_dataset.py \
-    -i /data-share/yeesuanAI08/lihaitao/luoys/data/cdad/omnithought_math_all/train_merge_level1.jsonl \
-       /data-share/yeesuanAI08/lihaitao/luoys/data/cdad/omnithought_code_all/train_merge_level1.jsonl \
-    -s selected_by_lowest_fsf \
-    -o /data-share/yeesuanAI08/lihaitao/luoys/data/cdad/omnithought_level1_fsf \
-    --train-ratio 0.99 \
-    -r ../LlamaFactory/data/dataset_info.json
-"""
-
-# --- 使用 Top-K 选择（按照 FSF 倒序选择）---
-
-# 8. RV Optimal + FSF Top-K 2000 条（FSF 最高的 2000 条）
-"""
-python build_sharegpt_dataset.py \
-    -i /data/luoys/data/cdad/omnithought_math_all/train_merge_level1.jsonl \
-       /data/luoys/data/cdad/omnithought_code_all/train_merge_level1.jsonl \
-    -s rv_optimal \
-    --rv_min 3 --rv_max 5 \
-    --fsf-topk 2000 \
-    -o /data/luoys/data/cdad/omnithought_rv_optimal_top2000 \
-    --train-ratio 0.99 \
-    -r ../LlamaFactory/data/dataset_info.json
-"""
-
-# 9. Combined + FSF Top-K 5000 条
-"""
-python build_sharegpt_dataset.py \
-    -i /data/luoys/data/cdad/omnithought_math_all/train_merge_level1.jsonl \
-       /data/luoys/data/cdad/omnithought_code_all/train_merge_level1.jsonl \
-    -s combined \
-    --cd_min 0 --cd_max 6 \
-    --rv_min 3 --rv_max 5 \
-    --mu_cd 6 \
-    --beta 0.5 \
-    --fsf-topk 5000 \
-    -o /data/luoys/data/cdad/omnithought_combined_top5000 \
-    --train-ratio 0.99 \
-    -r ../LlamaFactory/data/dataset_info.json
-    
-python build_sharegpt_dataset.py \
-    -i /data/luoys/data/cdad/omnithought_math_all/train_merge_level1.jsonl \
-        /data/luoys/data/cdad/omnithought_code_all/train_merge_level1.jsonl \
-    -s rv_optimal \
-    --rv_min 3 --rv_max 5 \
-    --fsf-topk 2000 \
-    -o /data/luoys/data/cdad/omnithought_rv_optimal_top2000 \
-    --train-ratio 0.99 \
-    -r ../LlamaFactory/data/dataset_info.json
-    
-python build_sharegpt_dataset.py \
-    -i /data/luoys/data/cdad/omnithought_math_all/train_merge_level1.jsonl \
-        /data/luoys/data/cdad/omnithought_code_all/train_merge_level1.jsonl \
-    -s rv_optimal \
-    --rv_min 3 --rv_max 5 \
-    --fsf-topk 20000 \
-    -o /data/luoys/data/cdad/omnithought_rv_optimal_top20k \
-    --train-ratio 0.99 \
-    -r ../LlamaFactory/data/dataset_info.json
-    
-python build_sharegpt_dataset.py \
-    -i /data/luoys/data/cdad/omnithought_math_all/train_merge_level1.jsonl \
-        /data/luoys/data/cdad/omnithought_code_all/train_merge_level1.jsonl \
-    -s rv_optimal \
-    --rv_min 3 --rv_max 5 \
-    --fsf-topk 50000 \
-    -o /data/luoys/data/cdad/omnithought_rv_optimal_top50k \
-    --train-ratio 0.99 \
-    -r ../LlamaFactory/data/dataset_info.json
-    
-    
 python build_sharegpt_dataset.py \
     -i /fs/fast/u20240075/hf_home/datasets/Yaseal/CDAD_EXP/omnithought_sft_20k/train.jsonl \
     -s rv_optimal \
-    --rv_min 3 --rv_max 5 \
-    --fsf-topk 20000 \
+    --rv_min 0 --rv_max 10 \
+    --cd_min 0 --cd_max 10 \
     -o /fs/fast/u20240075/hf_home/datasets/Yaseal/CDAD_EXP/omnithought_rv_optimal_20k \
     --train-ratio 0.99 \
     -r ../LlamaFactory/data/dataset_info.json
     
 python build_sharegpt_dataset.py \
+    -i /fs/fast/u20240075/hf_home/datasets/Yaseal/CDAD_EXP/omnithought_sft_20k/train.jsonl \
+    -s random \
+    --rv_min 0 --rv_max 10 \
+    --cd_min 0 --cd_max 10 \
+    -o /fs/fast/u20240075/hf_home/datasets/Yaseal/CDAD_EXP/omnithought_random_20k \
+    --train-ratio 0.99 \
+    --seed 307 \
+    -r ../LlamaFactory/data/dataset_info.json
+    
+python build_sharegpt_dataset.py \
     -i /fs/fast/u20240075/hf_home/datasets/Yaseal/CDAD_EXP/omnithought_rl_20k/train.jsonl \
     -s random \
-    --fsf-topk 20000 \
+    --rv_min 0 --rv_max 10 \
+    --cd_min 0 --cd_max 10 \
     -o /fs/fast/u20240075/hf_home/datasets/Yaseal/CDAD_EXP/omnithought_rl_20k_sharegpt \
     --train-ratio 0.99 \
+    --seed 307 \
     -r ../LlamaFactory/data/dataset_info.json
 """

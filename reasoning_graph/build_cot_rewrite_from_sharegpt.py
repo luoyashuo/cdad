@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Build COT rewrite training dataset from rv_optimal data by mapping to original sources.
+Build COT rewrite training dataset from ShareGPT format data by mapping to original sources.
 Multi-process version for better performance on large datasets.
 
 This script:
-1. Reads rv_optimal data containing question and optimized reasoning
+1. Reads ShareGPT format data containing question and optimized reasoning
 2. Maps each question back to its original source (math/code)
 3. Uses the original reasoning structure to build COT rewrite dataset
 
@@ -83,9 +83,9 @@ Follow these guidelines:
 # 单文件处理函数（用于多进程）
 # =============================================================================
 
-def _load_single_rv_file(args: Tuple[str, int]) -> List[Dict[str, Any]]:
+def _load_single_sharegpt_file(args: Tuple[str, int]) -> List[Dict[str, Any]]:
     """
-    加载单个 rv_optimal 文件（用于多进程）
+    加载单个 ShareGPT 格式文件（用于多进程）
 
     Args:
         args: (file_path, worker_id) 元组
@@ -221,12 +221,12 @@ def _process_single_chunk(args: Tuple[List[Dict[str, Any]], Dict[str, List[Dict[
     处理单个数据块（用于多进程）
 
     Args:
-        args: (rv_chunk, original_mapping, tokenizer_config, chunk_id) 元组
+        args: (sharegpt_chunk, original_mapping, tokenizer_config, chunk_id) 元组
 
     Returns:
         处理结果字典
     """
-    rv_chunk, original_mapping, tokenizer_config, chunk_id = args
+    sharegpt_chunk, original_mapping, tokenizer_config, chunk_id = args
 
     result_entries = []
     matched_count = 0
@@ -247,9 +247,9 @@ def _process_single_chunk(args: Tuple[List[Dict[str, Any]], Dict[str, List[Dict[
 
     max_problem_tokens = tokenizer_config.get("max_problem_tokens")
 
-    for rv_entry in rv_chunk:
-        question = rv_entry["question"]
-        think = rv_entry["think"]
+    for sharegpt_entry in sharegpt_chunk:
+        question = sharegpt_entry["question"]
+        think = sharegpt_entry["think"]
 
         # 在原始数据中查找该 question 的所有 reasoning 项
         reasoning_list = original_mapping.get(question)
@@ -306,15 +306,15 @@ def _process_single_chunk(args: Tuple[List[Dict[str, Any]], Dict[str, List[Dict[
 # 多进程数据加载函数
 # =============================================================================
 
-def load_rv_optimal_data_mp(
+def load_sharegpt_data_mp(
     file_paths: List[str],
     num_workers: Optional[int] = None
 ) -> List[Dict[str, Any]]:
     """
-    多进程加载 rv_optimal 数据
+    多进程加载 ShareGPT 格式数据
 
     Args:
-        file_paths: rv_optimal JSONL 文件路径列表
+        file_paths: ShareGPT JSONL 文件路径列表
         num_workers: 进程数，None 表示使用 CPU 核心数
 
     Returns:
@@ -330,7 +330,7 @@ def load_rv_optimal_data_mp(
 
     # 使用进程池并行加载
     with Pool(processes=num_workers) as pool:
-        results = pool.map(_load_single_rv_file, args_list)
+        results = pool.map(_load_single_sharegpt_file, args_list)
 
     # 合并结果
     entries = list(itertools.chain.from_iterable(results))
@@ -384,8 +384,8 @@ def load_original_data_mp(
     return merged_mapping
 
 
-def process_rv_optimal_with_original_mp(
-    rv_entries: List[Dict[str, Any]],
+def process_sharegpt_with_original_mp(
+    sharegpt_entries: List[Dict[str, Any]],
     original_mapping: Dict[str, List[Dict[str, Any]]],
     tokenizer_path: Optional[str] = None,
     max_problem_tokens: Optional[int] = None,
@@ -394,10 +394,10 @@ def process_rv_optimal_with_original_mp(
     debug: bool = False
 ) -> List[Dict[str, Any]]:
     """
-    多进程处理 rv_optimal 数据，映射到原始数据并构建 cot rewrite 条目
+    多进程处理 ShareGPT 数据，映射到原始数据并构建 cot rewrite 条目
 
     Args:
-        rv_entries: rv_optimal 数据列表
+        sharegpt_entries: ShareGPT 数据列表
         original_mapping: question -> reasoning数据的映射
         tokenizer_path: 用于计算 token 长度的 tokenizer 路径
         max_problem_tokens: problem token 上界
@@ -411,13 +411,13 @@ def process_rv_optimal_with_original_mp(
     if num_workers is None:
         num_workers = cpu_count()
 
-    total_entries = len(rv_entries)
+    total_entries = len(sharegpt_entries)
     print(f"  Processing {total_entries} entries with {num_workers} workers...")
 
     # 将数据分块
     chunks = []
     for i in range(0, total_entries, chunk_size):
-        chunk = rv_entries[i:i + chunk_size]
+        chunk = sharegpt_entries[i:i + chunk_size]
         chunks.append((chunk, original_mapping, {
             "tokenizer_path": tokenizer_path,
             "max_problem_tokens": max_problem_tokens
@@ -540,7 +540,7 @@ def select_top_fsf_entries(
 def get_default_config() -> Dict[str, Any]:
     """获取默认配置"""
     return {
-        "rv_optimal_paths": [
+        "sharegpt_paths": [
             "/data/luoys/data/cdad/omnithought_rv_optimal/train.jsonl",
             "/data/luoys/data/cdad/omnithought_rv_optimal/val.jsonl",
         ],
@@ -570,12 +570,12 @@ def main(config: Optional[Dict[str, Any]] = None):
         config = get_default_config()
 
     # 验证配置
-    required_keys = ["rv_optimal_paths", "original_paths", "output_dir"]
+    required_keys = ["sharegpt_paths", "original_paths", "output_dir"]
     for key in required_keys:
         if key not in config:
             raise ValueError(f"Missing required config key: {key}")
 
-    rv_optimal_paths = config["rv_optimal_paths"]
+    sharegpt_paths = config["sharegpt_paths"]
     original_paths = config["original_paths"]
     output_dir = config["output_dir"]
     tokenizer_path = config.get("tokenizer_path")
@@ -591,7 +591,7 @@ def main(config: Optional[Dict[str, Any]] = None):
     print("=" * 60)
 
     print(f"\nConfiguration:")
-    print(f"  RV_OPTIMAL_PATHS: {rv_optimal_paths}")
+    print(f"  SHAREGPT_PATHS:   {sharegpt_paths}")
     print(f"  ORIGINAL_PATHS:   {original_paths}")
     print(f"  OUTPUT_DIR:       {output_dir}")
     print(f"  TRAIN_RATIO:      {train_ratio}")
@@ -608,20 +608,20 @@ def main(config: Optional[Dict[str, Any]] = None):
     original_mapping = load_original_data_mp(original_paths, num_workers=num_workers)
     print(f"Total unique questions in original data: {len(original_mapping)}")
 
-    # Step 2: 加载 rv_optimal 数据（多进程）
+    # Step 2: 加载 ShareGPT 数据（多进程）
     print("\n" + "-" * 60)
-    print("Step 2: Loading rv_optimal data (multi-process)...")
+    print("Step 2: Loading ShareGPT data (multi-process)...")
     print("-" * 60)
 
-    rv_entries = load_rv_optimal_data_mp(rv_optimal_paths, num_workers=num_workers)
+    sharegpt_entries = load_sharegpt_data_mp(sharegpt_paths, num_workers=num_workers)
 
     # Step 3: 处理数据（多进程）
     print("\n" + "-" * 60)
-    print("Step 3: Processing rv_optimal data with original mapping (multi-process)...")
+    print("Step 3: Processing ShareGPT data with original mapping (multi-process)...")
     print("-" * 60)
 
-    output_entries = process_rv_optimal_with_original_mp(
-        rv_entries, original_mapping,
+    output_entries = process_sharegpt_with_original_mp(
+        sharegpt_entries, original_mapping,
         tokenizer_path, max_problem_tokens,
         num_workers=num_workers,
         chunk_size=chunk_size,
@@ -684,7 +684,7 @@ def main(config: Optional[Dict[str, Any]] = None):
         "timestamp": datetime.now().isoformat(),
         "config": config,
         "counts": {
-            "total_rv_optimal": len(rv_entries),
+            "total_sharegpt": len(sharegpt_entries),
             "total_original": len(original_mapping),
             "matched": len(output_entries),
             "filtered": len(filtered_entries),
@@ -707,7 +707,7 @@ def main(config: Optional[Dict[str, Any]] = None):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Build COT rewrite dataset from rv_optimal (multi-process)")
     parser.add_argument("--config", type=str, help="Path to config JSON file")
-    parser.add_argument("--rv-optimal", type=str, nargs="*", help="RV optimal data paths")
+    parser.add_argument("--sharegpt", type=str, nargs="*", help="ShareGPT format data paths")
     parser.add_argument("--original", type=str, nargs="*", help="Original data paths")
     parser.add_argument("--output-dir", type=str, help="Output directory")
     parser.add_argument("--num-workers", type=int, help="Number of worker processes (default: auto)")
@@ -725,8 +725,8 @@ if __name__ == "__main__":
     # 否则使用命令行参数或默认配置
     else:
         config = get_default_config()
-        if args.rv_optimal:
-            config["rv_optimal_paths"] = args.rv_optimal
+        if args.sharegpt:
+            config["sharegpt_paths"] = args.sharegpt
         if args.original:
             config["original_paths"] = args.original
         if args.output_dir:
@@ -741,25 +741,13 @@ if __name__ == "__main__":
 
 """
 # Example usage:
-
-# 使用默认配置
-python3 build_cot_rewrite_from_sharegpt.py
-
-# 使用自定义路径
 python3 build_cot_rewrite_from_sharegpt.py \
-    --rv-optimal /data/luoys/data/cdad/omnithought_rv_optimal/train.jsonl \
-    --original /data/luoys/data/cdad/omnithought_math_all/train_merge_level1.jsonl \
-        /data/luoys/data/cdad/omnithought_code_all/train_merge_level1.jsonl \
-    --output-dir /data/luoys/data/cdad/omnithought_rv_optimal_cot_rewrite_mp
-
-# 指定 worker 数量
-python3 build_cot_rewrite_from_sharegpt.py \
-    --rv-optimal /data/luoys/data/cdad/omnithought_rv_optimal_top2000/train.jsonl \
-    --original /data/luoys/data/cdad/omnithought_math_all/train_merge_level1.jsonl \
-        /data/luoys/data/cdad/omnithought_code_all/train_merge_level1.jsonl \
-    --output-dir /data/luoys/data/cdad/omnithought_rv_optimal_cot_rewrite_top2000_v2 \
+    --sharegpt /fs/fast/u20240075/hf_home/datasets/Yaseal/CDAD_EXP/omnithought_rl_20k_sharegpt/train.jsonl \
+    --original /fs/fast/u20240075/hf_home/datasets/Yaseal/CDAD_EXP/omnithought_math_all/train_merge_level1.jsonl \
+        /fs/fast/u20240075/hf_home/datasets/Yaseal/CDAD_EXP/omnithought_code_all/train_merge_level1.jsonl \
+    --output-dir /fs/fast/u20240075/hf_home/datasets/Yaseal/CDAD_EXP/omnithought_rl_20k_cot_rewrite \
     --num-workers 8 \
-    --top-fsf-k 2000 \
+    --top-fsf-k 99999 \
     --train-ratio 0.99 \
     --chunk-size 2000
 
