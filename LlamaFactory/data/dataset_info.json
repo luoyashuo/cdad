@@ -1217,5 +1217,31 @@
       "user_tag": "user",
       "assistant_tag": "assistant"
     }
+  },
+  "omnithought_rv_optimal_20k_train": {
+    "file_name": "/fs/fast/u20240075/hf_home/datasets/Yaseal/CDAD_EXP/omnithought_rv_optimal_20k/train.jsonl",
+    "formatting": "sharegpt",
+    "columns": {
+      "messages": "conversations"
+    },
+    "tags": {
+      "role_tag": "role",
+      "content_tag": "content",
+      "user_tag": "user",
+      "assistant_tag": "assistant"
+    }
+  },
+  "omnithought_rv_optimal_20k_val": {
+    "file_name": "/fs/fast/u20240075/hf_home/datasets/Yaseal/CDAD_EXP/omnithought_rv_optimal_20k/val.jsonl",
+    "formatting": "sharegpt",
+    "columns": {
+      "messages": "conversations"
+    },
+    "tags": {
+      "role_tag": "role",
+      "content_tag": "content",
+      "user_tag": "user",
+      "assistant_tag": "assistant"
+    }
   }
 }

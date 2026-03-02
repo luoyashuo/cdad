@@ -1028,4 +1028,22 @@ python build_sharegpt_dataset.py \
     -o /data/luoys/data/cdad/omnithought_rv_optimal_top50k \
     --train-ratio 0.99 \
     -r ../LlamaFactory/data/dataset_info.json
+    
+    
+python build_sharegpt_dataset.py \
+    -i /fs/fast/u20240075/hf_home/datasets/Yaseal/CDAD_EXP/omnithought_sft_20k/train.jsonl \
+    -s rv_optimal \
+    --rv_min 3 --rv_max 5 \
+    --fsf-topk 20000 \
+    -o /fs/fast/u20240075/hf_home/datasets/Yaseal/CDAD_EXP/omnithought_rv_optimal_20k \
+    --train-ratio 0.99 \
+    -r ../LlamaFactory/data/dataset_info.json
+    
+python build_sharegpt_dataset.py \
+    -i /fs/fast/u20240075/hf_home/datasets/Yaseal/CDAD_EXP/omnithought_rl_20k/train.jsonl \
+    -s random \
+    --fsf-topk 20000 \
+    -o /fs/fast/u20240075/hf_home/datasets/Yaseal/CDAD_EXP/omnithought_rl_20k_sharegpt \
+    --train-ratio 0.99 \
+    -r ../LlamaFactory/data/dataset_info.json
 """

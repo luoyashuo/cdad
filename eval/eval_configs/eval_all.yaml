@@ -1,6 +1,7 @@
 # EvalScope 评测配置文件 - 测试所有子集版本
 # 模型路径
-model_path: /fs/fast/u20240075/luoyashuo/checkpoints/cold_start/qwen2.5_1.5b_meta_math_40k
+# model_path: /fs/fast/u20240075/luoyashuo/checkpoints/cold_start/qwen2.5_1.5b_meta_math_40k
+model_path: /fs/fast/u20240075/luoyashuo/checkpoints/cold_start/llama3_1b_meta_math_40k
 
 # vLLM配置
 vllm:
