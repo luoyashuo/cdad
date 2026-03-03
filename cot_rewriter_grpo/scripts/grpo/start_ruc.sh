@@ -13,7 +13,7 @@ set -e
 # ========================================
 export MODEL_BASE_DIR="/fs/fast/u20240075/luoyashuo/modelscope_cache"
 export DATA_BASE_DIR="/fs/fast/u20240075/hf_home/datasets/Yaseal/CDAD_EXP"
-export CHECKPOINT_BASE_DIR="/fs/fast/u20240075/luoyashuo/checkpoints"
+export CHECKPOINT_BASE_DIR="/fs/fast/u20240075/luoyashuo/cdad/checkpoints/cot_rewriter"
 # ========================================
 
 # 获取脚本目录

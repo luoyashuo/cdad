@@ -29,11 +29,11 @@ from datetime import datetime
 
 
 # 默认配置
-DEFAULT_MATH_INPUT = "/fs/fast/u20240075/hf_home/datasets/Yaseal/CDAD_EXP/omnithought_math_all/train_merge_level1.jsonl"
-DEFAULT_CODE_INPUT = "/fs/fast/u20240075/hf_home/datasets/Yaseal/CDAD_EXP/omnithought_code_all/train_merge_level1.jsonl"
-DEFAULT_SFT_OUTPUT = "/fs/fast/u20240075/hf_home/datasets/Yaseal/CDAD_EXP/omnithought_sft_20k/train.jsonl"
-DEFAULT_RL_OUTPUT = "/fs/fast/u20240075/hf_home/datasets/Yaseal/CDAD_EXP/omnithought_rl_20k/train.jsonl"
-DEFAULT_SAMPLES_PER_DOMAIN = 10000
+DEFAULT_MATH_INPUT = "/fs/fast/u20240075/hf_home/datasets/Yaseal/CDAD_EXP/omnithought_math_all/train_merge.jsonl"
+DEFAULT_CODE_INPUT = "/fs/fast/u20240075/hf_home/datasets/Yaseal/CDAD_EXP/omnithought_code_all/train_merge.jsonl"
+DEFAULT_SFT_OUTPUT = "/fs/fast/u20240075/hf_home/datasets/Yaseal/CDAD_EXP/omnithought_sft_50k/train.jsonl"
+DEFAULT_RL_OUTPUT = "/fs/fast/u20240075/hf_home/datasets/Yaseal/CDAD_EXP/omnithought_rl_50k/train.jsonl"
+DEFAULT_SAMPLES_PER_DOMAIN = 25000
 DEFAULT_SEED = 42
 
 
@@ -45,6 +45,12 @@ def parse_arguments():
 示例:
   # 使用默认配置（各抽取10k，共20k）
   python select_sft_data_and_rl_data.py
+
+  # 只生成 SFT 数据集
+  python select_sft_data_and_rl_data.py --mode sft
+
+  # 只生成 RL 数据集
+  python select_sft_data_and_rl_data.py --mode rl
 
   # 自定义抽取数量
   python select_sft_data_and_rl_data.py \
@@ -94,6 +100,13 @@ def parse_arguments():
         type=int,
         default=DEFAULT_SEED,
         help=f"随机种子（默认: {DEFAULT_SEED}）",
+    )
+    parser.add_argument(
+        "--mode",
+        type=str,
+        choices=["sft", "rl", "both"],
+        default="both",
+        help="运行模式: sft=只生成SFT, rl=只生成RL, both=同时生成（默认: both）",
     )
     return parser.parse_args()
 
@@ -146,6 +159,7 @@ def split_data_for_sft_rl(
     samples_per_domain: int,
     seed: int,
     domain_name: str,
+    mode: str = "both",
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     """
     将数据分割为 SFT 和 RL 两部分，保证 question 级别的数据隔离
@@ -156,9 +170,10 @@ def split_data_for_sft_rl(
         samples_per_domain: 每个领域需要抽取的样本数（SFT 和 RL 各这么多）
         seed: 随机种子
         domain_name: 领域名称（用于日志）
+        mode: 运行模式: "sft"=只取SFT, "rl"=只取RL, "both"=两者都取
 
     Returns:
-        (sft_data, rl_data) 元组
+        (sft_data, rl_data) 元组，根据 mode 可能有一个为空列表
     """
     # 按 question 分组，保留所有数据
     from collections import defaultdict
@@ -169,25 +184,46 @@ def split_data_for_sft_rl(
     
     # 获取所有唯一的 question
     unique_questions = list(question_groups.keys())
-    total_needed = samples_per_domain * 2
+    
+    # 根据模式计算需要的 question 数量
+    if mode == "sft":
+        total_needed = samples_per_domain
+    elif mode == "rl":
+        total_needed = samples_per_domain
+    else:  # both
+        total_needed = samples_per_domain * 2
 
     if len(unique_questions) < total_needed:
         logger.warning(
             f"{domain_name} 唯一 question 数量不足！需要 {total_needed} 个，实际只有 {len(unique_questions)} 个"
         )
-        # 按比例分配
-        sft_q_size = len(unique_questions) // 2
-        sft_questions = unique_questions[:sft_q_size]
-        rl_questions = unique_questions[sft_q_size:]
+        if mode == "both":
+            # 按比例分配
+            sft_q_size = len(unique_questions) // 2
+            sft_questions = unique_questions[:sft_q_size]
+            rl_questions = unique_questions[sft_q_size:]
+        elif mode == "sft":
+            sft_questions = unique_questions
+            rl_questions = []
+        else:  # rl
+            sft_questions = []
+            rl_questions = unique_questions
     else:
         # 随机打乱 question
         random.seed(seed)
         shuffled_questions = unique_questions.copy()
         random.shuffle(shuffled_questions)
         
-        # 分割 question：前一半给 SFT，后一半给 RL
-        sft_questions = shuffled_questions[:samples_per_domain]
-        rl_questions = shuffled_questions[samples_per_domain:total_needed]
+        if mode == "both":
+            # 分割 question：前一半给 SFT，后一半给 RL
+            sft_questions = shuffled_questions[:samples_per_domain]
+            rl_questions = shuffled_questions[samples_per_domain:total_needed]
+        elif mode == "sft":
+            sft_questions = shuffled_questions[:samples_per_domain]
+            rl_questions = []
+        else:  # rl
+            sft_questions = []
+            rl_questions = shuffled_questions[:samples_per_domain]
 
     # 根据 question 获取对应的所有数据（保留完整数据格式）
     sft_data = []
@@ -276,15 +312,26 @@ def print_statistics(data: List[Dict[str, Any]], name: str):
 def main():
     args = parse_arguments()
 
+    # 根据模式显示标题
+    if args.mode == "sft":
+        title = "SFT 数据集抽取工具"
+    elif args.mode == "rl":
+        title = "RL 数据集抽取工具"
+    else:
+        title = "SFT 和 RL 数据集抽取工具"
+
     logger.info("=" * 70)
-    logger.info("  SFT 和 RL 数据集抽取工具")
+    logger.info(f"  {title}")
     logger.info("=" * 70)
     logger.info(f"📁 Math 输入: {args.math_input}")
     logger.info(f"📁 Code 输入: {args.code_input}")
-    logger.info(f"📁 SFT 输出: {args.sft_output}")
-    logger.info(f"📁 RL 输出: {args.rl_output}")
+    if args.mode in ("sft", "both"):
+        logger.info(f"📁 SFT 输出: {args.sft_output}")
+    if args.mode in ("rl", "both"):
+        logger.info(f"📁 RL 输出: {args.rl_output}")
     logger.info(f"📊 每领域抽取: {args.samples_per_domain} 条")
     logger.info(f"🎲 随机种子: {args.seed}")
+    logger.info(f"🔧 运行模式: {args.mode}")
     logger.info("=" * 70)
 
     # 检查输入文件
@@ -311,17 +358,22 @@ def main():
 
     # 步骤 2: 分割数据
     logger.info("\n" + "-" * 60)
-    logger.info("步骤 2: 分割 SFT 和 RL 数据（保证数据隔离）...")
+    if args.mode == "both":
+        logger.info("步骤 2: 分割 SFT 和 RL 数据（保证数据隔离）...")
+    elif args.mode == "sft":
+        logger.info("步骤 2: 抽取 SFT 数据...")
+    else:  # rl
+        logger.info("步骤 2: 抽取 RL 数据...")
     logger.info("-" * 60)
 
     math_sft, math_rl = split_data_for_sft_rl(
-        math_data, args.samples_per_domain, args.seed, "Math"
+        math_data, args.samples_per_domain, args.seed, "Math", mode=args.mode
     )
 
     # Code 使用不同的种子，确保与 Math 的随机性不同
     code_seed = args.seed + 1000
     code_sft, code_rl = split_data_for_sft_rl(
-        code_data, args.samples_per_domain, code_seed, "Code"
+        code_data, args.samples_per_domain, code_seed, "Code", mode=args.mode
     )
 
     # 步骤 3: 合并数据
@@ -334,40 +386,49 @@ def main():
 
     # 再次随机打乱合并后的数据
     random.seed(args.seed)
-    random.shuffle(sft_data)
-    random.shuffle(rl_data)
+    if sft_data:
+        random.shuffle(sft_data)
+    if rl_data:
+        random.shuffle(rl_data)
 
-    logger.info(f"  SFT 数据集: {len(sft_data)} 条 (Math {len(math_sft)} + Code {len(code_sft)})")
-    logger.info(f"  RL 数据集: {len(rl_data)} 条 (Math {len(math_rl)} + Code {len(code_rl)})")
+    if sft_data:
+        logger.info(f"  SFT 数据集: {len(sft_data)} 条 (Math {len(math_sft)} + Code {len(code_sft)})")
+    if rl_data:
+        logger.info(f"  RL 数据集: {len(rl_data)} 条 (Math {len(math_rl)} + Code {len(code_rl)})")
 
-    # 步骤 4: 验证数据隔离
-    logger.info("\n" + "-" * 60)
-    logger.info("步骤 4: 验证数据隔离...")
-    logger.info("-" * 60)
+    # 步骤 4: 验证数据隔离（仅在 both 模式下）
+    if args.mode == "both":
+        logger.info("\n" + "-" * 60)
+        logger.info("步骤 4: 验证数据隔离...")
+        logger.info("-" * 60)
 
-    if not verify_data_isolation(math_sft, math_rl, code_sft, code_rl):
-        logger.error("数据隔离验证失败！")
-        return 1
+        if not verify_data_isolation(math_sft, math_rl, code_sft, code_rl):
+            logger.error("数据隔离验证失败！")
+            return 1
 
     # 步骤 5: 保存数据
     logger.info("\n" + "-" * 60)
     logger.info("步骤 5: 保存数据...")
     logger.info("-" * 60)
 
-    save_jsonl(sft_data, args.sft_output)
-    save_jsonl(rl_data, args.rl_output)
+    if sft_data:
+        save_jsonl(sft_data, args.sft_output)
+    if rl_data:
+        save_jsonl(rl_data, args.rl_output)
 
     # 步骤 6: 打印统计信息
     logger.info("\n" + "-" * 60)
     logger.info("步骤 6: 统计信息...")
     logger.info("-" * 60)
 
-    print_statistics(math_sft, "Math SFT")
-    print_statistics(math_rl, "Math RL")
-    print_statistics(code_sft, "Code SFT")
-    print_statistics(code_rl, "Code RL")
-    print_statistics(sft_data, "合并 SFT")
-    print_statistics(rl_data, "合并 RL")
+    if sft_data:
+        print_statistics(math_sft, "Math SFT")
+        print_statistics(code_sft, "Code SFT")
+        print_statistics(sft_data, "合并 SFT")
+    if rl_data:
+        print_statistics(math_rl, "Math RL")
+        print_statistics(code_rl, "Code RL")
+        print_statistics(rl_data, "合并 RL")
 
     # 保存配置日志
     log_data = {
@@ -379,6 +440,7 @@ def main():
             "rl_output": args.rl_output,
             "samples_per_domain": args.samples_per_domain,
             "seed": args.seed,
+            "mode": args.mode,
         },
         "statistics": {
             "math_total": len(math_data),
@@ -393,30 +455,37 @@ def main():
     }
 
     # 保存日志到 SFT 输出目录
-    sft_log_path = Path(args.sft_output).parent / "selection_log.json"
-    with open(sft_log_path, "w", encoding="utf-8") as f:
-        json.dump(log_data, f, indent=2, ensure_ascii=False)
-    logger.info(f"\n日志已保存: {sft_log_path}")
+    if sft_data:
+        sft_log_path = Path(args.sft_output).parent / "selection_log.json"
+        with open(sft_log_path, "w", encoding="utf-8") as f:
+            json.dump(log_data, f, indent=2, ensure_ascii=False)
+        logger.info(f"\n日志已保存: {sft_log_path}")
 
     # 保存日志到 RL 输出目录
-    rl_log_path = Path(args.rl_output).parent / "selection_log.json"
-    with open(rl_log_path, "w", encoding="utf-8") as f:
-        json.dump(log_data, f, indent=2, ensure_ascii=False)
-    logger.info(f"日志已保存: {rl_log_path}")
+    if rl_data:
+        rl_log_path = Path(args.rl_output).parent / "selection_log.json"
+        with open(rl_log_path, "w", encoding="utf-8") as f:
+            json.dump(log_data, f, indent=2, ensure_ascii=False)
+        logger.info(f"日志已保存: {rl_log_path}")
 
     # 总结
     logger.info("\n" + "=" * 70)
     logger.info("  处理完成！")
     logger.info("=" * 70)
-    logger.info(f"✅ SFT 数据集: {args.sft_output}")
-    logger.info(f"   - 总计: {len(sft_data)} 条")
-    logger.info(f"   - Math: {len(math_sft)} 条")
-    logger.info(f"   - Code: {len(code_sft)} 条")
-    logger.info(f"\n✅ RL 数据集: {args.rl_output}")
-    logger.info(f"   - 总计: {len(rl_data)} 条")
-    logger.info(f"   - Math: {len(math_rl)} 条")
-    logger.info(f"   - Code: {len(code_rl)} 条")
-    logger.info("\n⚠️  注意: SFT 和 RL 数据集之间已保证数据隔离")
+    if sft_data:
+        logger.info(f"✅ SFT 数据集: {args.sft_output}")
+        logger.info(f"   - 总计: {len(sft_data)} 条")
+        logger.info(f"   - Math: {len(math_sft)} 条")
+        logger.info(f"   - Code: {len(code_sft)} 条")
+    if sft_data and rl_data:
+        logger.info("")
+    if rl_data:
+        logger.info(f"✅ RL 数据集: {args.rl_output}")
+        logger.info(f"   - 总计: {len(rl_data)} 条")
+        logger.info(f"   - Math: {len(math_rl)} 条")
+        logger.info(f"   - Code: {len(code_rl)} 条")
+    if args.mode == "both":
+        logger.info("\n⚠️  注意: SFT 和 RL 数据集之间已保证数据隔离")
     logger.info("=" * 70)
 
     return 0
@@ -429,8 +498,14 @@ if __name__ == "__main__":
 """
 使用示例:
 
-# 默认配置（各抽取 10k，共 20k）
+# 默认配置（同时生成 SFT 和 RL，各抽取 10k，共 20k）
 python reasoning_graph/select_sft_data_and_rl_data.py
+
+# 只生成 SFT 数据集
+python reasoning_graph/select_sft_data_and_rl_data.py --mode sft
+
+# 只生成 RL 数据集
+python reasoning_graph/select_sft_data_and_rl_data.py --mode rl
 
 # 自定义配置
 python reasoning_graph/select_sft_data_and_rl_data.py \
@@ -440,4 +515,10 @@ python reasoning_graph/select_sft_data_and_rl_data.py \
     --rl-output /path/to/rl.jsonl \
     --samples-per-domain 10000 \
     --seed 42
+
+# 只生成 SFT 并指定输出路径
+python reasoning_graph/select_sft_data_and_rl_data.py \
+    --mode sft \
+    --sft-output /path/to/sft.jsonl \
+    --samples-per-domain 10000
 """

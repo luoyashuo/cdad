@@ -497,7 +497,7 @@ def compute_reward_breakdown_metrics(reward_extra_infos_dict: dict[str, list[Any
 
     metrics = {}
 
-    # Define reward components to track
+    # Define reward components to track (mean/max/min statistics)
     # Each component: (key in reward_extra_infos_dict, prefix for metric name)
     reward_components = [
         ("cognitive_rewards", "reward/cognitive"),
@@ -505,22 +505,14 @@ def compute_reward_breakdown_metrics(reward_extra_infos_dict: dict[str, list[Any
         ("logic_rewards", "reward/logic"),
         ("total_rewards", "reward/total"),
         ("reward_deltas", "raw_logprob_delta"),  # Display name: raw_logprob_delta, Key: reward_deltas
-        ("truncation_penalties", "penalty/truncation"),
-        ("format_penalties", "penalty/format"),
-        ("too_short_penalties", "penalty/too_short"),
-        ("too_long_penalties", "penalty/too_long"),  # NEW: too_long_penalty statistics
-        ("repeat_penalties", "penalty/repeat"),  # Repeat penalty for high similarity
         ("length_ratio", "stats/length_ratio"),
         ("similarities", "stats/similarity"),  # Similarity between original and rewrite CoT
         # PPL values (ppl mode only) - all under ppl group
         ("rewrite_ppls", "ppl/rewrite"),
         ("original_ppls", "ppl/original"),
         ("relative_improvement_rates", "ppl/relative_improvement"),  # Formula 1: relative improvement rate
-        # FSF (Failure Step Fraction) values - under fsf group
+        # FSF (Failure Step Fraction) - only track original for observation
         ("original_fsfs", "fsf/original"),
-        ("rewrite_fsfs", "fsf/rewrite"),
-        ("original_fsf_parse_success", "fsf/original_parse_success"),  # FSF parse success for original CoTs
-        ("rewrite_fsf_parse_success", "fsf/rewrite_parse_success"),  # FSF parse success for rewrite CoTs
     ]
 
     for dict_key, metric_prefix in reward_components:
@@ -538,6 +530,59 @@ def compute_reward_breakdown_metrics(reward_extra_infos_dict: dict[str, list[Any
         metrics[f"{metric_prefix}/mean"] = float(np.mean(values_array))
         metrics[f"{metric_prefix}/max"] = float(np.max(values_array))
         metrics[f"{metric_prefix}/min"] = float(np.min(values_array))
+
+    # ========== Penalty Rate Metrics (Zero-Reward Penalty System) ==========
+    # Penalties now use binary flags (1.0=penalized, 0.0=not penalized)
+    # Report rates (fraction of samples penalized) instead of penalty values
+    penalty_rate_components = [
+        ("truncation_penalties", "penalty/truncation"),
+        ("format_penalties", "penalty/format"),
+        ("too_short_penalties_actual", "penalty/too_short"),
+        ("too_long_penalties_actual", "penalty/too_long"),
+        ("fsf_penalty_flags", "penalty/fsf"),  # FSF penalty: rewrite_fsf > 0 → reward = 0
+        ("repeat_penalties_actual", "penalty/repeat"),
+        ("correct_judge_penalties", "penalty/correct_judge"),
+        ("overlong_rewards", "penalty/overlong"),
+    ]
+
+    for dict_key, metric_prefix in penalty_rate_components:
+        if dict_key not in reward_extra_infos_dict:
+            continue
+
+        values = reward_extra_infos_dict[dict_key]
+        if not values or len(values) == 0:
+            continue
+
+        values_array = np.array(values, dtype=np.float64)
+        penalized_count = int(np.sum(values_array > 0))
+        total_count = len(values_array)
+        metrics[f"{metric_prefix}/rate"] = penalized_count / total_count if total_count > 0 else 0.0
+        metrics[f"{metric_prefix}/count"] = penalized_count
+
+    # Combined penalty rate: fraction of samples with ANY penalty triggered
+    if "penalized_flags" in reward_extra_infos_dict:
+        penalized_flags = reward_extra_infos_dict["penalized_flags"]
+        if penalized_flags:
+            flags_array = np.array(penalized_flags, dtype=np.float64)
+            penalized_count = int(np.sum(flags_array > 0))
+            total_count = len(flags_array)
+            metrics["penalty/any/rate"] = penalized_count / total_count if total_count > 0 else 0.0
+            metrics["penalty/any/count"] = penalized_count
+
+    # Keep legacy penalty coefficient stats (too_short/too_long coefficients for observation)
+    for dict_key, metric_prefix in [
+        ("too_short_penalties", "penalty_coeff/too_short"),
+        ("too_long_penalties", "penalty_coeff/too_long"),
+        ("repeat_penalties", "penalty_coeff/repeat"),
+    ]:
+        if dict_key not in reward_extra_infos_dict:
+            continue
+        values = reward_extra_infos_dict[dict_key]
+        if not values or len(values) == 0:
+            continue
+        values_array = np.array(values, dtype=np.float64)
+        metrics[f"{metric_prefix}/mean"] = float(np.mean(values_array))
+        metrics[f"{metric_prefix}/max"] = float(np.max(values_array))
 
     # Additional aggregate statistics for flags
     if "format_valid" in reward_extra_infos_dict:
@@ -576,26 +621,5 @@ def compute_reward_breakdown_metrics(reward_extra_infos_dict: dict[str, list[Any
     if "fsf_group_skipped" in reward_extra_infos_dict:
         fsf_group_skipped = reward_extra_infos_dict["fsf_group_skipped"]
         metrics["fsf/group_skipped"] = 1.0 if fsf_group_skipped else 0.0
-
-    # FSF delta (observation only, not used in reward calculation):
-    # delta = original_fsf - rewrite_fsf (positive = improvement)
-    # Note: R_logic = -rewrite_fsf is used for reward, original_fsf is only for observation
-    if "original_fsfs" in reward_extra_infos_dict and "rewrite_fsfs" in reward_extra_infos_dict:
-        original_fsfs = reward_extra_infos_dict["original_fsfs"]
-        rewrite_fsfs = reward_extra_infos_dict["rewrite_fsfs"]
-        if original_fsfs and rewrite_fsfs and len(original_fsfs) == len(rewrite_fsfs):
-            # Calculate deltas for observation: how much rewrite improved over original
-            fsf_deltas = []
-            for o_fsf, r_fsf in zip(original_fsfs, rewrite_fsfs):
-                if o_fsf is not None and r_fsf is not None:
-                    fsf_deltas.append(o_fsf - r_fsf)
-            if fsf_deltas:
-                deltas_array = np.array(fsf_deltas, dtype=np.float64)
-                metrics["fsf/delta/mean"] = float(np.mean(deltas_array))
-                metrics["fsf/delta/max"] = float(np.max(deltas_array))
-                metrics["fsf/delta/min"] = float(np.min(deltas_array))
-                # Count improvements (delta > 0 means rewrite has fewer failed steps)
-                improvements = sum(1 for d in fsf_deltas if d > 0)
-                metrics["fsf/improvement_rate"] = improvements / len(fsf_deltas)
 
     return metrics

@@ -297,8 +297,8 @@ class CombinedRewardComputer:
         # ========== Repeat Penalty Configuration ==========
         similarity_threshold: float = 0.9,  # Threshold for repeat penalty (0.0-1.0). If similarity between
                                             # original_cot and rewrite_cot exceeds this, apply penalty.
-        similarity_penalty: float = 0.5,  # Penalty coefficient for high similarity (default: 0.5).
-                                          # Applied when similarity > similarity_threshold.
+        use_repeat_penalty: bool = False,  # Whether to enable repeat penalty (reward=0 when similarity > threshold)
+        similarity_penalty: float = 0.5,  # Deprecated: kept for backward compatibility, use use_repeat_penalty instead
         # ========== KL Reward Configuration ==========
         alpha_kl: float = 0.01,  # Weight for max(kl_t) term in r_KL = avg(kl_t) + alpha_kl * max(kl_t)
         kl_adaptive_beta: float = 0.5,  # Balance factor for tau = range + beta * mean
@@ -434,8 +434,8 @@ class CombinedRewardComputer:
         self.reward_micro_batch_size = reward_micro_batch_size
         self.gpu_batch_size = gpu_batch_size
         self.reward_backend = reward_backend
-        # Use low/high thresholds directly (no longer need backward compatibility check)
-        # The caller should provide too_short_threshold_low/high explicitly
+        # Zero-reward penalty: too_short/too_long use single threshold + boolean enable
+        # For backward compatibility, auto-detect: if max_penalty > 0, treat as enabled
         self.too_short_threshold_low = too_short_threshold_low
         self.too_short_threshold_high = too_short_threshold_high
         self.too_short_max_penalty = too_short_max_penalty
@@ -519,18 +519,17 @@ class CombinedRewardComputer:
         self.fsf_gpu_memory_utilization = fsf_gpu_memory_utilization
         self.fsf_max_model_len = fsf_max_model_len
         self.fsf_tensor_parallel_size = fsf_tensor_parallel_size
-        self.fsf_reward_scale = fsf_reward_scale  # Scale factor for FSF reward (replaces lambda_logic)
         self.fsf_micro_batch_size = fsf_micro_batch_size  # Micro batch size for FSF inference
         self.fsf_skip_group_on_parse_error = fsf_skip_group_on_parse_error  # Skip group on parse error
         self.save_fsf_dot_outputs = save_fsf_dot_outputs  # Whether to save raw DOT outputs
-        self.fsf_reward_mode = fsf_reward_mode  # FSF reward calculation mode: 'direct' or 'threshold'
-        self.fsf_penalty_mode = fsf_penalty_mode  # FSF penalty mode: 'absolute' or 'relative'
         self.save_prompts = save_prompts  # Whether to save request prompts for debugging
         self.r_logic_repeat_n = r_logic_repeat_n  # Number of times to repeat FSF calculation for averaging
         self.fsf_judge = None  # Created on-demand in compute_reward
 
         # ========== Repeat Penalty Parameters ==========
         self.similarity_threshold = similarity_threshold
+        # Backward compatibility: if similarity_penalty > 0 was set (old config), treat as enabled
+        self.use_repeat_penalty = use_repeat_penalty or (similarity_penalty > 0)
         self.similarity_penalty = similarity_penalty
 
         # ========== KL Reward Parameters ==========
@@ -546,7 +545,6 @@ class CombinedRewardComputer:
         self.correct_judge_gpu_memory_utilization = correct_judge_gpu_memory_utilization
         self.correct_judge_max_model_len = correct_judge_max_model_len
         self.correct_judge_micro_batch_size = correct_judge_micro_batch_size
-        self.correct_judge_penalty_value = correct_judge_penalty_value
         self.correct_judge_max_new_tokens = correct_judge_max_new_tokens
         self.correct_judge_filter_no_samples = correct_judge_filter_no_samples
         self.correct_judge = None  # Created on-demand in compute_reward
@@ -842,23 +840,13 @@ class CombinedRewardComputer:
                 rewrite_failed = sum(1 for f in rewrite_fsfs if f is None)
                 fsf_parse_failed_count = rewrite_failed
 
-                # Compute logic rewards based on fsf_reward_mode
-                # original_fsf is only used as observation/metric, not in reward calculation
-                # Lower rewrite_fsf = better (fewer failed steps) -> higher reward
+                # FSF is now a binary penalty (fsf > 0 → reward=0), r_logic kept for logging only
                 r_logic = []
                 for orig_fsf, rew_fsf in zip(original_fsfs, rewrite_fsfs):
                     if rew_fsf is None:
-                        # Parse failed (all runs failed), use 0 for logic reward
                         r_logic.append(0.0)
                     else:
-                        # Apply reward based on fsf_reward_mode
-                        if self.fsf_reward_mode == 'threshold':
-                            # R_logic = -1 if fsf > 0 else 0
-                            # Only apply penalty if there are any failed steps
-                            r_logic.append(-1.0 if rew_fsf > 0 else 0.0)
-                        else:  # 'direct' mode (default)
-                            # R_logic = -rewrite_fsf (negative reward proportional to failed step fraction)
-                            r_logic.append(-rew_fsf)
+                        r_logic.append(-rew_fsf)  # kept for observation/logging
 
                 has_any_parse_failure = fsf_parse_failed_count > 0
 
@@ -968,26 +956,16 @@ class CombinedRewardComputer:
                     self.correct_judge.shutdown()
                     self.correct_judge = None
 
-        # Compute too_short_penalty and too_long_penalty based on length ratio
-        # Penalty formula with low/high thresholds:
-        #   ratio = rewrite_token_len / original_token_len
-        # too_short_penalty (ratio < too_short_threshold_high):
-        #   - If ratio >= too_short_threshold_high: penalty_coefficient = 0
-        #   - If too_short_threshold_low <= ratio < too_short_threshold_high: penalty_coefficient = max_penalty * (high - ratio) / (high - low)
-        #   - If ratio < too_short_threshold_low: penalty_coefficient = max_penalty
-        # too_long_penalty (ratio > too_long_threshold_low):
-        #   - If ratio <= too_long_threshold_low: penalty_coefficient = 0
-        #   - If too_long_threshold_low < ratio <= too_long_threshold_high: penalty_coefficient = max_penalty * (ratio - low) / (high - low)
-        #   - If ratio > too_long_threshold_high: penalty_coefficient = max_penalty
+        # Compute length ratios and check too_short/too_long penalties (binary: reward=0 if triggered)
+        # too_short: ratio < too_short_threshold_high → penalized (when too_short_max_penalty > 0)
+        # too_long:  ratio > too_long_threshold_low  → penalized (when too_long_max_penalty > 0)
         too_short_penalties = [0.0] * batch_size
-        too_short_penalty_coeffs = [0.0] * batch_size  # Coefficients before applying penalty_mode
+        too_short_penalty_coeffs = [0.0] * batch_size  # kept for backward compat logging
         too_long_penalties = [0.0] * batch_size
-        too_long_penalty_coeffs = [0.0] * batch_size  # Coefficients before applying penalty_mode
-        length_ratios = [0.0] * batch_size  # Track length ratios for DAPO filter_groups
+        too_long_penalty_coeffs = [0.0] * batch_size
+        length_ratios = [0.0] * batch_size
 
-        # Get tokenizer from student_client for token length calculation
         tokenizer = getattr(self.student_client, 'tokenizer', None)
-        logger.info(f"[LENGTH_PENALTY_DEBUG] tokenizer available: {tokenizer is not None}, student_client type: {type(self.student_client).__name__}")
         if tokenizer is None:
             logger.warning("[LENGTH_PENALTY] Tokenizer not available, skipping length penalties")
         else:
@@ -996,222 +974,169 @@ class CombinedRewardComputer:
                 rewrite_text = rewrite_cots[i] if rewrite_cots[i] else ""
 
                 if original_text:
-                    # Calculate token lengths using tokenizer
                     original_token_len = len(tokenizer.encode(original_text, add_special_tokens=False))
                     rewrite_token_len = len(tokenizer.encode(rewrite_text, add_special_tokens=False)) if rewrite_text else 0
 
                     if original_token_len > 0:
                         ratio = rewrite_token_len / original_token_len
-                        length_ratios[i] = ratio  # Store for DAPO filter_groups
+                        length_ratios[i] = ratio
 
-                        # Compute too_short_penalty coefficient
-                        low_short = self.too_short_threshold_low
-                        high_short = self.too_short_threshold_high
+                        # Too short: ratio below threshold → penalized
+                        if self.too_short_max_penalty > 0 and ratio < self.too_short_threshold_high:
+                            too_short_penalty_coeffs[i] = 1.0  # flag
+                            if i < 3:
+                                logger.info(
+                                    f"[TOO_SHORT_PENALTY] Sample {i}: "
+                                    f"ratio={ratio:.3f} < threshold={self.too_short_threshold_high}, "
+                                    f"reward will be set to 0"
+                                )
 
-                        if ratio >= high_short:
-                            # No penalty when ratio is above high threshold
-                            short_penalty_coeff = 0.0
-                        elif ratio < low_short:
-                            # Maximum penalty coefficient when ratio is below low threshold
-                            short_penalty_coeff = self.too_short_max_penalty
-                        else:
-                            # Linear penalty between low and high: 0 at high, max_coeff at low
-                            short_penalty_coeff = self.too_short_max_penalty * (high_short - ratio) / (high_short - low_short)
+                        # Too long: ratio above threshold → penalized
+                        if self.too_long_max_penalty > 0 and ratio > self.too_long_threshold_low:
+                            too_long_penalty_coeffs[i] = 1.0  # flag
+                            if i < 3:
+                                logger.info(
+                                    f"[TOO_LONG_PENALTY] Sample {i}: "
+                                    f"ratio={ratio:.3f} > threshold={self.too_long_threshold_low}, "
+                                    f"reward will be set to 0"
+                                )
 
-                        too_short_penalty_coeffs[i] = short_penalty_coeff
-                        if short_penalty_coeff != 0 and i < 3:  # Log first few samples
-                            logger.info(
-                                f"[TOO_SHORT_PENALTY] Sample {i}: "
-                                f"original_token_len={original_token_len}, rewrite_token_len={rewrite_token_len}, "
-                                f"ratio={ratio:.3f} (low={low_short}, high={high_short}), penalty_coeff={short_penalty_coeff:.4f}"
-                            )
-
-                        # Compute too_long_penalty coefficient
-                        low_long = self.too_long_threshold_low
-                        high_long = self.too_long_threshold_high
-
-                        if ratio <= low_long:
-                            # No penalty when ratio is below or equal to low threshold
-                            long_penalty_coeff = 0.0
-                        elif ratio > high_long:
-                            # Maximum penalty coefficient when ratio is above high threshold
-                            long_penalty_coeff = self.too_long_max_penalty
-                        else:
-                            # Linear penalty between low and high: 0 at low, max_coeff at high
-                            long_penalty_coeff = self.too_long_max_penalty * (ratio - low_long) / (high_long - low_long)
-
-                        too_long_penalty_coeffs[i] = long_penalty_coeff
-                        if long_penalty_coeff != 0 and i < 3:  # Log first few samples
-                            logger.info(
-                                f"[TOO_LONG_PENALTY] Sample {i}: "
-                                f"original_token_len={original_token_len}, rewrite_token_len={rewrite_token_len}, "
-                                f"ratio={ratio:.3f} (low={low_long}, high={high_long}), penalty_coeff={long_penalty_coeff:.4f}"
-                            )
-
-        # Log length_ratio statistics for DAPO filter_groups
+        # Log length_ratio statistics
         valid_ratios = [r for r in length_ratios if r > 0]
         if valid_ratios:
-            low_short = self.too_short_threshold_low
-            high_short = self.too_short_threshold_high
-            low_long = self.too_long_threshold_low
-            high_long = self.too_long_threshold_high
-            num_above_low_short = sum(1 for r in valid_ratios if r >= low_short)
-            num_above_high_short = sum(1 for r in valid_ratios if r >= high_short)
-            num_above_low_long = sum(1 for r in valid_ratios if r > low_long)
-            num_above_high_long = sum(1 for r in valid_ratios if r > high_long)
+            too_short_count = sum(1 for r in valid_ratios if r < self.too_short_threshold_high)
+            too_long_count = sum(1 for r in valid_ratios if r > self.too_long_threshold_low)
             logger.info(
                 f"[LENGTH_RATIO] batch_size={batch_size}, "
                 f"mean={sum(valid_ratios)/len(valid_ratios):.3f}, "
                 f"min={min(valid_ratios):.3f}, max={max(valid_ratios):.3f}, "
-                f"too_short: low={low_short}, high={high_short} (num_above_low={num_above_low_short}/{len(valid_ratios)}, num_above_high={num_above_high_short}/{len(valid_ratios)}), "
-                f"too_long: low={low_long}, high={high_long} (num_above_low={num_above_low_long}/{len(valid_ratios)}, num_above_high={num_above_high_long}/{len(valid_ratios)})"
+                f"too_short(<{self.too_short_threshold_high})={too_short_count}, "
+                f"too_long(>{self.too_long_threshold_low})={too_long_count}"
             )
 
-        # Log summary of penalty coefficients for debugging
-        logger.info(
-            f"[PENALTY_SUMMARY] batch_size={batch_size}, "
-            f"too_short_penalty_coeffs (first 3): {too_short_penalty_coeffs[:3]}, "
-            f"too_long_penalty_coeffs (first 3): {too_long_penalty_coeffs[:3]}, "
-            f"too_short_penalties (first 3): {too_short_penalties[:3]}, "
-            f"too_long_penalties (first 3): {too_long_penalties[:3]}"
-        )
-
-        # Compute r_cog_range (used for both FSF and length penalty scaling in relative mode)
         r_cog_range = max(r_cog) - min(r_cog) if len(r_cog) > 1 else 1.0
-        r_cog_range = max(r_cog_range, 1e-6)  # Avoid zero or extremely small ranges
-        logger.info(
-            f"[R_COG_RANGE] r_cog_range={r_cog_range:.4f} (min={min(r_cog):.4f}, max={max(r_cog):.4f})"
-        )
+        r_cog_range = max(r_cog_range, 1e-6)
 
-        # Compute FSF reward scale based on fsf_penalty_mode
-        # If fsf_penalty_mode == "relative", scale fsf_reward_scale by r_cog range
-        if self.fsf_penalty_mode == "relative":
-            fsf_scale = self.fsf_reward_scale * r_cog_range
+        # ========== Penalty Detection (Zero-Reward Penalty System) ==========
+        # When ANY penalty is triggered, the total reward is set to 0 instead of subtracting.
+        # This provides a cleaner signal: either the sample is good (gets base_reward) or penalized (gets 0).
+        penalized_flags = [False] * batch_size  # Track whether each sample is penalized
+        penalty_reasons = [[] for _ in range(batch_size)]  # Track penalty reasons per sample
+
+        # ========== FSF Penalty Detection ==========
+        # If rewrite_fsf > 0 (has failed steps), treat as penalty: reward → 0
+        fsf_penalty_flags = [0.0] * batch_size  # 1.0 if fsf > 0, 0.0 otherwise
+        if self.use_logic_reward:
+            for i in range(batch_size):
+                rew_fsf = rewrite_fsfs[i]
+                if rew_fsf is not None and rew_fsf > 0:
+                    penalized_flags[i] = True
+                    penalty_reasons[i].append("fsf")
+                    fsf_penalty_flags[i] = 1.0
+                    if i < 3:
+                        logger.info(
+                            f"[FSF_PENALTY] Sample {i}: rewrite_fsf={rew_fsf:.4f} > 0, "
+                            f"reward will be set to 0"
+                        )
+            fsf_penalized_count = sum(1 for f in fsf_penalty_flags if f > 0)
+            fsf_zero_count = batch_size - fsf_penalized_count
             logger.info(
-                f"[FSF_PENALTY_MODE] relative, fsf_reward_scale={self.fsf_reward_scale:.4f}, "
-                f"actual_fsf_scale={fsf_scale:.4f}"
-            )
-        else:  # fsf_penalty_mode == "absolute" (default)
-            fsf_scale = self.fsf_reward_scale
-            logger.info(
-                f"[FSF_PENALTY_MODE] absolute, fsf_reward_scale={self.fsf_reward_scale:.4f}"
+                f"[FSF_PENALTY] batch_size={batch_size}, "
+                f"fsf>0 (penalized)={fsf_penalized_count}, fsf=0 (clean)={fsf_zero_count}, "
+                f"fsf_penalty_rate={fsf_penalized_count/batch_size:.2%}"
             )
 
-        # ========== Apply Correct Judge Penalty ==========
-        # If Correct Judge returns False (incorrect), force R_cog to penalty value
+        # ========== Correct Judge Penalty Detection ==========
         r_cog_before_correct_judge = r_cog.copy()  # Keep copy for logging
-        correct_judge_penalties = [0.0] * batch_size  # Track penalties for logging
+        correct_judge_penalties = [0.0] * batch_size  # Track for logging (1.0 if penalized, 0.0 if not)
 
         if self.use_correct_judge:
             for i in range(batch_size):
                 if is_correct_results[i] is False:
-                    # Incorrect: force R_cog to penalty value
-                    original_r_cog = r_cog[i]
-                    r_cog[i] = self.correct_judge_penalty_value
-                    penalty = original_r_cog - self.correct_judge_penalty_value
-                    correct_judge_penalties[i] = penalty
-                    if i < 3:  # Log first few samples
+                    penalized_flags[i] = True
+                    penalty_reasons[i].append("correct_judge")
+                    correct_judge_penalties[i] = 1.0  # Flag: penalized
+                    if i < 3:
                         logger.info(
                             f"[CORRECT_JUDGE] Sample {i}: Incorrect! "
-                            f"R_cog forced from {original_r_cog:.4f} to {self.correct_judge_penalty_value:.4f} "
-                            f"(penalty={penalty:.4f})"
+                            f"Reward will be set to 0 (original R_cog={r_cog[i]:.4f})"
                         )
                 elif is_correct_results[i] is None:
-                    # Parse failure: treat as incorrect
-                    original_r_cog = r_cog[i]
-                    r_cog[i] = self.correct_judge_penalty_value
-                    penalty = original_r_cog - self.correct_judge_penalty_value
-                    correct_judge_penalties[i] = penalty
-                    if i < 3:  # Log first few samples
+                    penalized_flags[i] = True
+                    penalty_reasons[i].append("correct_judge_parse_fail")
+                    correct_judge_penalties[i] = 1.0  # Flag: penalized
+                    if i < 3:
                         logger.info(
                             f"[CORRECT_JUDGE] Sample {i}: Parse failure! "
-                            f"R_cog forced from {original_r_cog:.4f} to {self.correct_judge_penalty_value:.4f} "
-                            f"(penalty={penalty:.4f})"
+                            f"Reward will be set to 0 (original R_cog={r_cog[i]:.4f})"
                         )
 
-        # Compute base rewards: R_base = R_cog + lambda_useful * R_useful + fsf_scale * R_logic
-        # Note: R_useful is only included if use_useful_reward is True. fsf_scale is computed based on fsf_penalty_mode.
+        # Compute base rewards: R_base = R_cog + lambda_useful * R_useful
+        # Note: FSF (R_logic) is no longer added to base_rewards; it's now a penalty (fsf > 0 → reward = 0).
+        # Note: R_cog is NOT modified by correct_judge anymore; penalized samples get 0 at the end.
         if self.use_useful_reward:
-            base_rewards = [c + self.lambda_useful * u + fsf_scale * l
-                           for c, u, l in zip(r_cog, r_useful, r_logic)]
+            base_rewards = [c + self.lambda_useful * u
+                           for c, u in zip(r_cog, r_useful)]
         else:
-            base_rewards = [c + fsf_scale * l
-                           for c, l in zip(r_cog, r_logic)]
+            base_rewards = list(r_cog)
 
-        # Determine penalty scaling factor based on penalty_mode
-        # DEBUG: Log penalty_mode value to track unexpected "s" value
-        logger.info(f"[PENALTY_MODE_DEBUG] self.penalty_mode={repr(self.penalty_mode)}, type={type(self.penalty_mode)}")
-        if self.penalty_mode == "relative":
-            # Use r_cog_range for relative penalty scaling
-            penalty_scale = r_cog_range
-            logger.info(
-                f"[PENALTY_MODE] relative, batch_size={batch_size}, "
-                f"penalty_scale=r_cog_range={penalty_scale:.4f}"
-            )
-        else:  # penalty_mode == "absolute"
-            # Use absolute penalties (coefficient is the actual penalty value)
-            penalty_scale = 1.0  # No scaling
-            logger.info(
-                f"[PENALTY_MODE] absolute, batch_size={batch_size}, "
-                f"penalties applied as fixed values (no scaling)"
-            )
-
-        # Apply penalties based on penalty_mode
-        # too_short_penalties/too_long_penalties store coefficients for logging
-        # too_short_penalties_actual/too_long_penalties_actual store actual penalty values
+        # ========== Too Short / Too Long Penalty Detection ==========
         too_short_penalties_actual = [0.0] * batch_size
         too_long_penalties_actual = [0.0] * batch_size
         for i in range(batch_size):
-            too_short_penalties_actual[i] = -too_short_penalty_coeffs[i] * penalty_scale
             too_short_penalties[i] = too_short_penalty_coeffs[i]  # Log coefficient
-            if too_short_penalty_coeffs[i] != 0:
+            if too_short_penalty_coeffs[i] > 0:
+                penalized_flags[i] = True
+                penalty_reasons[i].append("too_short")
+                too_short_penalties_actual[i] = 1.0  # Flag: penalized
                 logger.info(
                     f"[TOO_SHORT_PENALTY] Sample {i}: "
-                    f"penalty_coeff={too_short_penalty_coeffs[i]:.4f} * {penalty_scale:.4f} = {too_short_penalties_actual[i]:.4f} ({self.penalty_mode})"
+                    f"penalty_coeff={too_short_penalty_coeffs[i]:.4f}, reward will be set to 0"
                 )
 
-            too_long_penalties_actual[i] = -too_long_penalty_coeffs[i] * penalty_scale
             too_long_penalties[i] = too_long_penalty_coeffs[i]  # Log coefficient
-            if too_long_penalty_coeffs[i] != 0:
+            if too_long_penalty_coeffs[i] > 0:
+                penalized_flags[i] = True
+                penalty_reasons[i].append("too_long")
+                too_long_penalties_actual[i] = 1.0  # Flag: penalized
                 logger.info(
                     f"[TOO_LONG_PENALTY] Sample {i}: "
-                    f"penalty_coeff={too_long_penalty_coeffs[i]:.4f} * {penalty_scale:.4f} = {too_long_penalties_actual[i]:.4f} ({self.penalty_mode})"
+                    f"penalty_coeff={too_long_penalty_coeffs[i]:.4f}, reward will be set to 0"
                 )
 
-        # ========== Compute Repeat Penalty ==========
+        # ========== Repeat Penalty Detection ==========
         # Calculate similarity between original_cot and rewrite_cot using SequenceMatcher
-        # Apply penalty if similarity > similarity_threshold
         repeat_penalties_actual = [0.0] * batch_size
-        repeat_penalty_coeffs = [0.0] * batch_size  # Coefficients for logging
-        similarities = [0.0] * batch_size  # Store similarity values for logging
+        repeat_penalty_coeffs = [0.0] * batch_size
+        similarities = [0.0] * batch_size
 
         for i in range(batch_size):
             original_text = original_cots[i] if original_cots[i] else ""
             rewrite_text = rewrite_cots[i] if rewrite_cots[i] else ""
 
             if original_text and rewrite_text:
-                # Calculate similarity using SequenceMatcher
                 sm = SequenceMatcher(None, original_text, rewrite_text)
                 blocks = sm.get_matching_blocks()
                 total_match = sum(block.size for block in blocks)
                 similarity = 2 * total_match / (len(original_text) + len(rewrite_text))
                 similarities[i] = similarity
 
-                # Apply penalty if similarity exceeds threshold
-                if similarity > self.similarity_threshold:
+                if self.use_repeat_penalty and similarity > self.similarity_threshold:
+                    penalized_flags[i] = True
+                    penalty_reasons[i].append("repeat")
                     repeat_penalty_coeffs[i] = self.similarity_penalty
-                    repeat_penalties_actual[i] = -self.similarity_penalty * penalty_scale
+                    repeat_penalties_actual[i] = 1.0  # Flag: penalized
 
-                    if i < 3:  # Log first few samples
+                    if i < 3:
                         logger.info(
                             f"[REPEAT_PENALTY] Sample {i}: "
                             f"similarity={similarity:.4f} > threshold={self.similarity_threshold}, "
-                            f"penalty_coeff={self.similarity_penalty:.4f} -> actual={repeat_penalties_actual[i]:.4f} ({self.penalty_mode})"
+                            f"reward will be set to 0"
                         )
-                elif i < 3 and similarity > 0.7:  # Log high similarity warnings
+                elif i < 3 and similarity > 0.7:
                     logger.info(
                         f"[REPEAT_PENALTY] Sample {i}: "
-                        f"similarity={similarity:.4f} <= threshold={self.similarity_threshold}, no penalty applied"
+                        f"similarity={similarity:.4f} <= threshold={self.similarity_threshold}, no penalty"
                     )
 
         # Log repeat penalty statistics
@@ -1224,11 +1149,27 @@ class CombinedRewardComputer:
                 f"max_similarity={max(similarities):.4f}"
             )
 
-        # Combine rewards: R = R_base + too_short_penalty + too_long_penalty + repeat_penalty
-        total_rewards = [b + s + l + r for b, s, l, r in zip(base_rewards, too_short_penalties_actual, too_long_penalties_actual, repeat_penalties_actual)]
+        # ========== Apply Zero-Reward Penalty ==========
+        # If any penalty is triggered, total_reward = 0; otherwise total_reward = base_reward
+        total_rewards = []
+        for i in range(batch_size):
+            if penalized_flags[i]:
+                total_rewards.append(0.0)
+            else:
+                total_rewards.append(base_rewards[i])
 
-        # Return penalty coefficients AND actual penalty values for use in format/truncation penalty calculation
-        # Store in extra_info for external use
+        # Log penalty summary
+        penalized_count = sum(1 for f in penalized_flags if f)
+        logger.info(
+            f"[PENALTY_SUMMARY] batch_size={batch_size}, "
+            f"penalized={penalized_count}/{batch_size} ({100*penalized_count/batch_size:.1f}%), "
+            f"penalty_reasons: {dict((r, sum(1 for reasons in penalty_reasons for rr in reasons if rr == r)) for r in ['correct_judge', 'correct_judge_parse_fail', 'fsf', 'too_short', 'too_long', 'repeat'])}"
+        )
+
+        # Keep penalty_scale and penalty_mode for backward compatibility in extra_info
+        penalty_scale = r_cog_range if self.penalty_mode == "relative" else 1.0
+
+        # Return penalty flags for use in format/truncation penalty detection
         extra_info_penalty_coeffs = {
             "base_rewards": base_rewards,
             "r_cog_range": r_cog_range,
@@ -1236,13 +1177,13 @@ class CombinedRewardComputer:
             "penalty_mode": self.penalty_mode,
             "too_short_penalty_coeffs": too_short_penalty_coeffs,
             "too_long_penalty_coeffs": too_long_penalty_coeffs,
-            # Actual penalty values applied (negative values)
             "too_short_penalties_actual": too_short_penalties_actual,
             "too_long_penalties_actual": too_long_penalties_actual,
-            # Repeat penalty
             "repeat_penalty_coeffs": repeat_penalty_coeffs,
             "repeat_penalties_actual": repeat_penalties_actual,
             "similarities": similarities,
+            "penalized_flags": penalized_flags,  # NEW: per-sample penalty flags
+            "penalty_reasons": penalty_reasons,  # NEW: per-sample penalty reasons
         }
 
         # Log per-sample prompts with computed rewards
@@ -1301,7 +1242,7 @@ class CombinedRewardComputer:
             "is_correct_results": is_correct_results,  # Correct Judge results (True=correct, False=incorrect, None=parse failure)
             "correct_judge_parse_failed_count": correct_judge_parse_failed_count,  # Number of samples with parse failures
             "r_cog_before_correct_judge": r_cog_before_correct_judge,  # R_cog values before Correct Judge penalty
-            "correct_judge_penalties": correct_judge_penalties,  # Penalties applied by Correct Judge
+            "correct_judge_penalties": correct_judge_penalties,  # 1.0 if penalized, 0.0 if not
             "train_mask": train_mask,  # Training mask: True=participate in GRPO, False=filtered out (when correct_judge_filter_no_samples=True)
             # === KL mode: student log probs tensor ===
             "kl_student_log_probs": kl_student_log_probs,  # torch.Tensor [batch_size, response_length] or None
@@ -1309,16 +1250,20 @@ class CombinedRewardComputer:
             "too_short_penalties": too_short_penalties,  # Penalty coefficients (0-0.5)
             "too_long_penalties": too_long_penalties,  # Penalty coefficients (0-0.5)
             "repeat_penalties": repeat_penalty_coeffs,  # Repeat penalty coefficients
+            # === Penalty flags (zero-reward penalty system) ===
+            "penalized_flags": penalized_flags,  # Per-sample penalty flags from compute_reward
+            "penalty_reasons": penalty_reasons,  # Per-sample penalty reason lists
+            "fsf_penalty_flags": fsf_penalty_flags,  # 1.0 if rewrite_fsf > 0, 0.0 otherwise
             # === NESTED extra_info ===
             "extra_info": {
                 "lambda_logic": self.lambda_logic,
                 "lambda_useful": self.lambda_useful,
                 "too_short_penalties": too_short_penalties,
                 "too_short_penalty_coeffs": too_short_penalty_coeffs,  # Coefficients for logging
-                "too_long_penalties": too_long_penalties,  # NEW: too_long_penalty coefficients
-                "too_long_penalty_coeffs": too_long_penalty_coeffs,  # NEW: too_long_penalty coefficients
+                "too_long_penalties": too_long_penalties,  # too_long_penalty coefficients
+                "too_long_penalty_coeffs": too_long_penalty_coeffs,  # too_long_penalty coefficients
                 "repeat_penalties": repeat_penalty_coeffs,  # Repeat penalty coefficients
-                "repeat_penalties_actual": repeat_penalties_actual,  # Actual repeat penalties applied
+                "repeat_penalties_actual": repeat_penalties_actual,  # 1.0 if penalized, 0.0 if not
                 "similarities": similarities,  # Similarity values between original and rewrite
                 "length_ratios": length_ratios,  # For DAPO filter_groups
                 # Penalty info for external use (format/truncation penalties)
@@ -1326,6 +1271,8 @@ class CombinedRewardComputer:
                 "base_rewards": base_rewards,
                 "r_cog_range": r_cog_range,  # Range of cognitive rewards
                 "penalty_scale": penalty_scale,  # Actual scaling factor used for penalties
+                "penalized_flags": penalized_flags,  # Per-sample penalty flags
+                "penalty_reasons": penalty_reasons,  # Per-sample penalty reason lists
                 # === DEBUG: Pre-computed FSF from training data ===
                 "pre_computed_original_fsfs": original_fsfs,  # Pre-computed FSF for original CoTs (from training data)
                 # === FSF DOT outputs (for saving to rollout_data/val_data) ===
@@ -1440,16 +1387,16 @@ def compute_cot_rewriter_reward(
     student_tensor_parallel_size: int = 1,  # TP size for Student Model
     student_logprob_last_n_tokens: Optional[int] = None,  # SGLang: only compute last N tokens
     ppl_on_full_response: bool = False,  # If True, compute PPL on full response (Q+CoT+A)
-    truncation_penalty: float = 0.5,  # Penalty for truncated responses (configured as positive)
-    format_penalty: float = 0.5,  # Penalty for format violations (configured as positive)
-    too_short_threshold: float = 0.5,  # Deprecated: use too_short_threshold_low/high instead
-    too_short_threshold_low: float = 0.4,  # Lower threshold for too_short_penalty
-    too_short_threshold_high: float = 0.8,  # Upper threshold for too_short_penalty
-    too_short_max_penalty: float = 0.5,  # Maximum penalty for too short outputs
-    too_long_threshold_low: float = 1.5,  # Lower threshold for too_long_penalty
-    too_long_threshold_high: float = 2.0,  # Upper threshold for too_long_penalty
-    too_long_max_penalty: float = 0.5,  # Maximum penalty for too long outputs
-    penalty_mode: str = "relative",  # "relative" or "absolute": How to apply penalties
+    truncation_penalty: float = 0.5,  # > 0 enables truncation penalty (reward=0)
+    format_penalty: float = 0.5,  # > 0 enables format penalty (reward=0)
+    too_short_threshold: float = 0.5,  # Deprecated: use too_short_threshold_high instead
+    too_short_threshold_low: float = 0.4,  # Deprecated (kept for compat), use too_short_threshold_high
+    too_short_threshold_high: float = 0.8,  # Too short threshold: ratio < this → penalized
+    too_short_max_penalty: float = 0.5,  # > 0 enables too_short penalty (reward=0)
+    too_long_threshold_low: float = 1.5,  # Too long threshold: ratio > this → penalized
+    too_long_threshold_high: float = 2.0,  # Deprecated (kept for compat), use too_long_threshold_low
+    too_long_max_penalty: float = 0.5,  # > 0 enables too_long penalty (reward=0)
+    penalty_mode: str = "relative",  # Deprecated (kept for compat)
     use_tiered_reward: bool = True,  # Whether to use tiered (step-wise) reward for R_cog
     tier_step: float = 0.05,  # 区间大小：每个阶梯的 R_cog 范围
     tier_reward: float = 0.1,  # 每阶梯奖励值：第一阶梯得 tier_reward，第二阶梯得 2*tier_reward
@@ -1472,22 +1419,20 @@ def compute_cot_rewriter_reward(
     fsf_gpu_memory_utilization: float = 0.4,  # GPU memory for FSF
     fsf_max_model_len: int = 12000,  # Max model len for FSF
     fsf_tensor_parallel_size: int = 1,  # TP size for FSF (GPUs auto-detected)
-    fsf_reward_scale: float = 1.0,  # Scale factor for FSF reward (replaces lambda_logic)
     fsf_micro_batch_size: int = 4,  # Micro batch size for FSF inference (avoid OOM)
     fsf_skip_group_on_parse_error: bool = True,  # Skip entire group on parse error
     save_fsf_dot_outputs: bool = False,  # Whether to save raw FSF DOT outputs to rollout_data
-    fsf_reward_mode: str = 'direct',  # FSF reward mode: 'direct' or 'threshold'
-    fsf_penalty_mode: str = 'absolute',  # FSF penalty mode: 'absolute' or 'relative'
-                                      # - 'absolute': fsf_reward_scale is used directly (default)
-                                      # - 'relative': fsf_reward_scale is multiplied by r_cog range
     save_prompts: bool = False,  # Whether to save request prompts for student_model
+    # Deprecated FSF params (kept for backward compat, ignored)
+    fsf_reward_scale: float = 1.0,
+    fsf_reward_mode: str = 'direct',
+    fsf_penalty_mode: str = 'absolute',
     r_logic_repeat_n: int = 1,  # Number of times to repeat FSF calculation for R_logic (default: 1).
                                 # Higher values (e.g., 3) reduce LLM judge volatility by averaging multiple samples.
     # ========== Repeat Penalty Parameters ==========
-    similarity_threshold: float = 0.9,  # Threshold for repeat penalty (0.0-1.0). If similarity between
-                                        # original_cot and rewrite_cot exceeds this, apply penalty.
-    similarity_penalty: float = 0.5,  # Penalty coefficient for high similarity (default: 0.5).
-                                      # Applied when similarity > similarity_threshold.
+    similarity_threshold: float = 0.9,  # Threshold: similarity > this → penalized
+    use_repeat_penalty: bool = False,  # Whether to enable repeat penalty (reward=0 when similarity > threshold)
+    similarity_penalty: float = 0.5,  # Deprecated: kept for backward compatibility
     # ========== KL Reward Parameters ==========
     # KL reward using group-wise adaptive normalization
     alpha_kl: float = 0.01,  # Weight for max(kl_t) term in r_KL = avg(kl_t) + alpha_kl * max(kl_t)
@@ -1501,9 +1446,9 @@ def compute_cot_rewriter_reward(
     correct_judge_gpu_memory_utilization: float = 0.4,  # GPU memory for Correct Judge
     correct_judge_max_model_len: int = 8192,  # Max model len for Correct Judge
     correct_judge_micro_batch_size: int = 8,  # Micro batch size for Correct Judge inference
-    correct_judge_penalty_value: float = 0.0,  # R_cog value when correct judge says "No" (ppl_delta mode: 0)
     correct_judge_max_new_tokens: int = 10,  # Max tokens for Correct Judge output (short output for speed)
     correct_judge_filter_no_samples: bool = False,  # If True, filter out samples where judge says "No" from GRPO training
+    correct_judge_penalty_value: float = 0.0,  # Deprecated: kept for backward compat, ignored
     **kwargs,
 ) -> Dict[str, Any]:
     # Use alpha if provided (from config), otherwise use alpha_cog
@@ -1739,16 +1684,14 @@ def compute_cot_rewriter_reward(
         fsf_gpu_memory_utilization=fsf_gpu_memory_utilization,
         fsf_max_model_len=fsf_max_model_len,
         fsf_tensor_parallel_size=fsf_tensor_parallel_size,
-        fsf_reward_scale=fsf_reward_scale,
         fsf_micro_batch_size=fsf_micro_batch_size,
         fsf_skip_group_on_parse_error=fsf_skip_group_on_parse_error,
         save_fsf_dot_outputs=save_fsf_dot_outputs,
-        fsf_reward_mode=fsf_reward_mode,
-        fsf_penalty_mode=fsf_penalty_mode,
         save_prompts=save_prompts,
         r_logic_repeat_n=r_logic_repeat_n,
         # ========== Repeat Penalty Parameters ==========
         similarity_threshold=similarity_threshold,
+        use_repeat_penalty=use_repeat_penalty,
         similarity_penalty=similarity_penalty,
         # ========== KL Reward Parameters ==========
         alpha_kl=alpha_kl,
@@ -1762,7 +1705,6 @@ def compute_cot_rewriter_reward(
         correct_judge_gpu_memory_utilization=correct_judge_gpu_memory_utilization,
         correct_judge_max_model_len=correct_judge_max_model_len,
         correct_judge_micro_batch_size=correct_judge_micro_batch_size,
-        correct_judge_penalty_value=correct_judge_penalty_value,
         correct_judge_max_new_tokens=correct_judge_max_new_tokens,
         correct_judge_filter_no_samples=correct_judge_filter_no_samples,
     )
@@ -1803,58 +1745,68 @@ def compute_cot_rewriter_reward(
     base_rewards = result["extra_info"].get("base_rewards", [0.0] * batch_size)
     penalty_scale = result["extra_info"].get("penalty_scale", 1.0)
 
-    # Apply penalties based on penalty_mode
-    # 1. Truncation penalty: if rollout result was truncated (finish_reason == "length")
-    # 2. Format penalty: if response does not contain valid <rewrite_reasoning> tags
+    # ========== Zero-Reward Penalty Detection for Truncation & Format ==========
+    # When any penalty is triggered, the total reward is set to 0.
     finish_reasons = data.non_tensor_batch.get("finish_reasons", [])
-    penalty_mode_from_result = result["extra_info"].get("penalty_mode", "relative")
 
-    penalties = [0.0] * batch_size
-    truncation_penalties = [0.0] * batch_size  # Track truncation penalties separately for logging
-    format_penalties = [0.0] * batch_size  # Track format penalties separately for logging
+    # Get penalty flags from compute_reward (correct_judge, too_short, too_long, repeat)
+    penalized_flags = list(result.get("penalized_flags", [False] * batch_size))
+    penalty_reasons = result.get("penalty_reasons", [[] for _ in range(batch_size)])
+    # Make mutable copies of penalty_reasons
+    penalty_reasons = [list(reasons) for reasons in penalty_reasons]
+
+    truncation_penalties = [0.0] * batch_size  # 1.0 if penalized, 0.0 if not
+    format_penalties = [0.0] * batch_size  # 1.0 if penalized, 0.0 if not
     truncated_flags = [0] * batch_size  # Track truncated flags for DAPO filter_groups
 
     for i in range(batch_size):
-        # Truncation penalty: penalty = truncation_penalty_coeff * penalty_scale (if relative) or truncation_penalty_coeff (if absolute)
+        # Truncation penalty: if response was truncated (finish_reason == "length")
         if i < len(finish_reasons) and finish_reasons[i] == "length":
-            if penalty_mode_from_result == "relative":
-                trunc_penalty = -truncation_penalty * penalty_scale
-                penalty_log_msg = f"penalty={truncation_penalty} * {penalty_scale:.4f} = {trunc_penalty:.4f} (relative)"
-            else:  # absolute
-                trunc_penalty = -truncation_penalty
-                penalty_log_msg = f"penalty={truncation_penalty:.4f} (absolute)"
-            penalties[i] += trunc_penalty
-            truncation_penalties[i] = trunc_penalty  # Log actual penalty value
-            truncated_flags[i] = 1  # Mark as truncated for DAPO filter_groups
-            logger.info(
-                f"[TRUNCATION_PENALTY] Sample {i}: Truncated (finish_reason=length), "
-                f"{penalty_log_msg}"
-            )
+            if truncation_penalty > 0:  # Only penalize if truncation_penalty is configured > 0
+                penalized_flags[i] = True
+                penalty_reasons[i].append("truncation")
+                truncation_penalties[i] = 1.0  # Flag: penalized
+                logger.info(
+                    f"[TRUNCATION_PENALTY] Sample {i}: Truncated (finish_reason=length), "
+                    f"reward will be set to 0"
+                )
+            truncated_flags[i] = 1  # Always mark as truncated for DAPO filter_groups
 
-        # Format penalty: penalty = format_penalty_coeff * penalty_scale (if relative) or format_penalty_coeff (if absolute)
-        # Note: format_valid_flags is already computed above
+        # Format penalty: if response does not contain valid <rewrite_reasoning> tags
         if format_valid_flags[i] == 0:
-            if penalty_mode_from_result == "relative":
-                fmt_penalty = -format_penalty * penalty_scale
-                penalty_log_msg = f"penalty={format_penalty} * {penalty_scale:.4f} = {fmt_penalty:.4f} (relative)"
-            else:  # absolute
-                fmt_penalty = -format_penalty
-                penalty_log_msg = f"penalty={format_penalty:.4f} (absolute)"
-            penalties[i] += fmt_penalty
-            format_penalties[i] = fmt_penalty  # Log actual penalty value
-            logger.info(
-                f"[FORMAT_PENALTY] Sample {i}: Format violation (no valid <rewrite_reasoning> tags found), "
-                f"response_preview='{rewrite_cots[i][:100]}...', {penalty_log_msg}"
-            )
+            if format_penalty > 0:  # Only penalize if format_penalty is configured > 0
+                penalized_flags[i] = True
+                penalty_reasons[i].append("format")
+                format_penalties[i] = 1.0  # Flag: penalized
+                logger.info(
+                    f"[FORMAT_PENALTY] Sample {i}: Format violation (no valid <rewrite_reasoning> tags found), "
+                    f"response_preview='{rewrite_cots[i][:100]}...', reward will be set to 0"
+                )
 
-    # Convert total_rewards to tensor and apply penalties
+    # Apply zero-reward penalty: if any penalty triggered, set reward to 0
+    for i in range(batch_size):
+        if penalized_flags[i]:
+            total_rewards[i] = 0.0
+
+    # Log overall penalty summary
+    penalized_count = sum(1 for f in penalized_flags if f)
+    all_reasons = {}
+    for reasons in penalty_reasons:
+        for r in reasons:
+            all_reasons[r] = all_reasons.get(r, 0) + 1
+    logger.info(
+        f"[PENALTY_FINAL] batch_size={batch_size}, "
+        f"penalized={penalized_count}/{batch_size} ({100*penalized_count/batch_size:.1f}%), "
+        f"reasons: {all_reasons}"
+    )
+
+    # Convert total_rewards to tensor
     device = data.batch["responses"].device
     total_rewards_tensor = torch.tensor(
         total_rewards,
         device=device,
         dtype=torch.bfloat16,
     )
-    total_rewards_tensor = total_rewards_tensor + torch.tensor(penalties, device=device, dtype=torch.bfloat16)
 
     # Handle NaN and extreme values
     total_rewards_tensor = torch.nan_to_num(total_rewards_tensor, nan=0.0)
@@ -1904,19 +1856,24 @@ def compute_cot_rewriter_reward(
             # FSF DOT outputs (if save_fsf_dot_outputs=True)
             # Note: original_dot_outputs is omitted (original cot does not call FSF judge)
             "rewrite_dot_outputs": rewrite_dot_outputs,  # Raw DOT outputs for rewrite CoTs only
-            # Penalties for SwanLab logging
-            "truncation_penalties": truncation_penalties,
-            "format_penalties": format_penalties,
-            "too_short_penalties": too_short_penalties,
-            "too_long_penalties": too_long_penalties,  # Penalty coefficients (0-0.5)
-            "too_short_penalties_actual": result.get("extra_info", {}).get("too_short_penalties_actual", [0.0] * batch_size),  # Actual penalties applied
-            "too_long_penalties_actual": result.get("extra_info", {}).get("too_long_penalties_actual", [0.0] * batch_size),  # Actual penalties applied
+            # Penalty flags for SwanLab logging (zero-reward penalty system)
+            # Values are 1.0 (penalized) or 0.0 (not penalized) - used to compute rates
+            "truncation_penalties": truncation_penalties,  # 1.0 if truncation penalty triggered, 0.0 otherwise
+            "format_penalties": format_penalties,  # 1.0 if format penalty triggered, 0.0 otherwise
+            "too_short_penalties": too_short_penalties,  # Penalty coefficients for logging
+            "too_long_penalties": too_long_penalties,  # Penalty coefficients for logging
+            "too_short_penalties_actual": result.get("extra_info", {}).get("too_short_penalties_actual", [0.0] * batch_size),  # 1.0 if penalized
+            "too_long_penalties_actual": result.get("extra_info", {}).get("too_long_penalties_actual", [0.0] * batch_size),  # 1.0 if penalized
             "repeat_penalties": result.get("repeat_penalties", [0.0] * batch_size),  # Repeat penalty coefficients
-            "repeat_penalties_actual": result.get("extra_info", {}).get("repeat_penalties_actual", [0.0] * batch_size),  # Actual repeat penalties applied
-            "similarities": result.get("extra_info", {}).get("similarities", [0.0] * batch_size),  # Similarity values between original and rewrite
-            "penalty_mode": penalty_mode_from_result,  # "relative" or "absolute"
-            "saved_prompts": result.get("extra_info", {}).get("saved_prompts", None),  # Request prompts for debugging (if save_prompts=True)
-            "fsf_reward_mode": fsf_reward_mode,  # FSF reward mode: 'direct' or 'threshold'
+            "repeat_penalties_actual": result.get("extra_info", {}).get("repeat_penalties_actual", [0.0] * batch_size),  # 1.0 if penalized
+            "similarities": result.get("extra_info", {}).get("similarities", [0.0] * batch_size),
+            "saved_prompts": result.get("extra_info", {}).get("saved_prompts", None),
+            "fsf_reward_mode": fsf_reward_mode,
+            # FSF penalty flags (1.0 if rewrite_fsf > 0, 0.0 otherwise)
+            "fsf_penalty_flags": result.get("fsf_penalty_flags", [0.0] * batch_size),
+            # Penalty flags (zero-reward penalty system)
+            "penalized_flags": [1 if f else 0 for f in penalized_flags],  # 1 if any penalty triggered, 0 otherwise
+            "penalty_reasons": penalty_reasons,  # Per-sample penalty reason lists
             # DAPO filter_groups support: "truncated" flag (1 if truncated, 0 otherwise)
             "truncated": truncated_flags,
             # DAPO filter_groups support: "format_valid" flag (1 if valid, 0 if invalid)

@@ -19,7 +19,7 @@ dataloader_num_workers: 4
 
 
 ### output
-output_dir: /fs/fast/u20240075/luoyashuo/checkpoints/rv_optimal/qwen2.5_1.5b_rv_optimal_20k
+output_dir: /fs/fast/u20240075/luoyashuo/cdad/checkpoints/rv_optimal/qwen2.5_1.5b_rv_optimal_20k
 logging_steps: 10
 save_strategy: epoch
 plot_loss: true

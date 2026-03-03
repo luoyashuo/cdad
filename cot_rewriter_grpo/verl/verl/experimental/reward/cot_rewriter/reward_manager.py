@@ -215,8 +215,8 @@ class CoTRewriterRewardManager:
     ) -> torch.Tensor:
         """Apply overlong response penalty based on overlong_buffer_cfg.
 
-        This applies a gradual penalty for responses that exceed expected_len = max_resp_len - buffer_len.
-        The penalty increases linearly as the response length exceeds the threshold.
+        Zero-reward penalty: when a response exceeds expected_len = max_resp_len - buffer_len,
+        the reward is set to 0 instead of subtracting a gradual penalty.
 
         Args:
             data: DataProto object containing the batch data
@@ -238,7 +238,6 @@ class CoTRewriterRewardManager:
 
         overlong_buffer_len = self.overlong_buffer_cfg.len
         expected_len = self.max_resp_len - overlong_buffer_len
-        penalty_factor = self.overlong_buffer_cfg.penalty_factor
 
         for i in range(batch_size):
             # Get the valid response length (excluding padding)
@@ -246,30 +245,24 @@ class CoTRewriterRewardManager:
             attention_mask = data.batch["attention_mask"]
             valid_response_length = attention_mask[i, prompt_length:].sum().item()
 
-            # Calculate overlong penalty
+            # Check if response exceeds expected length
             exceed_len = valid_response_length - expected_len
-            overlong_penalty = 0.0
-            is_overlong = False
+            is_overlong = exceed_len > 0
 
-            if exceed_len > 0:
-                overlong_penalty = min(-exceed_len / overlong_buffer_len * penalty_factor, 0)
-                is_overlong = True
+            if is_overlong:
+                # Zero-reward penalty: set the reward to 0
+                if valid_response_length > 0 and valid_response_length <= response_length:
+                    reward_pos = valid_response_length - 1
+                    reward_tensor[i, reward_pos] = 0.0
 
-            # Apply penalty to the reward tensor
-            # Find the position where the current reward is set (last valid token)
-            if valid_response_length > 0 and valid_response_length <= response_length:
-                reward_pos = valid_response_length - 1
-                current_reward = reward_tensor[i, reward_pos].item()
-                reward_tensor[i, reward_pos] = current_reward + overlong_penalty
-
-            # Track for logging
-            reward_extra_info["overlong_rewards"].append(overlong_penalty)
+            # Track for logging (1.0 if penalized, 0.0 if not)
+            reward_extra_info["overlong_rewards"].append(1.0 if is_overlong else 0.0)
             reward_extra_info["overlong"].append(is_overlong)
 
             if self.overlong_buffer_cfg.log and is_overlong:
                 logger.info(
                     f"[OVERLONG] Sample {i}: len={valid_response_length}, "
-                    f"expected={expected_len}, exceed={exceed_len}, penalty={overlong_penalty:.4f}"
+                    f"expected={expected_len}, exceed={exceed_len}, reward set to 0"
                 )
 
         return reward_tensor

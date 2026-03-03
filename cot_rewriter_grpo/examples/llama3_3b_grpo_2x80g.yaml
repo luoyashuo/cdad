@@ -166,11 +166,10 @@ reward_model:
 
   # Reward kwargs (传递给 reward manager)
   reward_kwargs:
-    # 过长奖励塑形配置
+    # 过长惩罚：response 超过 max_resp_len - len 时 reward=0
     overlong_buffer_cfg:
       enable: true
-      len: 2000
-      penalty_factor: 0.2
+      len: 2000               # 超过 10000-2000=8000 tokens 时触发
       log: false
     max_resp_len: 10000
 
@@ -228,44 +227,36 @@ custom_reward_function:
     use_tiered_reward: false           # 是否启用阶梯奖励
     tier_step: 0.001                   # 阶梯步长 (5% 改善)
     tier_reward: 0.002                  # 每阶梯奖励值
-    # ==================== 逻辑奖励 FSF 配置 (R_logic) ====================
-    # 使用 FSF (Free-Form Solver Feedback) 模型评估逻辑质量
-    use_logic_reward: true             # 是否启用逻辑奖励
+    # ==================== FSF Penalty 配置 ====================
+    # FSF 现在作为 penalty：rewrite_fsf > 0 (存在失败步骤) → reward = 0
+    use_logic_reward: true             # 是否启用 FSF penalty
     fsf_model_path: /fs/fast/u20240075/hf_home/models/Yaseal-qwen3_4b_fsf_grm
-    fsf_tensor_parallel_size: 2        # 降低TP以适配4卡环境 (Actor TP=4, FSF需要共享)
+    fsf_tensor_parallel_size: 2
     fsf_temperature: 0.4
     fsf_top_k: 20
     fsf_top_p: 0.95
     fsf_max_new_tokens: 3072
-    fsf_gpu_memory_utilization: 0.3    # 降低显存利用率以避免OOM (0.4->0.3)
+    fsf_gpu_memory_utilization: 0.3
     fsf_max_model_len: 12000
-    fsf_reward_scale: 1.0          # FSF 奖励缩放因子
-    fsf_micro_batch_size: 4           # FSF 推理微批次大小 (控制显存，默认4)
-    fsf_skip_group_on_parse_error: true  # DOT解析失败时跳过整个group (默认true)
-    save_fsf_dot_outputs: true        # 保存 FSF DOT 输出到 rollout_data
-    save_prompts: true                 # 是否保存 student_model 和 fsf_judge 的请求 prompt (用于调试)
-    r_logic_repeat_n: 1               # FSF 重复计算次数 (已修复多次调用问题，现在可以安全使用3)
-    fsf_reward_mode: "direct"          # FSF 奖励计算模式: "direct" (默认) 或 "threshold"
-                                      # - "direct": R_logic = -rewrite_fsf (与失败分支成正比的负奖励)
-                                      # - "threshold": R_logic = -1 if fsf > 0 else 0 (有失败分支时的固定惩罚)
-    fsf_penalty_mode: "absolute"      # FSF 惩罚模式: "absolute" (默认) 或 "relative"
-                                      # - "absolute": R_logic = -rewrite_fsf (与失败分支成正比的负奖励)
-                                      # - "relative": R_logic = -rewrite_fsf / max(rewrite_fsf, 1.0) (归一化后与失败分支成正比的负奖励), 目标是让模型在保证改写正确的前提下平稳学习, 实践发现relative会导致惩罚在一个相似的group内部非常小，起不到纠正作用
+    fsf_micro_batch_size: 4
+    fsf_skip_group_on_parse_error: true
+    save_fsf_dot_outputs: true
+    save_prompts: true
+    r_logic_repeat_n: 1
     # ==================== Useful 奖励配置 (R_useful) ====================
     # 评估 rewrite 相对于 original 的有用性
     use_useful_reward: false          # 是否启用 useful 奖励
     lambda_useful: 1.0                # useful 奖励权重 λ_useful
     # ==================== Correct Judge 配置 (正确性检测) ====================
-    # 使用 Correct Judge 判断 rewrite_cot 是否导致正确的 solution
-    use_correct_judge: true             # 是否启用 Correct Judge (默认: false)
-    correct_judge_model_path: /fs/fast/u20240075/hf_home/models/Qwen/Qwen3-4B  # Correct Judge 模型路径
-    correct_judge_tensor_parallel_size: 2        # TP=1 减少通信问题
-    correct_judge_gpu_memory_utilization: 0.3    # GPU memory for Correct Judge
-    correct_judge_max_model_len: 8192            # Max model len for Correct Judge
-    correct_judge_micro_batch_size: 4            # Micro batch size for Correct Judge inference
-    correct_judge_penalty_value: 0.0             # 当判断为错误时，R_cog 强制设置的值 (ppl_delta 模式下为 0)
-    correct_judge_max_new_tokens: 10  # 限制输出长度为 10 个 token
-    correct_judge_filter_no_samples: true  # 过滤 judges 结果为 "No" 的样本
+    # 判断错误时 reward = 0
+    use_correct_judge: true
+    correct_judge_model_path: /fs/fast/u20240075/hf_home/models/Qwen/Qwen3-4B
+    correct_judge_tensor_parallel_size: 2
+    correct_judge_gpu_memory_utilization: 0.3
+    correct_judge_max_model_len: 8192
+    correct_judge_micro_batch_size: 4
+    correct_judge_max_new_tokens: 10
+    correct_judge_filter_no_samples: true
     # ==================== 数据字段映射配置 ====================
     field_mapping:
       prompt_key: problem             # 问题字段名
@@ -273,20 +264,18 @@ custom_reward_function:
       question_key: question          # 问题文本字段名
       original_cot_key: original_cot  # 原始 CoT 字段名
       ground_truth_key: ground_truth  # 正确答案字段名
-    # ==================== 长度惩罚配置 ====================
-    similarity_threshold: 0.5   # 采用很低的相似度阈值，不许大量copy原文
-    similarity_penalty: 0.0      # 惩罚系数
-    truncation_penalty: 0.0           # 截断惩罚值， 开启overlong_buffer_cfg时候需要关闭该惩罚，不然会叠加
-    format_penalty: 0.2               # 格式错误惩罚值
-    # 过短惩罚阈值
-    too_short_threshold_low: 0.2      # 过短下限阈值 (相比 original)
-    too_short_threshold_high: 0.4     # 过短上限阈值
-    too_short_max_penalty: 0.0        # 最大过短惩罚
-    # 过长惩罚阈值
-    too_long_threshold_low: 4.0      # 过长下限阈值 (相比 original)
-    too_long_threshold_high: 8.0      # 过长上限阈值
-    too_long_max_penalty: 0.0         # 最大过长惩罚
-    penalty_mode: absolute            # 惩罚模式: absolute | relative
+    # ==================== Penalty 配置 (零奖励惩罚) ====================
+    # 所有 penalty 触发时 reward 直接变为 0
+    use_repeat_penalty: false         # 重复惩罚：similarity > threshold 时 reward=0
+    similarity_threshold: 0.5         # 重复惩罚阈值
+    # truncation_penalty 不需要配置，overlong_buffer_cfg 已覆盖（超长 reward=0）
+    format_penalty: 1.0               # > 0 启用格式惩罚
+    # 过短惩罚：ratio < too_short_threshold_high 时 reward=0
+    too_short_max_penalty: 0.0        # > 0 启用 (当前关闭)
+    too_short_threshold_high: 0.4     # 阈值：ratio 低于此值则惩罚
+    # 过长惩罚：ratio > too_long_threshold_low 时 reward=0
+    too_long_max_penalty: 0.0         # > 0 启用 (当前关闭)
+    too_long_threshold_low: 4.0       # 阈值：ratio 高于此值则惩罚
 # ============ Reward Manager Configuration ============
 reward_manager:
   source: importlib

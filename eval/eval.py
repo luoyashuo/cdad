@@ -23,7 +23,7 @@ import requests
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'evalscope'))
 from evalscope.config import TaskConfig
 from evalscope.run import run_task
-from evalscope.constants import EvalBackend
+from evalscope.constants import EvalBackend, JudgeStrategy
 from evalscope.utils.logger import get_logger
 from evalscope.api.model.generate_config import GenerateConfig
 
@@ -339,8 +339,8 @@ class BenchmarkEvaluator:
                 }
                 logger.info(f"[{benchmark_name}] sandbox工作目录设置为: {sandbox_work_dir}")
 
-        # 默认使用规则验证 - 不设置judge_strategy和judge_model_args
-        # 这将强制使用EvalScope默认的规则验证方法
+        # 强制使用规则验证 - 防止 MinervaMath 等 adapter 默认开启 LLM judge
+        task_config.judge_strategy = JudgeStrategy.RULE
 
         # 打印最终的TaskConfig配置摘要
         logger.info(f"[{benchmark_name}] TaskConfig创建完成:")

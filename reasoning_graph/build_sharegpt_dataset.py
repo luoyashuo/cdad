@@ -913,30 +913,30 @@ if __name__ == "__main__":
     exit(main())
 """
 python build_sharegpt_dataset.py \
-    -i /fs/fast/u20240075/hf_home/datasets/Yaseal/CDAD_EXP/omnithought_sft_20k/train.jsonl \
+    -i /fs/fast/u20240075/hf_home/datasets/Yaseal/CDAD_EXP/omnithought_sft_50k/train.jsonl \
     -s rv_optimal \
     --rv_min 0 --rv_max 10 \
     --cd_min 0 --cd_max 10 \
-    -o /fs/fast/u20240075/hf_home/datasets/Yaseal/CDAD_EXP/omnithought_rv_optimal_20k \
+    -o /fs/fast/u20240075/hf_home/datasets/Yaseal/CDAD_EXP/omnithought_rv_optimal_50k \
     --train-ratio 0.99 \
     -r ../LlamaFactory/data/dataset_info.json
     
 python build_sharegpt_dataset.py \
-    -i /fs/fast/u20240075/hf_home/datasets/Yaseal/CDAD_EXP/omnithought_sft_20k/train.jsonl \
+    -i /fs/fast/u20240075/hf_home/datasets/Yaseal/CDAD_EXP/omnithought_sft_50k/train.jsonl \
     -s random \
     --rv_min 0 --rv_max 10 \
     --cd_min 0 --cd_max 10 \
-    -o /fs/fast/u20240075/hf_home/datasets/Yaseal/CDAD_EXP/omnithought_random_20k \
+    -o /fs/fast/u20240075/hf_home/datasets/Yaseal/CDAD_EXP/omnithought_random_50k \
     --train-ratio 0.99 \
     --seed 307 \
     -r ../LlamaFactory/data/dataset_info.json
     
 python build_sharegpt_dataset.py \
-    -i /fs/fast/u20240075/hf_home/datasets/Yaseal/CDAD_EXP/omnithought_rl_20k/train.jsonl \
+    -i /fs/fast/u20240075/hf_home/datasets/Yaseal/CDAD_EXP/omnithought_rl_50k/train.jsonl \
     -s random \
     --rv_min 0 --rv_max 10 \
     --cd_min 0 --cd_max 10 \
-    -o /fs/fast/u20240075/hf_home/datasets/Yaseal/CDAD_EXP/omnithought_rl_20k_sharegpt \
+    -o /fs/fast/u20240075/hf_home/datasets/Yaseal/CDAD_EXP/omnithought_rl_50k_sharegpt \
     --train-ratio 0.99 \
     --seed 307 \
     -r ../LlamaFactory/data/dataset_info.json
