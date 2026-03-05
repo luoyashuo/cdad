@@ -1,0 +1,35 @@
+\section{Related Work}
+\label{sec:app:related_work}
+
+Current research on accelerating the inference process of large language models (LLMs) primarily focuses on three categories of methods: \textit{Quantizing Model}, \textit{Generating Fewer Tokens}, and \textit{Reducing KV Cache}. 
+Quantizing Model includes both parameter quantization~\cite{mlsys24_awq,nips22_8bit} and KV Cache quantization~\citep{icml24_kivi,nips24_kvquant}, while this section will concentrate on the latter two categories. 
+It is important to note that generating long texts and understanding long texts represent distinct application scenarios; 
+therefore, acceleration methods specifically targeting the long-text generation phase (e.g., pre-filling stage acceleration techniques such as AutoCompressor~\citep{emnlp23_autocompressors}, ICAE~\citep{iclr24_icae}, LLMLingua~\citep{emnlp23_llmlingua}, Activation Beacon~\citep{iclr25_activation_beacon}, SnapKV~\citep{nips24_snapkv}, and PyramidKV~\citep{arxiv24_pyramidkv}) are not discussed here. 
+Below is a detailed overview of the last two categories.
+
+\textbf{Generating Fewer Tokens.}
+This category can be further divided into three strategies based on the number and type of tokens used during inference.
+1) \textit{Discrete Token Reduction}. 
+Techniques such as prompt engineering~\citep{arxiv24_tale,arxiv24_break_the_chain,arxiv24_concise_thoughts}, instruction fine-tuning~\citep{nips24_skip_steps,arxiv24_c3ot}, or reinforcement learning~\citep{arxiv25_related_work_rl1,arxiv25_o1_pruner} are used to guide LLMs to use fewer discrete tokens during inference.
+For example, TALE~\citep{arxiv24_tale} prompts LLMs to complete tasks under a predefined token budget. 
+\citeauthor{arxiv25_related_work_rl1} construct specific datasets and employ reinforcement learning reward mechanisms to encourage models to generate concise and accurate outputs, thereby reducing token usage.
+2) \textit{Continuous Token Replacement}.
+These methods~\citep{arxiv24_coconut,arxiv24_ccot} explore using continuous-space tokens instead of traditional discrete vocabulary tokens. 
+A representative example is CoConut~\citep{arxiv24_coconut}, which leverages Curriculum Learning to train LLMs to perform inference with continuous tokens.
+3)\textit{No Token Usage}.
+By internalizing the inference process between model layers, the final answer is generated directly during inference without intermediate tokens~\citep{arxiv24_icot,arxiv23_kd_cot}.
+These three strategies are implemented after model training and do not require additional intervention during inference. 
+Technically, the acceleration effect of these methods increases sequentially, but at the cost of a gradual decline in the generalization performance of LLMs. 
+Additionally, the first strategy does not significantly reduce GPU memory usage.
+
+\textbf{Reducing KV Cache.}
+This category can be divided into two types of strategies: pruning-based KV Cache selection in discrete space and merging-based KV Cache compression in continuous space.
+1) \textit{Pruning-Based Strategies}.
+Specific eviction policies~\citep{nips23_h2o, iclr24_streamingllm,arxiv24_sepllm,arxiv24_scope} are designed to retain important tokens during inference.
+For example, StreamingLLM~\citep{iclr24_streamingllm} considers the initial sink tokens and the most recent tokens as important.
+H2O~\citep{nips23_h2o} focuses on tokens with high historical attention scores.
+SepLLM~\citep{arxiv24_sepllm} emphasizes tokens corresponding to punctuation marks.
+2) \textit{Merging-Based Strategies}.
+Anchor tokens are introduced, and LLMs are trained to compress historically important information into these tokens, thereby achieving KV Cache merging~\citep{acl24_anllm}.
+Both strategies require intervention during inference. 
+The key difference is that the first strategy is training-free but applies the eviction policy for every generated token, while the second strategy is a training-based method and allows the LLM to decide when to apply the eviction policy.

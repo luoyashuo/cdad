@@ -1,0 +1,50 @@
+\subsection{Analysis}
+\label{sec:analysis}
+\begin{figure}[t]
+\centering
+    \includegraphics[width=0.95\columnwidth]{fig/allratio.pdf}
+    \caption{Comparison of ratio adherence across different compression ratio settings. The experimental results are obtained with LLaMA-3.1-8B-Instruct on GSM8K.}
+    \label{fig:allratio}
+\end{figure}
+
+\begin{figure}[t]
+\centering
+    \includegraphics[width=0.95\columnwidth]{fig/token_imp_hist.pdf}
+    \caption{Distribution of token importance for skipped versus retained tokens. The LLM effectively learns to skip low-importance tokens and retain critical ones.}
+    \label{fig:importance_dist}
+\end{figure}
+
+\paragraph{Compression Ratio} 
+In our main results, we focus on compression ratios greater than 0.5. To further investigate the performance of \method at lower compression ratios, we train an additional variant, denoted as \texttt{More Ratio}, with extra compression ratios of 0.3 and 0.4. As shown in Figure~\ref{fig:allratio}, the ratio adherence of models largely degrades at these lower ratios. We attribute this decline to the excessive trimming of reasoning tokens, which likely causes a loss of critical information in the completions, hindering the effective training of LLMs to learn CoT compression. Furthermore, we observe that the overall adherence of \texttt{More Ratio} is not as good as \method with the default settings, which further supports our hypothesis.
+
+\paragraph{Importance Distribution} To validate that the LLM learns to skip less important tokens, we analyzed the distribution of the number of tokens with various token importance. Specifically, we instructed \method with Qwen2.5-14B-Instruct to generate full CoTs ($\gamma=1.0$) and compressed CoTs ($\gamma=0.7$) on the GSM8K test set. CoT Tokens appearing exclusively in full CoTs but not in compressed ones were identified as ``\textit{skipped}'' while those present in compressed CoTs were considered ``\textit{retained}''. As illustrated in Figure~\ref{fig:importance_dist}, the importance distribution of skipped tokens skews towards lower values, whereas retained tokens predominantly exhibit higher importance. This demonstrates that \method effectively enables LLMs to discard less critical CoT tokens during inference.
+
+\begin{figure}[t]
+\centering
+    \includegraphics[width=0.95\columnwidth]{fig/compressor.pdf}
+    \caption{Performance comparison of \method using different token importance metrics, evaluated with LLaMA-3.1-8B-Instruct on GSM8K.}
+    \label{fig:compressor}
+\end{figure}
+
+\paragraph{Importance Metric} 
+Figure~\ref{fig:compressor} presents a comparison of \method across different importance metrics. In addition to the metrics discussed in Section \ref{sec:token-importance}, we include \texttt{GPT-4o}\footnote{We use the \texttt{gpt-4o-2024-08-06} version for experiments.} as a token importance upperbound for comparison. Specifically, for a given CoT trajectory, we prompt \texttt{GPT-4o} to trim redundant tokens according to a specified compression ratio, without adding any additional tokens. As shown in Figure~\ref{fig:compressor}, \method utilizing LLMLingua-2~\cite{pan:2024llmlingua2} outperforms the variant with Selective Context~\cite{li:2023selective}, which aligns with our demonstrations in Section \ref{sec:token-importance}. Additionally, the results of \texttt{GPT-4o} suggest that the capabilities of effective token importance metrics (beyond LLMLingua-2) could be further improved. However, the API costs associated with \texttt{GPT-4o} make it impractical for processing large-scale datasets. In contrast, LLMLingua-2, which includes a BERT-size model, offers a cost-effective and efficient alternative for training \method.
+
+\paragraph{Length Budget} 
+As outlined in Section~\ref{sec:exp_setup}, we adjust the maximum length budget to \texttt{max\_len}$\times\gamma$ when evaluating \method on MATH-500, ensuring a fair comparison of compression ratios. However, this brute-force length truncation inevitably impacts the reasoning performance of LLMs, as LLMs are unable to complete the full generation. In this analysis, we explore whether LLMs can ``\textit{think}'' more effectively using a compressed CoT format. Specifically, we evaluate \method under the same length budget as the original LLM (e.g., 1024 for MATH-500). The experimental results, shown in Figure~\ref{fig:budget}, demonstrate a significant performance improvement of \method under this length budget, compared to those adjusted by compression ratios. Notably, with compression ratios of 0.7, 0.8, and 0.9, \method outperforms the original LLM, yielding an absolute performance increase of 1.3 to 2.6 points. These findings highlight \method's potential to enhance the reasoning capabilities of LLMs within the same length budget.
+
+\begin{figure}[t]
+\centering
+    \includegraphics[width=0.95\columnwidth]{fig/budget.pdf}
+    \caption{Performance comparison of \method with varying maximum length constraints, evaluated with LLaMA-3.1-8B-Instruct on the MATH-500 dataset.}
+    \label{fig:budget}
+\end{figure}
+
+\begin{figure*}[t]
+\centering
+\includegraphics[width=0.95\textwidth]{fig/cases.pdf}
+\caption{Three CoT compression examples from \method. For each sample, we list the question, original CoT outputs from corresponding LLMs, and the compressed CoT by \method. The tokens that appear in both the original CoT and the compressed CoT are highlighted in \sethlcolor{pink}\hl{red}.}
+\label{fig:cases}
+\end{figure*}
+
+\paragraph{Case Study} 
+Figure~\ref{fig:cases} presents several examples of \method, derived from the test sets of GSM8K and MATH-500. These examples clearly illustrate that \method allows LLMs to learn shortcuts between critical reasoning tokens, rather than generating shorter CoTs from scratch. For instance, in the first case, \method facilitates LLaMA-3.1-8B-Instruct to skip semantic connectors such as ``\textit{of}'' and ``\textit{the}'', as well as expressions that contribute minimally to the reasoning, such as the first sentence. Notably, we observe that numeric values and mathematical equations are prioritized for retention in most cases. This finding aligns with recent research~\cite{Ma:2024mathmatters}, which suggests that mathematical expressions may contribute more significantly to reasoning than CoT in natural language. Furthermore, we find that \method does not reduce the number of reasoning steps but instead trims redundant tokens within those steps.

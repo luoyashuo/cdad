@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-从筛选后的数据中分别抽取 SFT 和 RL 数据集
+从筛选后的数据中分别抽取 SFT 和 RL 数据集（支持 RV/CD 范围筛选）
 
 功能：
-1. 从 math 和 code 两个数据源分别随机抽取指定数量的数据
-2. 合并生成 SFT 数据集（math + code）
-3. 保证数据隔离，再从剩余数据中抽取 RL 数据集（math + code）
+1. 根据 RV/CD 范围筛选数据（只保留至少有一个 thought 符合范围要求的数据）
+2. 从符合条件的数据中分别随机抽取指定数量的 SFT 和 RL 数据
+3. 合并生成 SFT 数据集（math + code）
+4. 保证数据隔离，再从剩余数据中抽取 RL 数据集（math + code）
 
 输入文件：
   - /fs/fast/u20240075/hf_home/datasets/Yaseal/CDAD_EXP/omnithought_math_all/train_merge_level1.jsonl
@@ -23,7 +24,7 @@ import argparse
 import os
 import random
 from pathlib import Path
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Tuple, Optional, Union
 from loguru import logger
 from datetime import datetime
 
@@ -33,17 +34,25 @@ DEFAULT_MATH_INPUT = "/fs/fast/u20240075/hf_home/datasets/Yaseal/CDAD_EXP/omnith
 DEFAULT_CODE_INPUT = "/fs/fast/u20240075/hf_home/datasets/Yaseal/CDAD_EXP/omnithought_code_all/train_merge.jsonl"
 DEFAULT_SFT_OUTPUT = "/fs/fast/u20240075/hf_home/datasets/Yaseal/CDAD_EXP/omnithought_sft_50k/train.jsonl"
 DEFAULT_RL_OUTPUT = "/fs/fast/u20240075/hf_home/datasets/Yaseal/CDAD_EXP/omnithought_rl_50k/train.jsonl"
-DEFAULT_SAMPLES_PER_DOMAIN = 25000
+DEFAULT_SFT_SAMPLES = 25000  # SFT 每个领域的数据量
+DEFAULT_RL_SAMPLES = 25000   # RL 每个领域的数据量
 DEFAULT_SEED = 42
+
+# RV/CD 默认范围（参考 build_sharegpt_dataset.py）
+DEFAULT_RV_MIN = 0
+DEFAULT_RV_MAX = 10
+DEFAULT_CD_MIN = 0
+DEFAULT_CD_MAX = 10
+DEFAULT_MIN_THOUGHTS = 1  # 过滤后最小 thought 数量，低于此值的数据会被丢弃
 
 
 def parse_arguments():
     parser = argparse.ArgumentParser(
-        description="从 math 和 code 数据源抽取 SFT 和 RL 数据集",
+        description="从 math 和 code 数据源抽取 SFT 和 RL 数据集（支持 RV/CD 范围筛选）",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 示例:
-  # 使用默认配置（各抽取10k，共20k）
+  # 使用默认配置（各抽取25k，共50k）
   python select_sft_data_and_rl_data.py
 
   # 只生成 SFT 数据集
@@ -52,17 +61,25 @@ def parse_arguments():
   # 只生成 RL 数据集
   python select_sft_data_and_rl_data.py --mode rl
 
-  # 自定义抽取数量
+  # 自定义 SFT 和 RL 的数据量
+  python select_sft_data_and_rl_data.py \
+      --sft-samples-per-domain 10000 \
+      --rl-samples-per-domain 5000
+
+  # 自定义 RV/CD 范围筛选
+  python select_sft_data_and_rl_data.py \
+      --rv-min 3 --rv-max 5 \
+      --cd-min 0 --cd-max 6
+
+  # 自定义输入输出路径
   python select_sft_data_and_rl_data.py \
       --math-input /path/to/math.jsonl \
       --code-input /path/to/code.jsonl \
-      --samples-per-domain 5000 \
-      --seed 123
-
-  # 自定义输出路径
-  python select_sft_data_and_rl_data.py \
       --sft-output /path/to/sft.jsonl \
-      --rl-output /path/to/rl.jsonl
+      --rl-output /path/to/rl.jsonl \
+      --sft-samples-per-domain 10000 \
+      --rl-samples-per-domain 10000 \
+      --seed 123
         """,
     )
     parser.add_argument(
@@ -90,10 +107,47 @@ def parse_arguments():
         help=f"RL 数据集输出路径（默认: {DEFAULT_RL_OUTPUT}）",
     )
     parser.add_argument(
-        "--samples-per-domain",
+        "--sft-samples-per-domain",
         type=int,
-        default=DEFAULT_SAMPLES_PER_DOMAIN,
-        help=f"每个领域抽取的样本数（默认: {DEFAULT_SAMPLES_PER_DOMAIN}）",
+        default=DEFAULT_SFT_SAMPLES,
+        help=f"每个领域抽取的 SFT 样本数（默认: {DEFAULT_SFT_SAMPLES}）",
+    )
+    parser.add_argument(
+        "--rl-samples-per-domain",
+        type=int,
+        default=DEFAULT_RL_SAMPLES,
+        help=f"每个领域抽取的 RL 样本数（默认: {DEFAULT_RL_SAMPLES}）",
+    )
+    # RV/CD 范围筛选参数
+    parser.add_argument(
+        "--rv-min",
+        type=int,
+        default=DEFAULT_RV_MIN,
+        help=f"RV (Reasoning Verbosity) 范围下限（默认: {DEFAULT_RV_MIN}）",
+    )
+    parser.add_argument(
+        "--rv-max",
+        type=int,
+        default=DEFAULT_RV_MAX,
+        help=f"RV (Reasoning Verbosity) 范围上限（默认: {DEFAULT_RV_MAX}）",
+    )
+    parser.add_argument(
+        "--cd-min",
+        type=int,
+        default=DEFAULT_CD_MIN,
+        help=f"CD (Cognitive Difficulty) 范围下限（默认: {DEFAULT_CD_MIN}）",
+    )
+    parser.add_argument(
+        "--cd-max",
+        type=int,
+        default=DEFAULT_CD_MAX,
+        help=f"CD (Cognitive Difficulty) 范围上限（默认: {DEFAULT_CD_MAX}）",
+    )
+    parser.add_argument(
+        "--min-thoughts",
+        type=int,
+        default=DEFAULT_MIN_THOUGHTS,
+        help=f"过滤后每个数据保留的最小 thought 数量，低于此值的数据会被丢弃（默认: {DEFAULT_MIN_THOUGHTS}）",
     )
     parser.add_argument(
         "--seed",
@@ -136,27 +190,194 @@ def load_jsonl(file_path: str) -> List[Dict[str, Any]]:
     return data
 
 
+def get_output_file_path(output_path: str) -> str:
+    """
+    智能处理输出路径：
+    - 如果是文件路径（以.jsonl结尾），直接使用
+    - 如果是文件夹路径，在该目录下创建 train.jsonl
+    
+    Args:
+        output_path: 用户传入的输出路径
+        
+    Returns:
+        实际的文件路径
+    """
+    output_path = output_path.rstrip('/')
+    
+    # 如果以 .jsonl 结尾，认为是文件路径
+    if output_path.endswith('.jsonl'):
+        return output_path
+    
+    # 否则认为是文件夹路径，自动添加 train.jsonl
+    return os.path.join(output_path, 'train.jsonl')
+
+
 def save_jsonl(data: List[Dict[str, Any]], file_path: str):
     """
     保存数据到 JSONL 文件
 
     Args:
         data: 数据列表
-        file_path: 输出文件路径
+        file_path: 输出文件路径（可以是文件夹或文件路径）
     """
+    # 智能处理输出路径
+    actual_file_path = get_output_file_path(file_path)
+    
     # 创建输出目录
-    os.makedirs(os.path.dirname(file_path), exist_ok=True)
+    os.makedirs(os.path.dirname(actual_file_path), exist_ok=True)
 
-    with open(file_path, "w", encoding="utf-8") as f:
+    with open(actual_file_path, "w", encoding="utf-8") as f:
         for item in data:
             f.write(json.dumps(item, ensure_ascii=False) + "\n")
 
-    logger.info(f"✅ 已保存 {len(data)} 条数据到: {file_path}")
+    logger.info(f"✅ 已保存 {len(data)} 条数据到: {actual_file_path}")
+
+
+def get_thought_metrics(thought: Dict[str, Any]) -> Tuple[int, int]:
+    """
+    从单个 thought 中提取 CD、RV 指标（参考 build_sharegpt_dataset.py）
+
+    Returns:
+        (cd, rv) 元组
+    """
+    cd = thought.get("Cognitive_Difficulty", {}).get("level", 0)
+    rv = thought.get("Reasoning_Verbosity", {}).get("level", 0)
+    return cd, rv
+
+
+def has_valid_thought(item: Dict[str, Any], rv_min: int, rv_max: int, cd_min: int, cd_max: int) -> bool:
+    """
+    检查数据项是否至少有一个 thought 符合 RV/CD 范围要求
+
+    Args:
+        item: 数据项（包含 reasoning 字段）
+        rv_min, rv_max: RV 范围
+        cd_min, cd_max: CD 范围
+
+    Returns:
+        是否有至少一个 thought 符合要求
+    """
+    reasoning = item.get("reasoning", [])
+    if not reasoning:
+        return False
+    
+    for thought in reasoning:
+        cd, rv = get_thought_metrics(thought)
+        if rv_min <= rv <= rv_max and cd_min <= cd <= cd_max:
+            return True
+    
+    return False
+
+
+def filter_thoughts_in_item(
+    item: Dict[str, Any],
+    rv_min: int,
+    rv_max: int,
+    cd_min: int,
+    cd_max: int,
+) -> Tuple[Dict[str, Any], int, int]:
+    """
+    过滤单个数据项中的 thoughts，只保留符合 RV/CD 范围的
+
+    Args:
+        item: 数据项（包含 reasoning 字段）
+        rv_min, rv_max: RV 范围
+        cd_min, cd_max: CD 范围
+
+    Returns:
+        (过滤后的数据项, 原始thought数, 保留thought数)
+    """
+    item = item.copy()  # 避免修改原始数据
+    reasoning = item.get("reasoning", [])
+    if not reasoning:
+        return item, 0, 0
+    
+    original_count = len(reasoning)
+    filtered_reasoning = []
+    
+    for thought in reasoning:
+        cd, rv = get_thought_metrics(thought)
+        if rv_min <= rv <= rv_max and cd_min <= cd <= cd_max:
+            filtered_reasoning.append(thought)
+    
+    item["reasoning"] = filtered_reasoning
+    return item, original_count, len(filtered_reasoning)
+
+
+def filter_data_by_rv_cd(
+    data: List[Dict[str, Any]],
+    rv_min: int,
+    rv_max: int,
+    cd_min: int,
+    cd_max: int,
+    domain_name: str,
+    filter_thoughts: bool = True,
+    min_thoughts: int = 1,
+) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    """
+    根据 RV/CD 范围筛选数据
+
+    Args:
+        data: 原始数据
+        rv_min, rv_max: RV 范围
+        cd_min, cd_max: CD 范围
+        domain_name: 领域名称（用于日志）
+        filter_thoughts: 是否过滤 thought 本身（True=只保留符合要求的thought，False=只检查是否有符合条件的thought）
+        min_thoughts: 过滤后每个数据保留的最小 thought 数量
+
+    Returns:
+        (筛选后的数据列表, 统计信息字典)
+    """
+    filtered_data = []
+    total_original_thoughts = 0
+    total_retained_thoughts = 0
+    items_with_thoughts = 0
+    
+    for item in data:
+        if filter_thoughts:
+            # 过滤 thought 本身
+            filtered_item, orig_count, retained_count = filter_thoughts_in_item(
+                item, rv_min, rv_max, cd_min, cd_max
+            )
+            total_original_thoughts += orig_count
+            total_retained_thoughts += retained_count
+            
+            # 只保留至少有 min_thoughts 个 thought 符合条件的数据
+            if retained_count >= min_thoughts:
+                filtered_data.append(filtered_item)
+                items_with_thoughts += 1
+        else:
+            # 只检查是否有符合条件的 thought，不删除 thought
+            if has_valid_thought(item, rv_min, rv_max, cd_min, cd_max):
+                filtered_data.append(item)
+    
+    # 计算统计信息
+    stats = {
+        "original_items": len(data),
+        "filtered_items": len(filtered_data),
+        "items_with_valid_thoughts": items_with_thoughts if filter_thoughts else len(filtered_data),
+        "total_original_thoughts": total_original_thoughts if filter_thoughts else None,
+        "total_retained_thoughts": total_retained_thoughts if filter_thoughts else None,
+        "avg_thoughts_per_item_before": total_original_thoughts / len(data) if filter_thoughts and data else None,
+        "avg_thoughts_per_item_after": total_retained_thoughts / len(filtered_data) if filter_thoughts and filtered_data else None,
+        "thought_retention_rate": total_retained_thoughts / total_original_thoughts * 100 if filter_thoughts and total_original_thoughts > 0 else None,
+    }
+    
+    if filter_thoughts:
+        logger.info(f"  {domain_name}: 原始 {len(data)} 条数据，筛选后 {len(filtered_data)} 条数据")
+        logger.info(f"    Thought统计: 原始 {total_original_thoughts} 个 → 保留 {total_retained_thoughts} 个")
+        logger.info(f"    平均thought数: {stats['avg_thoughts_per_item_before']:.2f} → {stats['avg_thoughts_per_item_after']:.2f}")
+        logger.info(f"    Thought保留率: {stats['thought_retention_rate']:.1f}%")
+    else:
+        logger.info(f"  {domain_name}: 原始 {len(data)} 条，筛选后 {len(filtered_data)} 条符合 RV∈[{rv_min},{rv_max}] CD∈[{cd_min},{cd_max}]")
+    
+    return filtered_data, stats
 
 
 def split_data_for_sft_rl(
     data: List[Dict[str, Any]],
-    samples_per_domain: int,
+    sft_samples: int,
+    rl_samples: int,
     seed: int,
     domain_name: str,
     mode: str = "both",
@@ -166,8 +387,9 @@ def split_data_for_sft_rl(
     （SFT 和 RL 之间不会有相同的 question）
 
     Args:
-        data: 原始数据
-        samples_per_domain: 每个领域需要抽取的样本数（SFT 和 RL 各这么多）
+        data: 原始数据（已经过 RV/CD 筛选）
+        sft_samples: 需要抽取的 SFT 样本数
+        rl_samples: 需要抽取的 RL 样本数
         seed: 随机种子
         domain_name: 领域名称（用于日志）
         mode: 运行模式: "sft"=只取SFT, "rl"=只取RL, "both"=两者都取
@@ -187,11 +409,11 @@ def split_data_for_sft_rl(
     
     # 根据模式计算需要的 question 数量
     if mode == "sft":
-        total_needed = samples_per_domain
+        total_needed = sft_samples
     elif mode == "rl":
-        total_needed = samples_per_domain
+        total_needed = rl_samples
     else:  # both
-        total_needed = samples_per_domain * 2
+        total_needed = sft_samples + rl_samples
 
     if len(unique_questions) < total_needed:
         logger.warning(
@@ -199,7 +421,10 @@ def split_data_for_sft_rl(
         )
         if mode == "both":
             # 按比例分配
-            sft_q_size = len(unique_questions) // 2
+            total = len(unique_questions)
+            sft_q_size = min(sft_samples, int(total * sft_samples / total_needed))
+            sft_q_size = max(0, min(sft_q_size, total))
+            rl_q_size = total - sft_q_size
             sft_questions = unique_questions[:sft_q_size]
             rl_questions = unique_questions[sft_q_size:]
         elif mode == "sft":
@@ -215,15 +440,15 @@ def split_data_for_sft_rl(
         random.shuffle(shuffled_questions)
         
         if mode == "both":
-            # 分割 question：前一半给 SFT，后一半给 RL
-            sft_questions = shuffled_questions[:samples_per_domain]
-            rl_questions = shuffled_questions[samples_per_domain:total_needed]
+            # 分割 question：前一部分给 SFT，后一部分给 RL
+            sft_questions = shuffled_questions[:sft_samples]
+            rl_questions = shuffled_questions[sft_samples:total_needed]
         elif mode == "sft":
-            sft_questions = shuffled_questions[:samples_per_domain]
+            sft_questions = shuffled_questions[:sft_samples]
             rl_questions = []
         else:  # rl
             sft_questions = []
-            rl_questions = shuffled_questions[:samples_per_domain]
+            rl_questions = shuffled_questions[:rl_samples]
 
     # 根据 question 获取对应的所有数据（保留完整数据格式）
     sft_data = []
@@ -329,7 +554,11 @@ def main():
         logger.info(f"📁 SFT 输出: {args.sft_output}")
     if args.mode in ("rl", "both"):
         logger.info(f"📁 RL 输出: {args.rl_output}")
-    logger.info(f"📊 每领域抽取: {args.samples_per_domain} 条")
+    logger.info(f"📊 SFT 每领域抽取: {args.sft_samples_per_domain} 条")
+    logger.info(f"📊 RL 每领域抽取: {args.rl_samples_per_domain} 条")
+    logger.info(f"📊 RV 范围: [{args.rv_min}, {args.rv_max}]")
+    logger.info(f"📊 CD 范围: [{args.cd_min}, {args.cd_max}]")
+    logger.info(f"📊 过滤后最小 thought 数: {args.min_thoughts}")
     logger.info(f"🎲 随机种子: {args.seed}")
     logger.info(f"🔧 运行模式: {args.mode}")
     logger.info("=" * 70)
@@ -356,29 +585,49 @@ def main():
     code_data = load_jsonl(args.code_input)
     logger.info(f"  ✅ 加载完成: {len(code_data)} 条")
 
-    # 步骤 2: 分割数据
+    # 步骤 2: 根据 RV/CD 范围筛选数据
+    logger.info("\n" + "-" * 60)
+    logger.info("步骤 2: 根据 RV/CD 范围筛选数据...")
+    logger.info("-" * 60)
+    logger.info(f"筛选条件: RV∈[{args.rv_min},{args.rv_max}], CD∈[{args.cd_min},{args.cd_max}]")
+    logger.info("（只保留至少有一个 thought 符合范围要求的数据）")
+
+    math_filtered, math_stats = filter_data_by_rv_cd(
+        math_data, args.rv_min, args.rv_max, args.cd_min, args.cd_max, "Math", filter_thoughts=True, min_thoughts=args.min_thoughts
+    )
+    code_filtered, code_stats = filter_data_by_rv_cd(
+        code_data, args.rv_min, args.rv_max, args.cd_min, args.cd_max, "Code", filter_thoughts=True, min_thoughts=args.min_thoughts
+    )
+
+    if not math_filtered and not code_filtered:
+        logger.error("没有符合 RV/CD 范围要求的数据！")
+        return 1
+
+    # 步骤 3: 分割数据
     logger.info("\n" + "-" * 60)
     if args.mode == "both":
-        logger.info("步骤 2: 分割 SFT 和 RL 数据（保证数据隔离）...")
+        logger.info("步骤 3: 分割 SFT 和 RL 数据（保证数据隔离）...")
     elif args.mode == "sft":
-        logger.info("步骤 2: 抽取 SFT 数据...")
+        logger.info("步骤 3: 抽取 SFT 数据...")
     else:  # rl
-        logger.info("步骤 2: 抽取 RL 数据...")
+        logger.info("步骤 3: 抽取 RL 数据...")
     logger.info("-" * 60)
 
     math_sft, math_rl = split_data_for_sft_rl(
-        math_data, args.samples_per_domain, args.seed, "Math", mode=args.mode
+        math_filtered, args.sft_samples_per_domain, args.rl_samples_per_domain, 
+        args.seed, "Math", mode=args.mode
     )
 
     # Code 使用不同的种子，确保与 Math 的随机性不同
     code_seed = args.seed + 1000
     code_sft, code_rl = split_data_for_sft_rl(
-        code_data, args.samples_per_domain, code_seed, "Code", mode=args.mode
+        code_filtered, args.sft_samples_per_domain, args.rl_samples_per_domain, 
+        code_seed, "Code", mode=args.mode
     )
 
-    # 步骤 3: 合并数据
+    # 步骤 4: 合并数据
     logger.info("\n" + "-" * 60)
-    logger.info("步骤 3: 合并数据...")
+    logger.info("步骤 4: 合并数据...")
     logger.info("-" * 60)
 
     sft_data = math_sft + code_sft
@@ -396,19 +645,19 @@ def main():
     if rl_data:
         logger.info(f"  RL 数据集: {len(rl_data)} 条 (Math {len(math_rl)} + Code {len(code_rl)})")
 
-    # 步骤 4: 验证数据隔离（仅在 both 模式下）
+    # 步骤 5: 验证数据隔离（仅在 both 模式下）
     if args.mode == "both":
         logger.info("\n" + "-" * 60)
-        logger.info("步骤 4: 验证数据隔离...")
+        logger.info("步骤 5: 验证数据隔离...")
         logger.info("-" * 60)
 
         if not verify_data_isolation(math_sft, math_rl, code_sft, code_rl):
             logger.error("数据隔离验证失败！")
             return 1
 
-    # 步骤 5: 保存数据
+    # 步骤 6: 保存数据
     logger.info("\n" + "-" * 60)
-    logger.info("步骤 5: 保存数据...")
+    logger.info("步骤 6: 保存数据...")
     logger.info("-" * 60)
 
     if sft_data:
@@ -416,16 +665,26 @@ def main():
     if rl_data:
         save_jsonl(rl_data, args.rl_output)
 
-    # 步骤 6: 打印统计信息
+    # 步骤 7: 打印统计信息
     logger.info("\n" + "-" * 60)
-    logger.info("步骤 6: 统计信息...")
+    logger.info("步骤 7: 统计信息...")
     logger.info("-" * 60)
 
+    logger.info("原始数据统计:")
+    print_statistics(math_data, "Math 原始")
+    print_statistics(code_data, "Code 原始")
+    
+    logger.info("\n筛选后数据统计 (RV/CD 筛选):")
+    print_statistics(math_filtered, "Math 筛选后")
+    print_statistics(code_filtered, "Code 筛选后")
+
     if sft_data:
+        logger.info("\nSFT 数据集统计:")
         print_statistics(math_sft, "Math SFT")
         print_statistics(code_sft, "Code SFT")
         print_statistics(sft_data, "合并 SFT")
     if rl_data:
+        logger.info("\nRL 数据集统计:")
         print_statistics(math_rl, "Math RL")
         print_statistics(code_rl, "Code RL")
         print_statistics(rl_data, "合并 RL")
@@ -438,13 +697,22 @@ def main():
             "code_input": args.code_input,
             "sft_output": args.sft_output,
             "rl_output": args.rl_output,
-            "samples_per_domain": args.samples_per_domain,
+            "sft_samples_per_domain": args.sft_samples_per_domain,
+            "rl_samples_per_domain": args.rl_samples_per_domain,
+            "rv_min": args.rv_min,
+            "rv_max": args.rv_max,
+            "cd_min": args.cd_min,
+            "cd_max": args.cd_max,
             "seed": args.seed,
             "mode": args.mode,
         },
         "statistics": {
             "math_total": len(math_data),
             "code_total": len(code_data),
+            "math_filtered": len(math_filtered),
+            "code_filtered": len(code_filtered),
+            "math_stats": math_stats,
+            "code_stats": code_stats,
             "math_sft": len(math_sft),
             "math_rl": len(math_rl),
             "code_sft": len(code_sft),
@@ -456,14 +724,16 @@ def main():
 
     # 保存日志到 SFT 输出目录
     if sft_data:
-        sft_log_path = Path(args.sft_output).parent / "selection_log.json"
+        sft_output_dir = Path(get_output_file_path(args.sft_output)).parent
+        sft_log_path = sft_output_dir / "selection_log.json"
         with open(sft_log_path, "w", encoding="utf-8") as f:
             json.dump(log_data, f, indent=2, ensure_ascii=False)
         logger.info(f"\n日志已保存: {sft_log_path}")
 
     # 保存日志到 RL 输出目录
     if rl_data:
-        rl_log_path = Path(args.rl_output).parent / "selection_log.json"
+        rl_output_dir = Path(get_output_file_path(args.rl_output)).parent
+        rl_log_path = rl_output_dir / "selection_log.json"
         with open(rl_log_path, "w", encoding="utf-8") as f:
             json.dump(log_data, f, indent=2, ensure_ascii=False)
         logger.info(f"日志已保存: {rl_log_path}")
@@ -472,7 +742,11 @@ def main():
     logger.info("\n" + "=" * 70)
     logger.info("  处理完成！")
     logger.info("=" * 70)
+    logger.info(f"📊 筛选条件: RV∈[{args.rv_min},{args.rv_max}], CD∈[{args.cd_min},{args.cd_max}]")
+    logger.info(f"   - Math: {len(math_filtered)}/{len(math_data)} 条符合 ({len(math_filtered)/len(math_data)*100:.1f}%)")
+    logger.info(f"   - Code: {len(code_filtered)}/{len(code_data)} 条符合 ({len(code_filtered)/len(code_data)*100:.1f}%)")
     if sft_data:
+        logger.info("")
         logger.info(f"✅ SFT 数据集: {args.sft_output}")
         logger.info(f"   - 总计: {len(sft_data)} 条")
         logger.info(f"   - Math: {len(math_sft)} 条")
@@ -496,29 +770,20 @@ if __name__ == "__main__":
 
 
 """
-使用示例:
-
-# 默认配置（同时生成 SFT 和 RL，各抽取 10k，共 20k）
-python reasoning_graph/select_sft_data_and_rl_data.py
-
-# 只生成 SFT 数据集
-python reasoning_graph/select_sft_data_and_rl_data.py --mode sft
-
-# 只生成 RL 数据集
-python reasoning_graph/select_sft_data_and_rl_data.py --mode rl
-
-# 自定义配置
+# 自定义 RV/CD 范围（例如：RV 3-5，CD 0-6）
+# 示例1：传入文件夹路径（推荐，会自动在目录下创建 train.jsonl）
 python reasoning_graph/select_sft_data_and_rl_data.py \
-    --math-input /path/to/math.jsonl \
-    --code-input /path/to/code.jsonl \
-    --sft-output /path/to/sft.jsonl \
-    --rl-output /path/to/rl.jsonl \
-    --samples-per-domain 10000 \
-    --seed 42
+    --rv-min 3 --rv-max 5 \
+    --cd-min 0 --cd-max 6 \
+    --min-thoughts 2 \
+    --sft-samples-per-domain 25000 \
+    --rl-samples-per-domain 5000 \
+    --sft-output /fs/fast/u20240075/hf_home/datasets/Yaseal/CDAD_EXP/omnithought_sft_50k/train.jsonl \
+    --rl-output /fs/fast/u20240075/hf_home/datasets/Yaseal/CDAD_EXP/omnithought_rl_10k/train.jsonl
 
-# 只生成 SFT 并指定输出路径
+# 示例2：传入具体文件路径（兼容旧用法）
 python reasoning_graph/select_sft_data_and_rl_data.py \
-    --mode sft \
-    --sft-output /path/to/sft.jsonl \
-    --samples-per-domain 10000
+    --sft-output /fs/fast/u20240075/hf_home/datasets/Yaseal/CDAD_EXP/omnithought_sft_50k/train.jsonl \
+    --rl-output /fs/fast/u20240075/hf_home/datasets/Yaseal/CDAD_EXP/omnithought_rl_10k/train.jsonl
+
 """

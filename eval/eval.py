@@ -244,16 +244,10 @@ class BenchmarkEvaluator:
         logger.info(f"开始创建 benchmark {benchmark_name} 的 TaskConfig")
         logger.info(f"benchmark 配置内容: {benchmark_config}")
 
-        # 检查是否使用LLM Judge
-        if 'judge_strategy' in benchmark_config and 'llm' in str(benchmark_config['judge_strategy']).lower():
-            logger.warning(f"检测到 {benchmark_name} 配置使用LLM Judge: {benchmark_config['judge_strategy']}")
-            logger.warning("根据要求，拒绝使用LLM Judge进行验证")
-            raise ValueError(f"benchmark {benchmark_name} 配置使用了LLM Judge，请改用规则验证或移除该benchmark")
-
-        if 'judge_model_args' in benchmark_config:
-            logger.warning(f"检测到 {benchmark_name} 配置了judge_model_args，可能使用LLM Judge")
-            logger.warning("根据要求，拒绝使用LLM Judge进行验证")
-            raise ValueError(f"benchmark {benchmark_name} 配置了LLM Judge参数，请移除这些配置或改用规则验证")
+        # 读取 benchmark 级别的 judge_strategy（默认 rule）
+        benchmark_judge_strategy = benchmark_config.get('judge_strategy', JudgeStrategy.RULE)
+        use_llm = 'llm' in str(benchmark_judge_strategy).lower()
+        logger.info(f"[{benchmark_name}] judge_strategy: {benchmark_judge_strategy}")
 
         task_config = TaskConfig()
 
@@ -339,8 +333,28 @@ class BenchmarkEvaluator:
                 }
                 logger.info(f"[{benchmark_name}] sandbox工作目录设置为: {sandbox_work_dir}")
 
-        # 强制使用规则验证 - 防止 MinervaMath 等 adapter 默认开启 LLM judge
-        task_config.judge_strategy = JudgeStrategy.RULE
+        # 设置 judge_strategy
+        task_config.judge_strategy = benchmark_judge_strategy
+
+        # 若使用 LLM judge，从全局配置读取 API_KEY / BASE_URL 并构建 judge_model_args
+        if use_llm:
+            api_key = self.config.get('API_KEY', '')
+            base_url = self.config.get('BASE_URL', '').replace('/chat/completions', '').rstrip('/')
+            judge_model = benchmark_config.get('judge_model', 'Qwen/Qwen3-8B')
+            if not api_key or not base_url:
+                raise ValueError(
+                    f"[{benchmark_name}] 使用 LLM judge 需要在配置文件顶层设置 API_KEY 和 BASE_URL"
+                )
+            task_config.judge_model_args = {
+                'api_key': api_key,
+                'api_url': base_url,
+                'model_id': judge_model,
+                'generation_config': {'temperature': 0.0, 'max_tokens': 1024},
+            }
+            # 限制 LLM judge 并发，避免触发 TPM/RPM 限制，默认串行 (1)
+            judge_parallel = benchmark_config.get('judge_parallel', 1)
+            task_config.judge_worker_num = judge_parallel
+            logger.info(f"[{benchmark_name}] LLM judge 已配置: model={judge_model}, url={base_url}, judge_parallel={judge_parallel}")
 
         # 打印最终的TaskConfig配置摘要
         logger.info(f"[{benchmark_name}] TaskConfig创建完成:")
@@ -403,22 +417,20 @@ class BenchmarkEvaluator:
 
             for benchmark_name in self.config['benchmarks'].keys():
                 try:
-                    # 尝试创建任务配置来检查是否有LLM Judge
                     self._create_task_config(benchmark_name)
                     valid_benchmarks.append(benchmark_name)
                 except ValueError as e:
-                    # 捕获LLM Judge配置错误
                     logger.warning(f"跳过 benchmark {benchmark_name}: {str(e)}")
                     skipped_benchmarks.append(benchmark_name)
                     continue
 
             if not valid_benchmarks:
-                logger.error("没有有效的benchmark可以评估，所有benchmark都配置了LLM Judge")
+                logger.error("没有有效的benchmark可以评估")
                 return
 
             logger.info(f"有效benchmarks: {valid_benchmarks}")
             if skipped_benchmarks:
-                logger.info(f"已跳过的benchmarks (使用LLM Judge): {skipped_benchmarks}")
+                logger.info(f"已跳过的benchmarks: {skipped_benchmarks}")
 
             total_benchmarks = len(valid_benchmarks)
 

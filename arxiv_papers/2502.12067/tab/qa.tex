@@ -1,0 +1,29 @@
+\begin{table}[t]
+\centering
+\small
+\setlength{\tabcolsep}{1.4mm}
+%\resizebox{\linewidth}{!}{
+\begin{tabular}{@{}lcrrc@{}}
+\toprule
+\textbf{Methods} &\textbf{Ratio} &Accuracy &Tokens &\textit{Act}Ratio \\ \midrule
+\multicolumn{5}{c}{\textit{Qwen2.5-7B-Instruct}} \\ \midrule
+\texttt{Original}  & - & 80.3\cred{(0.0 \downarrow)} & 272.13 &- \\ \midrule
+\multirow{6}{*}{\method} & 1.0 & 80.4\cred{(0.1 \uparrow)} &273.64 & 1.00  \\
+&0.9 & 80.9\cred{(0.6 \uparrow)} & 245.70 & 0.90\\
+&0.8 & 81.1\cred{(0.8 \uparrow)} & 218.73 & 0.80\\
+&0.7 & 82.0\cred{(1.7 \uparrow)} & 188.78 & 0.69\\
+&0.6 & 81.5\cred{(1.2 \uparrow)} & 153.17 & 0.56\\
+&0.5 & 80.6\cred{(0.3 \uparrow)} & 128.43 & 0.47 \\\midrule
+\multicolumn{5}{c}{\textit{Qwen2.5-14B-Instruct}} \\ \midrule
+\texttt{Original}  & - & 82.1\cred{(0.0 \downarrow)} &247.81 &- \\ \midrule
+\multirow{6}{*}{\method} & 1.0 & 83.8\cred{(1.7 \uparrow)} &247.34 & 1.00  \\
+&0.9 & 82.9\cred{(0.8 \uparrow)} &221.75 & 0.95\\
+&0.8 & 82.3\cred{(0.2 \uparrow)} &199.07 & 0.82\\
+&0.7 & 82.1\cred{(0.0 \downarrow)} &172.44 & 0.71\\
+&0.6 & 82.0\cred{(0.1 \downarrow)} &146.68 & 0.59\\
+&0.5 & 82.1\cred{(0.0 \downarrow)} &121.03 & 0.49 \\
+\bottomrule
+\end{tabular}%}
+\caption{Experimental results on CommonsenseQA with Qwen2.5-Instruct models. We report accuracy, average CoT token count, and actual compression ratio (\textit{Act}Ratio) for comparison.}
+\label{tab:qa}
+\end{table}

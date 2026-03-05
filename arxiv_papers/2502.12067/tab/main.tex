@@ -1,0 +1,29 @@
+\begin{table*}[t]
+\centering
+\small
+\setlength{\tabcolsep}{1.4mm}
+\begin{tabular}{@{}lcrrrcrrrc@{}}
+\toprule
+\multirow{2}{*}{\textbf{Methods}} &\multirow{2}{*}{$\textbf{Ratio}$} & \multicolumn{4}{c}{\textbf{GSM8K}}  & \multicolumn{4}{c}{\textbf{MATH-500}} \\ \cmidrule(lr){3-6} \cmidrule(lr){7-10}
+&  &Accuracy $\uparrow$ &Tokens $\downarrow$ &Latency (s) $\downarrow$ &\textit{Act}Ratio   &Accuracy $\uparrow$ &Tokens $\downarrow$ &Latency (s) $\downarrow$ &\textit{Act}Ratio  \\ \midrule
+\texttt{Original}  & - & 86.2\cred{(0.0 \downarrow)} &213.17 &5.96\cred{1.0\times} &-  & 48.6\cred{(0.0 \downarrow)} & 502.60  &16.37\cred{1.0\times} &- \\ \midrule
+\texttt{BeConcise}  & - & 82.9\cred{(3.3 \downarrow)} &161.32 &4.73\cred{1.3\times} &0.76  & 47.4\cred{(1.2 \downarrow)} & 471.34  &15.54\cred{1.1\times} &0.94 \\
+\texttt{OnlyNumbers}  & - & 83.2\cred{(3.0 \downarrow)} &165.27 &4.95\cred{1.2\times} &0.78  & 46.4\cred{(2.2 \downarrow)} & 487.00  &15.93\cred{1.0\times} &0.97 \\
+\texttt{AbbreWords}  & - & 83.7\cred{(2.5 \downarrow)} &170.33 &5.15\cred{1.2\times} &0.80  & 47.6\cred{(1.0 \downarrow)} & 489.07  &15.94\cred{1.0\times} &0.97 \\ \midrule
+\multirow{3}{*}{\texttt{LC-Prompt}}  &0.9 & 84.1\cred{(2.1 \downarrow)} &226.37 &6.12\cred{1.0\times} & 1.06  & 48.6\cred{(0.0 \downarrow)} &468.04 &15.39\cred{1.1\times} & 0.93  \\
+&0.7 & 84.9\cred{(1.3 \downarrow)} &209.39 &5.51\cred{1.1\times} & 0.98  & 48.4\cred{(0.4 \downarrow)} &472.13 &15.55\cred{1.1\times} & 0.94  \\
+&0.5 & 83.7\cred{(2.5 \downarrow)} &188.82 &4.97\cred{1.2\times} & 0.89  & 47.8\cred{(0.4 \downarrow)} &471.11 &15.48\cred{1.1\times} & 0.94  \\ \midrule
+\multirow{3}{*}{\texttt{Truncation}}  &0.9 & 70.2\cred{(26.0 \downarrow)} &202.06 &5.29\cred{1.1\times} & 0.95  & 47.8\cred{(0.8 \downarrow)} &440.33 &14.56\cred{1.1\times} & 0.88  \\
+&0.7 & 25.9\cred{(60.3 \downarrow)} &149.99 &3.97\cred{1.5\times} & 0.70  & 45.0\cred{(3.6 \downarrow)} &386.89 &12.85\cred{1.3\times} & 0.77  \\
+&0.5 & 7.0\cred{(79.2 \downarrow)} &103.69 &2.95\cred{2.0\times} & 0.49  & 27.4\cred{(21.2 \downarrow)} &283.70 &9.40\cred{1.7\times} & 0.56  \\ \midrule
+\multirow{6}{*}{\method}  &1.0 & 86.7\cred{(0.5 \uparrow)} &213.60 &5.98\cred{1.0\times} & 1.00  & 48.2\cred{(0.4 \downarrow)} &504.79 &16.43\cred{1.0\times} & 1.00  \\
+&0.9 & 86.1\cred{(0.1 \downarrow)} &198.01 &5.65\cred{1.1\times} & 0.93  & 47.8\cred{(0.8 \downarrow)} & 448.31  & 15.26\cred{1.1\times} & 0.89 \\
+&0.8 & 84.3\cred{(1.9 \downarrow)} &169.89 &5.13\cred{1.2\times} & 0.80  & 47.3\cred{(1.3 \downarrow)} & 398.94  & 13.39\cred{1.2\times} & 0.79 \\
+&0.7 & 82.5\cred{(3.7 \downarrow)} &150.12 &4.36\cred{1.4\times} & 0.70  & 46.7\cred{(1.9 \downarrow)} & 349.13  & 11.55\cred{1.4\times} & 0.69 \\
+&0.6 & 81.1\cred{(5.1 \downarrow)} &129.38 &3.81\cred{1.6\times} & 0.61  & 42.0\cred{(6.6 \downarrow)} & 318.36  & 10.58\cred{1.6\times} & 0.63 \\
+&0.5 & 78.2\cred{(8.0 \downarrow)} &113.05 &3.40\cred{1.8\times} & 0.53  & 40.2\cred{(8.4 \downarrow)} & 292.17  & 9.67\cred{1.7\times} & 0.58 \\
+\bottomrule
+\end{tabular}
+\caption{Experimental results of \method on LLaMA-3.1-8B-Instruct. We report accuracy, average CoT token count (Tokens), average latency per sample, and actual compression ratio (\textit{Act}Ratio) for comparison.}
+\label{tab:main}
+\end{table*}

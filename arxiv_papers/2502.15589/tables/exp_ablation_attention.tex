@@ -1,0 +1,19 @@
+\begin{table}[]
+\centering
+\small
+\scalebox{0.8}{
+\begin{tabular}{lccccc}
+\toprule
+ & \multicolumn{1}{l}{GSM8K} & \multicolumn{1}{l}{MMLU} & \multicolumn{1}{l}{GPQA} & \multicolumn{1}{l}{BBH} & \multicolumn{1}{l}{AVG} \\ \cmidrule{1-6}
+AnLLM & \underline{78.39} & 54.63 & 19.70 & 54.95 & 51.92 \\
+Ours (|C|=1, T)  & 78.32 & \underline{58.23} & \underline{20.71} & \underline{55.35} & \underline{53.15} \\
+Ours (|C|=1, F) & \textbf{80.21} & \textbf{58.23} & \textbf{22.22} & \textbf{62.02} & \textbf{55.67} \\ \bottomrule
+\end{tabular}
+}
+\caption{
+Ablation results on the Qwen, reporting accuracy on four datasets. 
+``T'' denotes the use of AnLLM's attention mask mechanism, while ``F'' indicates the use of \ours's attention mask mechanism.
+}
+\label{table:exp:ablation:attention}
+\vspace{-1mm}
+\end{table}

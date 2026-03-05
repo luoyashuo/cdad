@@ -1,0 +1,70 @@
+
+\begin{table*}[!t]
+\centering
+\small
+\scalebox{0.7}{
+\begin{tabular}{l *{4}{p{0.60cm}} *{1}{|p{0.60cm}} *{3}{p{0.60cm}} *{1}{|p{0.60cm}} *{3}{p{0.60cm}} *{1}{|p{0.60cm}} *{3}{p{0.60cm}} *{1}{|p{0.60cm}} *{3}{p{0.60cm}}}
+% \begin{tabular}{l *{20}{p{0.60cm}}}
+\toprule
+\multirow{4}{*}{\textbf{Method}} & \multicolumn{4}{c}{\textbf{GSM8K}} & \multicolumn{4}{c}{\textbf{MMLU}} & \multicolumn{4}{c}{\textbf{GPQA}} & \multicolumn{4}{c}{\textbf{BBH}} & \multicolumn{4}{c}{\textbf{AVG.}} \\ \cmidrule(lr){2-5} \cmidrule(lr){6-9} \cmidrule(lr){10-13} \cmidrule(lr){14-17} \cmidrule(lr){18-21}
+ & Acc~$\uparrow$ & Time~$\downarrow$ & Peak~$\downarrow$ & Dep~$\downarrow$ & Acc~$\uparrow$ & Time~$\downarrow$ & Peak~$\downarrow$ & Dep~$\downarrow$ & Acc~$\uparrow$ & Time~$\downarrow$ & Peak~$\downarrow$ & Dep~$\downarrow$ & Acc~$\uparrow$ & Time~$\downarrow$ & Peak~$\downarrow$ & Dep~$\downarrow$ & Acc~$\uparrow$ & Time~$\downarrow$ & Peak~$\downarrow$ & Dep~$\downarrow$ \\ \cmidrule{1-21}
+\rowcolor{mygray} \multicolumn{21}{c}{\textit{Qwen2.5-7B Series}} \\ \cmidrule{1-21}
+% 1 5 9 13 
+% GSM8K MMLU GPQA BBH
+% ACC Time Peak Dep.
+CoT & {86.12} & {1.66} & {513} & {0.1M} & {66.50} & {1.77} & {649} & {0.2M} & {26.76} & {0.60} & {968} & {0.5M} & {65.45} & {0.68} & {570} & {0.1M} & {61.21} & {1.18} & {675} & {0.2M} \\
+Distill-R1 & {81.88} & {5.60} & {844} & {1.1M} & {51.70} & {14.31} & {2483} & {7.5M} & {24.75} & {8.01} & {6718} & {31M} & {57.78} & {5.53} & {1967} & {6.0M} & {54.03} & {8.36} & {3003} & {11.3M} \\ \cmidrule{1-21}
+Vanilla & {90.90} & {11.83} & {2086} & {3.9M} & {59.98} & {20.61} & {3417} & {10M} & {30.81} & {10.76} & {8055} & {39M} & {69.90} & {11.50} & {3786} & {13M} & {62.90} & {13.68} & {4336} & {16.6M} \\ 
+\rowcolor{myblue}
+~~+~H2O & \underline{89.92} & {22.19} & \textbf{640} & \underline{1.2M} & \underline{59.69} & {29.02} & {1024} & {3.2M} & {24.75} & {15.61} & \underline{1200} & \underline{9.8M} & \underline{70.10} & {15.61} & \textbf{1024} & \underline{3.5M} & \underline{61.12} & {20.61} & \textbf{972} & \underline{4.4M} \\
+\rowcolor{myblue}
+~~+~SepLLM & {30.40} & {53.52} & {1024} & {6.9M} & {10.81} & {53.45} & {1024} & {9.0M} & {0.00} & {11.65} & \textbf{1024} & {10M} & {8.08} & {26.64} & {1024} & {9.4M} & {12.32} & {36.32} & \underline{1024} & {8.9M} \\
+\rowcolor{myblue}
+AnLLM & {78.39} & {15.26} & {789} & {1.6M} & {54.63} & {14.13} & \underline{875} & \underline{2.0M} & {19.70} & {9.14} & {3401} & {11M} & {54.95} & {10.04} & {1303} & {3.8M} & {51.92} & {12.14} & {1592} & {4.6M} \\ \cmidrule{1-21}
+% \rowcolor{myblue} 
+% \textit{Sentence-level} & {} & {} & {} & {} & {} & {} & {} & {} & {} & {} & {} & {} & {} & {} & {} & {} & {} & {} & {} & {} \\
+\rowcolor{myblue} 
+Ours~(\textit{tho.}) & \textbf{90.14} & \textbf{11.46} & \underline{676} & \textbf{1.0M} & \textbf{60.47} & \textbf{13.09} & {944} & \textbf{1.9M} & \textbf{30.30} & \underline{8.41} & {2385} & \textbf{9.3M} & \textbf{70.30} & \textbf{7.71} & \underline{1151} & \textbf{2.7M} & \textbf{62.80} & \textbf{10.17} & {1289} & \textbf{3.7M} \\ 
+% \rowcolor{myblue} 
+% Ours~(F,~|C|=1) & {} & {} & {} & {} & {} & {} & {} & {} & {} & {} & {} & {} & {} & {} & {} & {} & {} & {} & {} & {} \\
+% \rowcolor{myblue} 
+% Ours~(T,~|C|=1) & {} & {} & {} & {} & {} & {} & {} & {} & {} & {} & {} & {} & {} & {} & {} & {} & {} & {} & {} & {} \\
+% \rowcolor{myblue} 
+% \textit{Token-level} & {} & {} & {} & {} & {} & {} & {} & {} & {} & {} & {} & {} & {} & {} & {} & {} & {} & {} & {} & {} \\
+\rowcolor{myblue} 
+Ours~(\textit{token}) & {87.11} & \underline{11.48} & {1038} & {1.5M} & {57.35} & \underline{13.80} & \textbf{489} & {3.5M} & \underline{28.28} & \textbf{8.26} & {3940} & {18M} & {62.83} & \underline{8.95} & {1884} & {5.6M} & {58.89} & \underline{10.62} & {1838} & {7.2M} \\ \cmidrule{1-21}
+\rowcolor{mygray} \multicolumn{21}{c}{\textit{Llama3.1-8B Series}} \\ \cmidrule{1-21}
+CoT & {85.14} & {2.15} & {550} & {0.2M} & {65.82} & {2.39} & {736} & {0.3M} & {24.75} & {0.96} & {1231} & {0.9M} & {66.46} & {0.93} & {642} & {0.2M} & {60.54} & {1.61} & {790} & {0.4M} \\
+Distill-R1 & {73.62} & {2.58} & {395} & {0.1M} & {53.46} & {2.97} & {582} & {0.8M} & {20.20} & {5.24} & {3972} & {16M} & {61.21} & {0.83} & {380} & {0.2M} & {52.12} & {2.91} & {1332} & {4.4M} \\ \cmidrule{1-21}
+Vanilla & {91.43} & {12.06} & {1986} & {3.0M} & {69.62} & {14.82} & {2883} & {6.9M} & {40.91} & {7.98} & {6622} & {26M} & {83.03} & {6.80} & {2793} & {5.9M} & {71.25} & {10.42} & {3571} & {10.5M} \\
+\rowcolor{myblue} 
+~~+~H2O & \textbf{90.45} & {20.23} & {640} & \underline{1.0M} & \textbf{65.92} & {27.11} & \underline{736} & {1.8M} & {31.81} & {12.55} & {1536} & {7.9M} & \underline{78.99} & {11.43} & {1024} & {2.1M} & \underline{66.79} & {17.83} & \underline{984} & {3.2M} \\
+\rowcolor{myblue} 
+~~+~SepLLM & {26.25} & {50.05} & {1024} & {5.8M} & {25.12} & {50.11} & {1024} & {7.5M} & {2.53} & {12.62} & \underline{1024} & {10M} & {14.55} & {27.14} & {1024} & {8.5M} & {17.11} & {34.98} & {1024} & {8.0M} \\
+\rowcolor{myblue} 
+AnLLM & {77.33} & {17.92} & \textbf{589} & {1.1M} & {58.62} & {16.53} & \textbf{589} & \textbf{1.2M} & {31.31} & {7.19} & \textbf{838} & \textbf{3.7M} & {68.89} & {9.79} & \textbf{621} & \textbf{1.6M} & {59.04} & {12.86} & \textbf{659} & \textbf{1.9M} \\ \cmidrule{1-21}
+\rowcolor{myblue} 
+Ours~(\textit{tho.}) & \underline{88.25} & \textbf{12.65} & \underline{629} & \textbf{0.9M} & \underline{63.39} & \textbf{14.88} & {882} & \underline{1.8M} & \textbf{36.36} & \textbf{6.38} & {1796} & \underline{6.4M} & \textbf{79.39} & \underline{7.46} & \underline{911} & \underline{1.9M} & \textbf{66.85} & \textbf{10.34} & {1055} & \underline{2.7M} \\
+\rowcolor{myblue} 
+Ours~(\textit{token}) & {85.52} & \underline{13.87} & {1104} & {1.7M} & {61.05} & \underline{15.85} & {1538} & {3.3M} & \underline{31.82} & \underline{6.94} & {3150} & {12M} & {74.14} & \textbf{7.43} & {1512} & {2.9M} & {63.13} & \underline{11.02} & {1826} & {4.8M} \\ \bottomrule
+% \rowcolor{myblue} 
+% Ours & {} & {} & {} & {} & {} & {} & {} & {} & {} & {} & {} & {} & {} & {} & {} & {} & {} & {} & {} & {} \\
+% \rowcolor{myblue} 
+% Ours & {} & {} & {} & {} & {} & {} & {} & {} & {} & {} & {} & {} & {} & {} & {} & {} & {} & {} & {} & {} \\ \bottomrule
+\end{tabular}
+}
+
+\caption{
+Main results. 
+The CoT is based on the instruction model, while Vanilla, AnLLM, and \ours~are based on Distill-R1. 
+The light blue background indicates acceleration methods, with bold representing the best and underline the second best among them.
+The Acc of Vanilla serves as the upper bound for Acc of acceleration methods. 
+Dep is measured in million, Time in hours, and Peak in counts.
+The compression ratio can be roughly estimated by the ratio of Dep between acceleration methods and Vanilla.
+See Appendix~\ref{sec:app:metric} for more details.
+Note that the results here are based on the same batch size. 
+The results under the same memory budget are shown in Table~\ref{table:exp:efficiency:same_memory}.
+}
+\label{table:exp_main}
+% \vspace{-3mm}
+\end{table*}

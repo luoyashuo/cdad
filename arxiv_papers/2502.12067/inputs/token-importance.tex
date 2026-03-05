@@ -1,0 +1,25 @@
+\begin{figure}[t]
+    \centering
+    \resizebox{\columnwidth}{!}{
+    \fbox{\parbox[c]{1.1\columnwidth}{
+        \textbf{Problem: } Marcus is half of Leo’s age and five years younger than Deanna. Deanna is 26. How old is Leo?
+
+        \vskip 0.1in
+
+        \textbf{Chain-of-Thought: } {\setlength{\fboxsep}{-1pt}
+         \input{inputs/text_file/token_importance_llama}
+        }
+
+        \vskip 0.1in
+
+        \textbf{Chain-of-Thought: } {\setlength{\fboxsep}{-1pt}
+         \input{inputs/text_file/token_importance_llmlingua}
+        }
+
+        \vskip 0.05in
+
+        \textbf{Final Answer: } 42.
+    }}}
+    \caption{Visualization of token importance within a CoT sequence, with darker colors indicating higher values. This figure compares two token importance measurements: Selective Context and LLMLingua-2.}
+    \label{fig:token-importance}
+\end{figure}

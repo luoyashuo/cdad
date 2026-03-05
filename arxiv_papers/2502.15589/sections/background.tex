@@ -1,0 +1,78 @@
+% \begin{figure*}[!t] % !t, !htbp
+%     \centering
+%     \scalebox{0.7}{
+%     \includegraphics[width=1.0\linewidth]{figures/method-v6.pdf} 
+%     }
+%     \caption{ 
+%     Overview of \ours, illustrated with an example requiring three-step reasoning.
+%     Figure (a) shows the attention mask of Vanilla during both training and inference.
+%     Figure (b) depicts the attention mask of \ours~during the training.
+%     Figure (c) presents the complete inference process of \ours~along with the attention mask corresponding to each step. 
+%     Here, `w' denotes the size of the matrix.}
+%     \label{fig:method}
+% \end{figure*} 
+
+
+\begin{figure*}[t]
+    \centering
+    \begin{minipage}[t]{0.73\textwidth}
+        \vspace{0pt}
+        % \centering
+        \scalebox{1}{\includegraphics[width=\linewidth]{figures/method-v6.pdf}} 
+        \caption{
+        Overview of \ours, illustrated with an example requiring three-step reasoning.
+        Fig. (a) shows the attention mask of Vanilla during both training and inference.
+        Fig. (b) depicts the attention mask of \ours~during the training.
+        Fig. (c) presents the complete inference process of \ours~along with the attention mask corresponding to each step. 
+        Here, `w' denotes the size of the matrix.}
+        \label{fig:method}
+    \end{minipage}
+    \hfill
+    \begin{minipage}[t]{0.24\textwidth}
+        \vspace{0pt}
+        % \centering
+        \scalebox{1}{\includegraphics[width=\linewidth]{figures/metric-v7.pdf}} 
+        \caption{
+        The relationship between context length and the number of generated tokens across different methods. 
+        The \textit{Dependency} metric represents the area under the curve, while the \textit{Peak Token} denotes the maximum value of the curve.
+        See Appx.~\ref{sec:app:metric} for details.
+        }
+        \label{fig:exp:metric}
+    \end{minipage}
+    % \begin{minipage}[t]{0.24\textwidth}
+    %     \vspace{0pt}
+    %     % \centering
+    %     \scalebox{0.95}{\includegraphics[width=\linewidth]{figures/comp-anllm-v3.pdf}} 
+    %     \caption{
+    %     Contrast of AnLLM and ours.
+    %     Two differences are marked: one with a red box, and the other with blue and pink arrows.
+    %     }
+    %     \label{fig:comp}
+    % \end{minipage}
+\end{figure*}
+
+
+\section{Background}
+
+\textbf{Slow Thinking.}
+The reasoning ability of LLMs is crucial~\citep{acl23_reason_survey}, especially in solving complex problems, necessitating a shift from the fast-thinking System 1 to the slow-thinking System 2~\citep{pb96_system12,fsg11_thinking_fast_slow,aaai21_machine_fast_slow}. 
+For instance, Chain-of-Thought (CoT)~\citep{nips22_cot} approaches decompose complex problems into sub-problems and solve them step-by-step. 
+\textit{o1-like thinking mode}~\citep{arixv24_o1,arxiv24_qwq,arxiv25_deepseek_r1} goes a step further by incorporating abilities such as trial, reflection, backtracking, and correction on top of the divide-and-conquer strategy. 
+Empirical evidence~\citep{arixv24_o1,arxiv25_deepseek_r1} shows that the \textit{o1-like thinking mode} significantly enhances the model's ability to solve complex problems compared to CoT. 
+This slow-thinking mode can be instilled in models through carefully constructed data using Supervised Fine-Tuning (SFT). 
+In terms of the number of output tokens, the token consumption of System 1, CoT, and \textit{o1-like thinking mode} increases progressively.
+
+\paragraph{Inference Challenges.}
+Recent works on \textit{o1-like thinking mode}~\citep{arxiv24_o1_study} 
+% [Original] have emphasized the need to generate a large number of tokens for complex problem-solving. 
+% The attention mechanism, as the core structure of Transformers~\citep{nips17_transformer}, faces two significant challenges as the number of generated tokens increases during inference:
+highlight the necessity of generating a substantial number of tokens for complex problem-solving.
+As the core structure of Transformers~\citep{nips17_transformer}, the attention mechanism faces two significant challenges during inference as token generation scales:
+% \begin{itemize}
+%     \item 
+1) The \textit{memory} overhead gradually increases. 
+To speed up inference, each token's Key and Value are cached at every layer. 
+For the Qwen-32B~\citep{arxiv24_qwen2_5}, when the context length reaches $10^4$ tokens, the space occupied by the KV cache is comparable to that of the model itself.
+2) The \textit{computational cost} of generating a single token in an autoregressive manner also increases. 
+Due to the attention mechanism in Transformers~\citep{nips17_transformer}, the computational load grows \textit{quadratically} with the number of tokens.
+% \end{itemize}

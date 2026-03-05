@@ -1,0 +1,18 @@
+\section{Additional Experiments}
+\label{appendix:exp}
+
+\subsection{Out-of-domain Evaluation}
+\label{appendix:ood}
+To assess the generalizability of \method beyond the training domain data, we conducted an additional out-of-domain evaluation. Specifically, we fine-tuned LLaMA-3.1-8B-Instruct on the MATH training data and evaluated \method on both the in-domain MATH-500 and two out-of-domain benchmarks, GSM8K and MMLU-STEM~\cite{hendrycks2021mmlu}. MMLU-STEM includes a diverse set of STEM subjects from the full MMLU dataset.
+
+The results in Table~\ref{tab:ood} suggest that \method maintains strong generalizability on out-of-domain scenarios. The model adheres closely to specified compression ratios while preserving accuracy. Notably, on the MMLU-STEM test set, \method exhibits comparable performance to the original LLM with $\bm{40\%}$ token trimming. Even at a compression ratio of 0.5, the model maintains strong reasoning capabilities, with only $0.4\%$ absolute performance degradation.
+
+\input{tab/ood}
+
+\subsection{Evaluation Beyond Math}
+\label{appendix:eval-qa}
+To demonstrate the generalizability of \method beyond mathematical reasoning, we present results on CommonsenseQA~\cite{commonsenseqa}, a widely used multiple-choice question answering dataset that requires diverse commonsense knowledge to predict correct answers. For this experiment, we used 9,700 samples from the training set and evaluated \method on the validation set.
+
+\input{tab/qa}
+
+Experimental results on Qwen2.5-Instruct models are shown in Table~\ref{tab:qa}, which demonstrate that \method effectively reduces CoT length by 50\% without any performance degradation. These findings further highlight the generalizability of \method beyond the mathematical reasoning.

@@ -1,0 +1,36 @@
+
+\begin{figure*}[!htbp]
+\centering
+\scalebox{1}{
+\begin{tcolorbox}
+\textbf{System Prompt:}
+
+Below is a question. Please think through it step by step, and then provide the final answer. If options are provided, please select the correct one. 
+
+\#\# Output format:\\
+Use ``<THOUGHT>...</THOUGHT>'' to outline your reasoning process, and enclose the final answer in `\textbackslash boxed\{\}`.\\
+\\
+\#\# Example 1:\\
+Question: \\
+What is 2 + 3?\\
+Output:\\
+<THOUGHT>First, I recognize that this is a simple addition problem. Adding 2 and 3 together gives 5.</THOUGHT>\\
+Therefore, the final answer is \textbackslash boxed\{5\}.\\
+\\
+\#\# Example 2:\\
+Question: \\
+What is 2 + 3?\\
+A. 4\\
+B. 5\\
+C. 10\\
+\\
+Output:\\
+<THOUGHT>First, I recognize that this is a simple addition problem. Adding 2 and 3 together gives 5.</THOUGHT>\\
+Therefore, the final answer is \textbackslash boxed\{B\}.\\
+
+\end{tcolorbox}
+}
+
+\caption{System prompt for \texttt{Qwen2.5-7B-Instruct} and \texttt{Llama3.1-8B-Instruct}.}
+\label{prompt:system:base}
+\end{figure*}

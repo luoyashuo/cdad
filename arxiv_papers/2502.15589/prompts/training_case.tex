@@ -1,0 +1,42 @@
+
+\begin{figure*}[!htbp]
+\centering
+\scalebox{1}{
+\begin{tcolorbox}
+\textbf{System Prompt:}
+
+See Figure~\ref{prompt:system:vanilla}
+\\
+
+\textbf{Input:}
+
+Return your final response within \textbackslash boxed\{\}. The average of the numbers 23 and $x$ is 27. What is the positive difference between 23 and $x$? (Recall that the average of two numbers is their sum divided by 2).
+\\
+
+\textbf{Output:}
+
+\texttt{<|begin\_of\_thought|>}
+Okay, let's see. The problem says that the average of the numbers 23 and x is 27. We need to find the positive difference between 23 and x. Hmm, right. Since the average of two numbers is their sum divided by 2, I can start by setting up the equation for the average.\textcolor{red}{\texttt{<w>}}So, the average of 23 and x is (23 + x)/2. According to the problem, this average equals 27. So I can write the equation:\textcolor{red}{\texttt{<w>}}(23 + x)/2 = 27\textcolor{red}{\texttt{<w>}}To find x, I should solve this equation. Let me multiply both sides by 2 to get rid of the denominator. That gives:\textcolor{red}{\texttt{<w>}}23 + x = 54\textcolor{red}{\texttt{<w>}}Then, subtract 23 from both sides to isolate x:\textcolor{red}{\texttt{<w>}}x = 54 - 23\textcolor{red}{\texttt{<w>}}Calculating that, 54 minus 23 is 31. So x is 31. Now, the question asks for the positive difference between 23 and x. The positive difference would be the absolute value of 23 - x. Since x is 31, that's |23 - 31|, which is | -8 |, so 8. Alternatively, it could also be |31 - 23|, which is the same result, 8. Either way, the positive difference is 8.\textcolor{red}{\texttt{<w>}}Wait, let me check my steps again to make sure I didn't make a mistake. Starting with the average: (23 + x)/2 = 27. Multiply both sides by 2: 23 + x = 54. Subtract 23: x = 31. Difference between 23 and 31 is 8. That seems right. Yeah, I think that's correct. No issues here.\textcolor{red}{\texttt{<w>}}
+\texttt{<|end\_of\_thought|>}
+
+\texttt{<|begin\_of\_solution|>}
+\textcolor{red}{\texttt{<w>}}The average of 23 and \( x \) is given by \(\frac{23 + x}{2} = 27\). Multiplying both sides by 2:  
+\[
+23 + x = 54
+\]  
+Subtracting 23 from both sides:  
+\[
+x = 54 - 23 = 31
+\]  
+The positive difference between 23 and \( x \) is:  
+\[
+|31 - 23| = 8
+\]  \textcolor{red}{\texttt{<w>}}\(\boxed{8}\)
+\texttt{<|end\_of\_solution|>}
+
+\end{tcolorbox}
+}
+
+\caption{A training case. \texttt{<w>} is a compression trigger.}
+\label{prompt:case:train}
+\end{figure*}

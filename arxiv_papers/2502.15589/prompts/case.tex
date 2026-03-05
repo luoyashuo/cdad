@@ -1,0 +1,43 @@
+% 这边需要高亮一下
+\begin{figure*}[!t]
+\centering
+\scalebox{0.9}{
+\begin{tcolorbox}
+\textbf{Question:}\\
+Boris owns a chocolate factory. He produces 50,000 bars of chocolate each month. Boris produces 8,000 bars of chocolate the first week. The second week, Boris only produces half as much as the first week. But, the third week, Boris produces three times as much as the first week. How much does he produce the fourth week?\\ \\
+\textbf{Model Output:}\\
+\texttt{<|begin\_of\_thought|>} \\
+Okay, let's see. Boris has a chocolate factory that produces 50,000 bars each month. The question is asking how much he produces in the fourth week. Hmm, let me break this down step by step.
+<|splitter|>\\ 
+\\First, the total monthly production is 50,000 bars. The month is divided into four weeks, right? So the production for each week adds up to 50,000. The problem gives the production for the first three weeks and asks for the fourth week. Let me note down the given information.
+<|splitter|>\\
+\\First week: 8,000 bars. That's straightforward. Then the second week, he produces half as much as the first week. Half of 8,000 is 4,000. So second week is 4,000 bars. Then the third week, he produces three times as much as the first week. Three times 8,000 is 24,000. So third week is 24,000 bars.
+<|splitter|>\\
+\\Now, to find the fourth week's production, I need to subtract the sum of the first three weeks from the total monthly production. Let me add up the first three weeks: 8,000 + 4,000 + 24,000. Let's do the math step by step. 8,000 plus 4,000 is 12,000. Then 12,000 plus 24,000 is 36,000. So the total for the first three weeks is 36,000 bars.
+<|splitter|>\\
+\\The total monthly production is 50,000 bars. Subtracting the first three weeks from the total gives the fourth week's production. So 50,000 minus 36,000 equals 14,000 bars. Therefore, Boris produces 14,000 bars in the fourth week.
+<|splitter|>\\ 
+\\Wait a second, let me double-check my calculations to make sure I didn't make a mistake. First week: 8,000. Second week: half of 8,000 is indeed 4,000. Third week: three times 8,000 is 24,000. Adding those: 8,000 + 4,000 = 12,000; 12,000 + 24,000 = 36,000. Total monthly is 50,000. So 50,000 - 36,000 = 14,000. Yep, that seems right. I don't think I missed anything here. The problem states the production for each week as fractions or multiples of the first week, so the calculations are straightforward. No complicated formulas needed. Just basic arithmetic. So the answer should be 14,000 bars in the fourth week.
+<|splitter|>\\
+\texttt{<|end\_of\_thought|>}\\
+\\ \texttt{<|begin\_of\_solution|>}
+\\Boris's weekly chocolate production is calculated as follows:
+<|splitter|>\\
+\\- \textbf{First week}: 8,000 bars  \\
+- \textbf{Second week}: \( \frac{8,000}{2} = 4,000 \) bars \\ 
+- \textbf{Third week}: \( 8,000 \times 3 = 24,000 \) bars  <|splitter|>\\
+\\Total for the first three weeks:  \\
+$4,000 + 4,000 + 24,000 = 32,000 \text{ bars}$
+<|splitter|> \\
+\\Subtracting this from the monthly total: \\ 
+$50,000 - 32,000 = 18,000 \text{ bars}$
+<|splitter|>\\
+\\Thus, Boris produces \(\boxed{18000}\) bars in the fourth week. <|splitter|>\\
+\texttt{<|begin\_of\_solution|>}
+
+\end{tcolorbox}
+}
+
+\caption{Bad Case. \texttt{<|splitter|>} is equal to \texttt{<w>} in Figure~\ref{prompt:case:train}.}
+\label{prompt:case}
+\end{figure*}

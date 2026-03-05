@@ -1,0 +1,147 @@
+% This must be in the first 5 lines to tell arXiv to use pdfLaTeX, which is strongly recommended.
+\pdfoutput=1
+% In particular, the hyperref package requires pdfLaTeX in order to break URLs across lines.
+\documentclass[11pt]{article}
+% \usepackage[table,xcdraw]{xcolor}
+
+% Change "review" to "final" to generate the final (sometimes called camera-ready) version.
+% Change to "preprint" to generate a non-anonymous version with page numbers.
+
+% === ATTENTION ===
+% IF WE NEED TO RESUBMIT TO ARR
+% PLEASE REMOVE ALL THE PERSONAL INFORMATION
+% ESPECIALLY IN APPENDIX
+% =================
+\usepackage[final]{acl}
+% \usepackage[final]{acl}
+% === ATTENTION ===
+% IF WE NEED TO RESUBMIT TO ARR
+% PLEASE REMOVE ALL THE PERSONAL INFORMATION
+% ESPECIALLY IN APPENDIX
+% =================
+
+% Standard package includes
+\usepackage{times}
+\usepackage{latexsym}
+
+% For proper rendering and hyphenation of words containing Latin characters (including in bib files)
+\usepackage[T1]{fontenc}
+% For Vietnamese characters
+% \usepackage[T5]{fontenc}
+% See https://www.latex-project.org/help/documentation/encguide.pdf for other character sets
+
+% This assumes your files are encoded as UTF8
+\usepackage[utf8]{inputenc}
+
+% This is not strictly necessary, and may be commented out,
+% but it will improve the layout of the manuscript,
+% and will typically save some space.
+\usepackage{microtype}
+
+% This is also not strictly necessary, and may be commented out.
+% However, it will improve the aesthetics of text in
+% the typewriter font.
+\usepackage{inconsolata}
+
+%Including images in your LaTeX document requires adding
+%additional package(s)
+\usepackage{graphicx}
+
+% ========= [zjt] =========
+\newcommand{\ours}{LightThinker}
+\usepackage{xcolor}
+\usepackage{amsmath}
+\usepackage{multirow}
+\usepackage{bbm}
+\usepackage{booktabs}
+\usepackage{colortbl}
+\usepackage{tcolorbox}
+\usepackage{amsfonts}
+
+\definecolor{mygray}{gray}{0.9} 
+\definecolor{myblue}{HTML}{F0FFFF}
+\newcommand{\zjt}[1]{{\color{red}[zjt]~#1}}
+\newcommand{\zyq}[1]{{\color{cyan}[zyq]~#1}}
+
+\usepackage{calc}
+\newlength\myheight
+\newlength\mydepth
+\settototalheight\myheight{Xygp}
+\settodepth\mydepth{Xygp}
+\setlength\fboxsep{0pt}
+% =========================
+
+
+
+\title{LightThinker: Thinking Step-by-Step Compression}
+
+\author{
+  Jintian Zhang${^{\spadesuit\heartsuit}\footnotemark[1]}$~, 
+  Yuqi Zhu$^{\spadesuit\heartsuit}$\thanks{$\quad$ Equal Contribution.}~,
+  Mengshu Sun$^{\clubsuit\heartsuit}$, 
+  \textbf{Yujie Luo}$^{\spadesuit\heartsuit}$,  \\ 
+  \textbf{Shuofei Qiao}$^{\spadesuit\heartsuit}$, 
+  \textbf{Lun Du}$^{\clubsuit\heartsuit}$, 
+  \textbf{Da Zheng}$^{\clubsuit\heartsuit}$, 
+  \textbf{Huajun Chen}$^{\spadesuit\heartsuit}$, 
+  \textbf{Ningyu Zhang}$^{\spadesuit\heartsuit}$\thanks{$\quad$ Corresponding Author.} \\
+  $^\spadesuit$Zhejiang University ~$^\clubsuit$Ant Group \\ % , China
+  $^\heartsuit$Zhejiang University - Ant Group Joint Laboratory of Knowledge Graph 
+  \\
+  \texttt{\{zhangjintian,zhangningyu\}@zju.edu.cn} \\
+  % \fontsize{10.2pt}{0.1\baselineskip}\selectfont
+  % $\clubsuit; \heartsuit; \spadesuit; \diamondsuit; \blacklozenge$
+  \raisebox{-\mydepth}{\includegraphics[height=1.6\myheight]{figures/github.png}}
+\textbf{\url{https://github.com/zjunlp/LightThinker}}
+}
+
+
+\begin{document}
+\maketitle
+\begin{abstract}
+Large language models (LLMs) have shown remarkable performance in complex reasoning tasks, but their efficiency is hindered by the substantial memory and computational costs associated with generating lengthy tokens. In this paper, we propose \textbf{\ours}, a novel method that enables LLMs to dynamically compress intermediate thoughts during reasoning. Inspired by human cognitive processes, \ours~compresses verbose thought steps into compact representations and discards the original reasoning chains, thereby significantly reducing the number of tokens stored in the context window. This is achieved by training the model on when and how to perform compression through data construction, mapping hidden states to condensed gist tokens, and creating specialized attention masks. Additionally, we introduce the {Dependency (Dep)} metric to quantify the degree of compression by measuring the reliance on historical tokens during generation. Extensive experiments on four datasets and two models show that \ours~reduces peak memory usage and inference time, while maintaining competitive accuracy. Our work provides a new direction for improving the efficiency of LLMs in complex reasoning tasks without sacrificing performance. 
+% \footnote{Code will be released at \url{https://github.com/zjunlp/LightThinker}.}.
+\end{abstract}
+
+% === ATTENTION ===
+% IF WE NEED TO RESUBMIT TO ARR
+% PLEASE REMOVE ALL THE PERSONAL INFORMATION
+% ESPECIALLY IN APPENDIX
+% =================
+
+\input{sections/introduction}
+
+\input{sections/background}
+
+\input{sections/method}
+
+\input{sections/experiment}
+
+\input{sections/related_work_short}
+
+\input{sections/conclusion_and_future_work}
+
+\clearpage
+\input{sections/limitation}
+
+\section*{Acknowledgement}
+We would like to express our sincere gratitude to the anonymous reviewers for their thoughtful and constructive feedback. This work was supported by the National Natural Science Foundation of China (No. 62576307, No. NSFCU23B2055, No. NSFCU19B2027), the Fundamental Research Funds for the Central Universities (226-2023- 00138), Ningbo Natural Science Foundation (2024J020), Yongjiang Talent Introduction Programme (2021A-156-G), and Information Technology Center and State Key Lab of CAD\&CG, Zhejiang University. This work was supported by Ant Group and Zhejiang University - Ant Group Joint Laboratory of Knowledge Graph.
+ 
+
+% Bibliography entries for the entire Anthology, followed by custom entries
+%\bibliography{anthology,custom}
+% Custom bibliography entries only
+\bibliography{custom}
+
+% \appendix
+
+% \section{Example Appendix}
+% \label{sec:appendix}
+
+% This is an appendix.
+
+
+
+\input{sections/appendix}
+
+\end{document}

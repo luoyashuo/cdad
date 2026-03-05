@@ -5,7 +5,7 @@ cd /home/u20240075/luoyashuo/projects/cdad/LlamaFactory
 mkdir -p logs
 
 # 提取公共环境变量，对后续所有命令生效
-export CUDA_VISIBLE_DEVICES="0,1"
+export CUDA_VISIBLE_DEVICES="0,1,2,3"
 export DISABLE_VERSION_CHECK=1
 export SWANLAB_API_KEY="xmtHYzg2Bw5uh1dprg81E"
 
@@ -18,7 +18,10 @@ declare -a CONFIGS=(
     # "examples/vallina_sft/qwen2.5_1.5b_vallina_sft_20k.yaml"
     # "examples/rv_optimal/llama3_1b_rv_optimal_20k.yaml"
     # "examples/rv_optimal/qwen2.5_1.5b_rv_optimal_20k.yaml"
-    "examples/vallina_sft/llama3_1b_vallina_sft_50k.yaml"
+    # "examples/vallina_sft/llama3_1b_vallina_sft_50k.yaml"
+    # "examples/vallina_sft/llama3_1b_instruct_vallina_sft_50k.yaml"
+    "examples/rv_optimal/llama3_1b_instruct_rv_optimal_50k.yaml"
+
 )
 
 declare -a NAMES=(
@@ -26,7 +29,9 @@ declare -a NAMES=(
     # "qwen2.5_1.5b_vallina_sft_20k"
     # "llama3_1b_rv_optimal_20k"
     # "qwen2.5_1.5b_rv_optimal_20k"
-    "llama3_1b_vallina_sft_50k"
+    # "llama3_1b_vallina_sft_50k"
+    # "llama3_1b_instruct_vallina_sft_50k"
+    "llama3_1b_instruct_rv_optimal_50k"
 )
 
 echo "=== 开始串行训练任务 ==="

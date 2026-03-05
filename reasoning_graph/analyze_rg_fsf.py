@@ -467,10 +467,6 @@ def main():
 if __name__ == '__main__':
     main()
 """
-curl https://mullet-luoyashuo-droe7.app.msh.team/v1/chat/completions -H "Content-Type: application/json" -d '{"messages": [{"role": "user", "content": "谁刺杀了林肯？"}], "max_tokens": 4096}'
-curl https://wren-luoyashuo-ckgxq.app.msh.team/v1/chat/completions -H "Content-Type: application/json" -d '{"messages": [{"role": "user", "content": "谁刺杀了林肯？"}], "max_tokens": 4096}'
-"""
-"""
 python reasoning_graph/analyze_rg_fsf.py \
     --input /mnt/moonfs/luoyashuo-ksyun/research/cdad/data/omnithought_math_all/rg_info.jsonl \
     --output-dir  /mnt/moonfs/luoyashuo-ksyun/research/cdad/data/omnithought_math_all/rg_plot \

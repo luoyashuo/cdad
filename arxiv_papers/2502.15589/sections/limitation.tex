@@ -1,0 +1,29 @@
+\section*{Limitations}
+Although \ours~has shown remarkable advancements in memory optimization and inference speed enhancement, certain limitations warrant careful consideration:
+\begin{enumerate}
+    % \item The effectiveness of applying parameter-efficient fine-tuning methods (e.g., LoRA~\citep{iclr22_lora} or QLoRA~\citep{nips23_qlora}) to \ours~remains unexplored. 
+    % In our experiments, we utilized full-parameter instruction fine-tuning, leaving the potential of such methods unverified.
+
+    % \item Whether larger datasets can further enhance \ours's capabilities is still unclear. 
+    % Due to resource constraints, experiments are not conducted on more extensive datasets.
+
+    % \item The current approach exhibits significant performance degradation on the Llama series models. 
+    % Training was limited to small datasets using next-token prediction. 
+    % Future work should explore more sophisticated optimization objectives to improve compression performance and address the issues illustrated in Figure~\ref{fig:exp:case}.
+
+    % \item Although \ours~reduces memory overhead, the dynamic nature of compression timing may still lead to occasional high memory peaks in specific cases.
+
+    \item The number of cache tokens is fixed during training and must remain consistent during inference. 
+    The generalization capability of these token representations is uncertain. 
+    For instance, whether representations trained with 3 tokens can extrapolate to scenarios requiring more tokens during inference.
+
+    \item The design of the segmentation function is relatively simplistic, relying on rule-based methods. 
+    Future work could investigate more advanced segmentation strategies.
+
+    \item The performance of \ours~on tasks such as novel generation, code generation, and multi-turn dialogue remains unassessed.
+
+    % \item While Reinforcement Learning has proven effective in enhancing reasoning abilities~\citep{arxiv25_deepseek_r1}, \ours~is trained using supervised fine-tuning (SFT). 
+    % Its compatibility with reinforcement learning-trained models and the retention of reasoning capabilities remain unclear.
+
+    % \item The performance of LightThinker on larger-scale (32B) or smaller-scale (2B) models has not been evaluated.
+\end{enumerate}

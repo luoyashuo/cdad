@@ -1,0 +1,17 @@
+\begin{table}[]
+\centering
+\small
+\scalebox{0.85}{
+\begin{tabular}{cccccc}
+\toprule
+             & GSM8K & MMLU  & GPQA  & BBH   & AVG   \\ \midrule
+Vanilla      & 11.83 & 20.61 & 10.76 & 11.50 & 13.68 \\
+LightThinker & \textbf{6.73}  & \textbf{7.44}  & \textbf{3.86}  & \textbf{3.97}  & \textbf{5.50}  \\ \bottomrule
+\end{tabular}
+}
+\caption{
+ Inference time comparison (in hours) for Vanilla and \ours~on the Qwen model across four datasets under the same memory budget.
+}
+\vspace{-0.5cm}
+\label{table:exp:efficiency:same_memory}
+\end{table}

@@ -1,0 +1,45 @@
+\section{\method}
+\label{sec:tokenskip}
+\begin{figure*}[t]
+\centering
+\includegraphics[width=0.95\textwidth]{fig/tokenskip.pdf}
+\caption{Illustration of \method. During training, \method first generates CoT trajectories from the target LLM. These CoTs are then compressed to various ratios sampled from the ratio set. \method fine-tunes the LLM using compressed CoTs with mixed ratios, enabling controllable CoT inference at any desired $\gamma \in \left\{\gamma_0,\dots,\gamma_z\right\}$.}
+\label{fig:tokenskip}
+\end{figure*}
+
+We introduce \method, a simple yet effective approach that enables LLMs to skip less important tokens, enabling controllable CoT compression with adjustable ratios. This section demonstrates the details of our methodology, including token pruning~(\S\ref{sec:token-pruning}), training~(\S\ref{sec:training}), and inference~(\S\ref{sec:inference}).
+
+\subsection{Token Pruning}
+\label{sec:token-pruning}
+The key insight behind \method is that ``\textit{each reasoning token contributes differently to deriving the answer.}'' To enhance CoT efficiency, we propose to trim redundant CoT tokens from LLM outputs and fine-tune LLMs using these trimmed CoT trajectories. The token pruning process is guided by the concept of \textit{token importance}, as detailed in Section~\ref{sec:token-importance}. 
+
+Specifically, given a target LLM $\M$, one of its CoT trajectories $\boldsymbol{c}=\left\{c_i\right\}_{i=1}^{m}$, and a specified compression ratio $\gamma \in \left[0,1\right]$ for the current $\boldsymbol{c}$, \method first calculates the semantic importance of each CoT token $\left\{I(c_{i})\right\}_{i=1}^{m}$, as defined in Eq~(\ref{eq:llmlingua2}), and then ranks the resulting scores in descending order. The empirical $\gamma$-quantile of these importance values serves as the pruning threshold:
+\begin{equation}
+I_\gamma=Q_{\gamma}\left(I\left(c_1\right), . ., I\left(c_m\right)\right),
+\end{equation}
+where $Q_{\gamma}$ denotes the $\gamma$-quantile (i.e.\ the $\gamma$-th percentile) of the multiset $\left\{I(c_{i})\right\}_{i=1}^{m}$. All CoT tokens whose importance value meets or exceeds this threshold are retained, yielding the compressed CoT trajectory:
+\begin{equation}
+\widetilde{\boldsymbol{c}}=\left\{c_i \mid I\left(c_i\right) \geq I_\gamma, 1 \leq i \leq m\right\}.
+\end{equation}
+
+\subsection{Training}
+\label{sec:training}
+Given a training dataset $\mathcal{D}$ with $N$ samples and a target LLM $\M$, we first obtain $N$ CoT trajectories with $\M$. Then, we filter out trajectories with incorrect answers to ensure data quality. For the remaining trajectories, we prune each CoT with a compression ratio $\gamma$ sampled from the ratio set $\left\{\gamma_0,\dots,\gamma_z\right\}$, as demonstrated in Section~\ref{sec:token-pruning}. For each $\langle\text{question}, \text{compressed CoT}, \text{answer}\rangle$, we inserted the compression ratio $\gamma$ after the question. Each training sample is formatted as follows: 
+\begin{equation}
+\nonumber
+    \mathcal{Q} \ \mathrm{[EOS]} \ \gamma \ \mathrm{[EOS]} \ \mathrm{Compressed\ CoT} \ \mathcal{A},
+\end{equation}
+where $\langle\mathcal{Q}, \mathcal{A}\rangle$ indicates the $\langle\text{question}, \text{answer}\rangle$ pair. Formally, given a question $\boldsymbol{x}$, a compression ratio $\gamma$ randomly sampled from $\left\{\gamma_0,\dots,\gamma_z\right\}$, and the output sequence $\boldsymbol{y}=\left\{y_i\right\}_{i=1}^{l}$, which includes the compressed CoT $\widetilde{\boldsymbol{c}}$ and the answer $\boldsymbol{a}$, we fine-tunes the target LLM $\M$, enabling it to perform chain-of-thought in a compressed pattern by minimizing
+\begin{equation}
+\mathcal{L}=\sum_{i=1}^{l} \log P\left(y_{i} \mid \bm{x}, \gamma, \bm{y}_{<i}; \bm{\theta}_{\M}\right),
+\end{equation}
+where $\bm{y} =\left\{\widetilde{c}_1, \cdots,\widetilde{c}_{m^{\prime}}, a_1, \cdots, a_t  \right\}$. Note that the compression is performed solely on CoT sequences, and we keep the answer $\boldsymbol{a}=\left\{a_i\right\}_{i=1}^{t}$ unchanged. To preserve LLMs' reasoning capabilities, we also include a portion of the original CoT trajectories in the training data, with $\gamma$ set to 1.
+
+\subsection{Inference}
+\label{sec:inference}
+The inference of \method follows autoregressive decoding. Compared to original CoT outputs that may contain redundancy, \method facilitates LLMs to skip \textit{unimportant} CoT tokens, thereby enhancing reasoning efficiency. Formally, given a question $\boldsymbol{x}$ and a desired compression ratio $\gamma \in \left\{\gamma_0,\dots,\gamma_z\right\}$, the input prompt of \method follows the same format adopted in fine-tuning, which is $\mathcal{Q} \ \mathrm{[EOS]} \ \gamma \ \mathrm{[EOS]}$. The LLM $\M$ sequentially predicts the output sequence $\hat{\bm{y}}$:
+\begin{equation}
+\nonumber
+\hat{\boldsymbol{y}}=\arg \max _{\boldsymbol{y}^*} \sum_{j=1}^{l^{\prime}} \log P\left(y_j \mid \boldsymbol{x}, \gamma, \boldsymbol{y}_{<j}; \bm{\theta}_{\M}\right),
+\end{equation}
+where $\hat{\bm{y}} =\left\{\hat{c}_1, \cdots,\hat{c}_{m^{\prime\prime}}, \hat{a}_1, \cdots, \hat{a}_{t^{\prime}}  \right\}$ denotes the output sequence, which includes CoT tokens $\hat{\bm{c}}$ and the answer $\bm{\hat{a}}$. We illustrate the training and inference process of \method in Figure~\ref{fig:tokenskip}. 

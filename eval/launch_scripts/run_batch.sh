@@ -1,10 +1,10 @@
 #!/bin/bash
-# run_batch.sh - 等待训练任务(PID 42065)完成后，依次评测多个 checkpoint
+# run_batch.sh - 等待当前 GPU 0,1 上的训练进程（及祖先链）结束后，依次评测多个 checkpoint
 # 启动方式: nohup bash launch_scripts/run_batch.sh > vllm_logs/batch_main.log 2>&1 &
 
-export CUDA_VISIBLE_DEVICES=2
+export CUDA_VISIBLE_DEVICES="0,1"
 export no_proxy=localhost,127.0.0.1
-
+export HF_HOME=/fs/fast/u20240075/hf_home
 # 激活 uv 虚拟环境
 source /home/u20240075/luoyashuo/projects/cdad/.venv/bin/activate
 
@@ -21,6 +21,18 @@ log() {
 }
 
 # ============================================================
+# Step 1: 等待训练进程结束 (修改这里为实际的训练脚本 PID)
+# ============================================================
+TRAIN_PID=2854  # run_exps.sh 的 PID
+
+log "等待训练进程 PID $TRAIN_PID 结束..."
+while kill -0 "$TRAIN_PID" 2>/dev/null; do
+    log "训练仍在进行中，10s 后检查..."
+    sleep 10
+done
+log "训练进程已结束，开始执行评测"
+
+# ============================================================
 # Step 2: 定义待评测的 checkpoint 列表
 # ============================================================
 declare -a MODEL_PATHS=(
@@ -29,11 +41,16 @@ declare -a MODEL_PATHS=(
     # "/fs/fast/u20240075/luoyashuo/cdad/checkpoints/rv_optimal/llama3_1b_rv_optimal_20k"
     # "/fs/fast/u20240075/luoyashuo/cdad/checkpoints/rv_optimal/qwen2.5_1.5b_rv_optimal_20k"
     "/fs/fast/u20240075/luoyashuo/modelscope_cache/models/LLM-Research/Llama-3.2-1B-Instruct"
-    "/fs/fast/u20240075/luoyashuo/modelscope_cache/models/LLM-Research/Llama-3.2-3B-Instruct"
+    # "/fs/fast/u20240075/luoyashuo/modelscope_cache/models/LLM-Research/Llama-3.2-3B-Instruct"
+    # "/fs/fast/u20240075/luoyashuo/cdad/checkpoints/vallina_sft/llama3_1b_instruct_vallina_sft_50k"
+    # "/fs/fast/u20240075/hf_home/models/Yaseal-CDAD_CKPT/llama3_2_1b_rv_optimal_top50k"
+    # "/fs/fast/u20240075/hf_home/models/Yaseal-CDAD_CKPT/llama3_2_1b_rv_optimal_top50k_rewrite_mix"
+    "/fs/fast/u20240075/luoyashuo/cdad/checkpoints/rv_optimal/llama3_1b_instruct_rv_optimal_50k"
+    
 )
 
 BASE_CONFIG="eval_configs/eval_all.yaml"
-NUM_RUNS=2
+NUM_RUNS=1
 
 # ============================================================
 
@@ -69,6 +86,7 @@ for i in "${!MODEL_PATHS[@]}"; do
         log "  [失败] 任务 $JOB_NUM/$TOTAL ($MODEL_NAME) 退出码: $EXIT_CODE"
         FAILED=$((FAILED + 1))
     fi
+    rm "$TMP_CONFIG"
 done
 
 log "========== 批量评测结束：$TOTAL 个模型，失败 $FAILED 个 =========="

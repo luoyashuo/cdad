@@ -1,0 +1,202 @@
+% \newpage
+\section{Experiments}
+% \begin{figure}[!t] % !t, !htbp
+%     \centering
+%     \scalebox{1}{
+%     \includegraphics[width=1.0\linewidth]{figures/metric-v3.pdf} 
+%     }
+%     % \vspace{-1mm}
+%     \caption{
+%     The relationship between context length and the number of generated tokens across different methods. 
+%     The Dependency metric represents the area under the curve, while the Peak Token metric denotes the maximum value of the curve.
+%     See App.~\ref{sec:app:metric} for details.
+%     }
+%     \label{fig:exp:metric}
+%     \vspace{-2mm}
+% \end{figure} 
+
+\subsection{Experimental Settings}
+
+
+\input{tables/exp_main}
+
+\textbf{Baselines.}
+We conduct experiments on two LLMs: Qwen2.5-7B~\citep{arxiv24_qwen2_5} and Llama3.1-8B~\citep{arxiv24_llama_3}.
+To establish an upper bound performance, we perform full parameter instruction tuning using the Bespoke-Stratos-17k dataset (abbr. BS17K, with a data sample shown in Fig.~\ref{prompt:case:train}), and the fine-tuned model is denoted as \textit{Vanilla}.  
+Notably, we initialize the training with the R1-Distill~\citep{arxiv25_deepseek_r1} (e.g., \texttt{DeepSeek-R1-Distill-Qwen-7B}) model, as we found that finetuning on instruction models (e.g., \texttt{Qwen2.5-7B-instruct}) yields limited improvements.
+We introduce five baselines for comparison: 
+two training-free acceleration methods applied to Vanilla (H2O~\citep{nips23_h2o} and SepLLM~\citep{arxiv24_sepllm}, which retain important KV Cache through specific strategies), 
+one training-based method (AnLLM~\citep{acl24_anllm}), 
+and two CoT~\citep{nips22_cot} baselines (prompt the instruction model and the R1-Distill model). 
+More details about baselines can be found in Appx.~\ref{sec:app:exp:baseline_details}.  
+
+\paragraph{Evaluation Metrics and Datasets.}
+We evaluate \ours~on four datasets: GSM8K~\citep{arxiv21_gsm8k}, MMLU~\citep{iclr21_mmlu}, GPQA~\citep{colm24_gpqa}, and BBH~\citep{acl23_bbh}. 
+For MMLU and BBH, we randomly sample a portion of the data for evaluation. 
+The evaluation focuses on both \textit{effectiveness} and \textit{efficiency}. 
+For effectiveness, we use accuracy as the evaluation metric (\textit{Acc}); 
+for efficiency, we employ three metrics: inference time (\textit{Time}), the peak number of tokens in the context during inference (\textit{Peak}), and the sum of \textit{dependency} of each generated token on previous tokens during the generation (\textit{Dep}). 
+Fig.~\ref{fig:exp:metric} visualizes the Peak and Dep metrics, where the value of Dep equals the area enclosed by the lines. 
+The Dep metric characterizes the amount of information used during inference, with smaller values indicating more significant compression. 
+We aim to compare the other three metrics under similar Dep values. 
+It is important to note that Peak characterizes a momentary state, while Dep characterizes the entire inference process, so there is no direct correlation between the two. 
+For more details about Dep, please refer to Appx.~\ref{sec:app:metric}.  
+
+\paragraph{Implementation.}
+For~\ours, we design two different segmentation functions $\texttt{Seg()}$. 
+At the token level, we compress every 6 tokens into 2 tokens, i.e., $|C|=2$, denoted as ``ours (\textit{token})''. 
+At the thought level, we use ``{\textbackslash n\textbackslash n}'' as a delimiter to simply segment the B17K data into several thoughts, denoted as ``ours (\textit{tho.})''. 
+For the Qwen, we compress a thought into 9 tokens, i.e., $|C|=9$; 
+for the Llama, we compress a thought into 7 tokens, i.e., $|C|=7$. 
+In all experiments, we use greedy decoding with a maximum output length of 10240 tokens.
+Please refer to Appx.~\ref{sec:app:exp} for more details.
+% For more detailed training and evaluation settings, please refer to the Appendix~\ref{}.
+
+
+\subsection{Main Results}
+In Tab.~\ref{table:exp_main}, we report the results of four evaluation metrics for two models on four datasets.
+\textbf{Key observations include:}
+\textbf{\textit{1)}} 
+% Distill-R1 underperforms CoT on all datasets, which is attributed to the repetition caused by Greedy Decoding, consistent with the findings in~\citeauthor{arxiv25_deepseek_r1}.
+Distill-R1 performs worse than CoT across all datasets because its weaker instruction-following ability~\citep{arxiv25_think_fail} prevents effective answer extraction using rules, even with attempts at evaluation using an LLM evaluator. 
+However, this issue is not the focus of this paper.
+\textbf{\textit{2)}} H2O effectively reduces memory usage while maintaining the performance of the vanilla, indicating that the greedy eviction policy is effective in long-text generation tasks. 
+However, H2O significantly increases inference time compared to Vanilla, with an average increase of 51\% ($(20.61-13.68)/13.68\approx 0.51$) on Qwen and 72\% on Llama. 
+This is attributed to the token-wise eviction policy of H2O, which introduces additional overhead for each generated token.
+\textbf{\textit{3)}} SepLLM performs the worst in terms of performance, gradually losing language ability during generation, which results in the inability to output termination tokens and thus leads to excessive inference time.
+\textbf{\textit{4)}} Compared to H2O, \ours~(\textit{tho.}) achieves similar performance with lower Dep values (i.e., similar compression rate), while reducing inference time by an average of 52\% on Qwen and 41\% on Llama. 
+Additionally, \ours~(\textit{tho.}) retains higher accuracy and faster inference speed compared to AnLLM.
+
+Based on these observations, \textbf{we draw the following conclusions:}
+\textbf{\textit{1)}} {B17K is an effective dataset.}
+We find Vanilla outperforms CoT and Distill-R1 on most datasets, indicating that B17K is an effective dataset that mitigates the repetition issue in Distill-R1 through SFT.
+\textbf{\textit{2)}} {\ours~is effective and achieves a good balance between effectiveness and efficiency in inference.}
+Specifically, on the Qwen, \ours~sacrifices 1\% accuracy but saves 26\% time, reduces the peak tokens by 70\%, and decreases Dep. by 78\% (i.e., achieves a 16.6/3.7=4.5x compression ratio). 
+On the Llama, it sacrifices 6\% accuracy but saves 1\% inference time, reduces the peak tokens by 70\%, and decreases Dep. by 74\% (i.e., achieves a 10.5/2.7=3.9x compression ratio).
+\textbf{\textit{3)}} {The segmentation function is vital for~\ours.} %(i.e., $\texttt{Seg()}$)  
+The thought-level segmentation function outperforms the token-level, with accuracy improvements of 6.2\% on Qwen and 5.6\% on Llama. 
+This suggests that token-level segmentation leads to the loss of semantic boundaries.
+
+
+\begin{figure*}[!th] % !t, !htbp
+    \centering
+    \scalebox{0.9}{
+    \includegraphics[width=1\linewidth]{figures/exp-efficiency-v6.pdf} 
+    }
+    % \vspace{-1mm}
+    \caption{
+    % (a) Average number of generated tokens across the four datasets. 
+    % Each bar represents the average tokens generated by the respective model on the specified dataset. 
+    % (b) Token compression frequency distribution for Qwen on the GPQA dataset. 
+    % The bars represent the percentage of tokens falling within specified ranges, while the cumulative percentage curve illustrates the total proportion of tokens up to each range. 
+    % (c) The main part illustrates the relationship between the number of generated tokens and inference time. 
+    % Each subplot displays the inference time and peak token for various numbers of output tokens. 
+    % (d) Compression ratios of the \ours. The bars represent the average compression ratios with 95\% confidence intervals indicated by error bars. 
+    % (e-f) Impact of cache size (i.e., $|C|$) on accuracy, Dep, inference time, peak tokens, generated tokens, and compression frequency.
+    Efficiency Analysis and Ablation Results.
+    Fig.(a) represents the average tokens generated by the respective model on the specified dataset. 
+    Fig.(b) shows the percentage of tokens falling within specified ranges, while the cumulative percentage curve illustrates the total proportion of tokens up to each range. 
+    Fig.(c) illustrates the relationship between the number of generated tokens and inference time. 
+    Each subplot displays the inference time and peak token for various numbers of output tokens. 
+    Fig.(d) represents the average compression ratios with 95\% confidence intervals indicated by error bars. 
+    Fig.(e-f) examines the impact of cache size (i.e., $|C|$) on accuracy, Dep, inference time, peak tokens, generated tokens, and compression frequency.
+    }
+    \label{fig:exp:efficient}
+    \vspace{-3mm}
+\end{figure*} 
+
+
+\vspace{-1mm}
+\subsection{Efficiency}
+For clarity, ``\ours'' hereafter denotes \ours~(\textit{tho.}).
+In this section, we conduct an in-depth analysis of \ours's efficiency, focusing on the following four questions:
+\input{tables/exp_same_memory}
+
+\paragraph{How does \ours~accelerate under same memory budget?}
+Inference efficiency is measured through memory consumption and inference speed.
+Tab.~\ref{table:exp_main} highlights \ours’s ability to significantly reduce memory consumption at the same batch size. 
+In practice, this reduction allows for larger batch sizes under the same memory budget, improving throughput. 
+Experiments on four datasets with the Qwen model, conducted under the same memory constraints, show that \ours~reduces inference time by an average of 2.5× compared to Vanilla, as demonstrated in Tab.~\ref{table:exp:efficiency:same_memory}.
+This indicates that \ours~not only reduces both memory and time overhead at the same batch size (as shown in Tab.~\ref{table:exp_main}) but also significantly lowers time overhead under the same memory budget, thereby improving throughput.
+
+
+\paragraph{Does \ours~generate more tokens compared to Vanilla?}
+Fig.~\ref{fig:exp:efficient}(a) shows the average number of generated tokens for H2O, AnLLM, LightThinker, and Vanilla across four datasets (others in the Appx.~\ref{sec:app:exp:additional_results}). 
+We observe that:
+1) \ours~is the only method that reduces the number of generated tokens compared to Vanilla, with an average reduction of 15\% on Qwen and 13\% on Llama. 
+This is one of the reasons for its faster inference speed.
+2) H2O increases token generation by 10\% on Qwen but reduces it by 7\% on Llama. 
+Despite the reduction in tokens for Llama, the inference time still increases as shown in Tab.~\ref{table:exp_main}, indicating that its eviction policy accumulates additional overhead as token generation grows.
+
+\paragraph{What is the compression ratio of \ours?}
+Fig.~\ref{fig:exp:efficient}(d) illustrates the compression ratio across four datasets, 
+Tab.~\ref{table:exp:efficiency:comp_count} reports the average compression counts, 
+and Fig.~\ref{fig:exp:efficient}(b) shows the distribution of compressed token counts for GPQA using Qwen (other datasets are in the Appx.~\ref{sec:app:exp:additional_results}). 
+We find that:
+1) Compression counts and ratios are more closely related to downstream tasks than to the model itself. 
+Simple tasks like GSM8K exhibit lower compression counts and higher compression ratios, while complex tasks like GPQA require more frequent compressions and smaller compression ratios. 
+% This is likely because complex tasks demand more attempts and finer-grained solving steps, leading to frequent compressions and smaller ratios.
+2) The distribution of compressed token counts follows a long-tail pattern. 
+% Approximately 60\% of compressions involve fewer than 50 tokens, while about 4\% involve more than 200 tokens, likely due to initial deep comprehension of the problem.
+
+% \textbf{How does \ours~perform in terms of memory and inference overhead for long-text generation?}
+\paragraph{How efficient is \ours~in memory usage and inference for long-text generation?}
+Fig.~\ref{fig:exp:efficient}(c) shows the inference time and peak tokens of \ours~and Vanilla as a function of output token length.
+We set the prompt length to 125 and compressed 56 tokens to 8 tokens (i.e., $|C|=7$).
+We observe that:
+1) Our method significantly reduces inference time. % for long-text generation. 
+For example, when generating 32K tokens, the inference time is reduced by 44\%. 
+For shorter texts (from 1K to 4K tokens), the reduction is more modest, ranging from 1\% to 4\%.
+2) Even for shorter texts, \ours~substantially reduces peak tokens. 
+For instance, when generating 1K tokens, peak tokens are reduced by 72\%, and for 32K tokens, it is reduced by 85\%.
+
+\input{tables/exp_compression_count}
+% \vspace{-1mm}
+\subsection{Ablation}
+\label{ablation}
+\paragraph{Decoupled Token and Attention Mask Mode.}
+\ours~differs from AnLLM in two key aspects: the decoupled token design and the attention mask as shown in Figure~\ref{fig:comp}. 
+% For the attention mask, AnLLM focuses only on the most recently generated content during compression, i.e., $C^{(2)}\leftarrow\texttt{Cmp}(S_2)$, while \ours~additionally attends to the prompt and historically compressed content, i.e., $C^{(2)}\leftarrow\texttt{Cmp}(X,C^{(1)},S_2)$. 
+To validate the effectiveness of these mechanisms, we conduct ablation experiments.  
+As shown in Table~\ref{table:exp:ablation:attention}, under the same cache size setting and using AnLLM's attention mask mechanism (``AnLLM'' vs. ``Ours ($|C|=1$, T)''), the decoupled design improves accuracy by 2\%. 
+Further adopting \ours's attention mask mode yields an additional 7\% improvement. 
+These results demonstrate the effectiveness of both the decoupled token and the attention mask mode in \ours.
+
+% \vspace{-2mm}
+\paragraph{Cache Size.}
+We varied $|C|$ in $\{1,3,5,7,9\}$ to observe its impact on accuracy, inference time, dependency (i.e., Dep), peak tokens, generated token count, and compression frequency. 
+Fig.~\ref{fig:exp:efficient}(e-g) illustrate these trends on the Qwen model. 
+We observe that:  
+1) As shown in Figure~\ref{fig:exp:efficient}(e), increasing the cache size significantly improves accuracy while reducing inference time. 
+% 1) Increasing the cache size significantly improves accuracy while reducing inference time.
+This indicates that a larger cache size mitigates information loss caused by compression.  
+2) As shown in Figure~\ref{fig:exp:efficient}(g), increasing the cache size reduces both the compression frequency and the number of generated tokens.
+% 2) Increasing the cache size reduces both the compression frequency and the number of generated tokens.
+3) Combining Fig.~\ref{fig:exp:efficient}(e) and Fig.~\ref{fig:exp:efficient}(g), we find that a smaller cache size leads to more frequent generation and compression to retain more information, while a larger cache size reduces this frequency.  
+
+\begin{figure}[!t] % !t, !htbp
+    \centering
+    \scalebox{1}{
+    \includegraphics[width=1\linewidth]{figures/exp-case.pdf} 
+    }
+    % \vspace{-1mm}
+    \caption{
+    Case Study. 
+    The figure illustrates partial inference results of a case from GSM8K.
+    See App.~\ref{sec:app:exp:additional_results} for the complete content.  
+    Pink and light blue backgrounds are used to distinguish adjacent compression processes, where each color represents one compression.}
+    \label{fig:exp:case}
+    % \vspace{-3mm}
+\end{figure} 
+\subsection{Case Study}
+
+Fig.~\ref{fig:exp:case} illustrates a failure case from the GSM8K dataset. 
+We observe that although the LLM arrives at the correct answer during the thinking process (see \texttt{Model's Thoughts} field in the Fig.~\ref{fig:exp:case}), it makes an error in the final output (see \texttt{Model's Solution} field in the Figure). 
+Specifically, in the third sentence of the $\texttt{Model's Solution}$ field, the first occurrence of ``4000'' is incorrect. 
+This indicates that information loss occurred during the second compression step (theoretically, ``8000'', ``4000'', and ``24000'' should have been compressed, but the LLM only compressed ``4000'' and ``24000''), leading to subsequent reasoning errors. 
+Such errors occur frequently in the GSM8K dataset, suggesting that the current compression method is not sufficiently sensitive to numerical values. 
+% Further exploration and improvement are needed to address this issue.
+
+
+\input{tables/exp_ablation_attention}
+

@@ -1373,5 +1373,31 @@
       "user_tag": "user",
       "assistant_tag": "assistant"
     }
+  },
+  "omnithought_combined_50k_train": {
+    "file_name": "/fs/fast/u20240075/hf_home/datasets/Yaseal/CDAD_EXP/omnithought_combined_50k/train.jsonl",
+    "formatting": "sharegpt",
+    "columns": {
+      "messages": "conversations"
+    },
+    "tags": {
+      "role_tag": "role",
+      "content_tag": "content",
+      "user_tag": "user",
+      "assistant_tag": "assistant"
+    }
+  },
+  "omnithought_combined_50k_val": {
+    "file_name": "/fs/fast/u20240075/hf_home/datasets/Yaseal/CDAD_EXP/omnithought_combined_50k/val.jsonl",
+    "formatting": "sharegpt",
+    "columns": {
+      "messages": "conversations"
+    },
+    "tags": {
+      "role_tag": "role",
+      "content_tag": "content",
+      "user_tag": "user",
+      "assistant_tag": "assistant"
+    }
   }
 }
