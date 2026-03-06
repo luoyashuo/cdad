@@ -138,6 +138,14 @@ def evaluate_model(task_config: TaskConfig, outputs: OutputsStructure) -> dict:
         if dataset_name != DataCollection.NAME:
             task_config.dataset_args[dataset_name] = benchmark.to_dict()
 
+    # Initialize sandbox if enabled
+    if task_config.use_sandbox:
+        logger.info('Initializing sandbox environment...')
+        for evaluator in evaluators:
+            if hasattr(evaluator.benchmark, 'ensure_sandbox_ready'):
+                evaluator.benchmark.ensure_sandbox_ready()
+        logger.info('Sandbox environment initialized.')
+
     # dump task_cfg to outputs.configs_dir after creating evaluators
     task_config.dump_yaml(outputs.configs_dir)
     logger.info(task_config)

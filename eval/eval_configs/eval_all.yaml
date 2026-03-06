@@ -85,7 +85,8 @@ benchmarks:
     temperature: 1.0
     max_tokens: 12000
     few_shot_num: 0
-    use_sandbox: false
+    use_sandbox: true
+    sandbox_workers: 5  # sandbox 并发数，可根据 CPU 核数调整
 
   LiveCodeBench:
     dataset_name: "live_code_bench"
@@ -93,7 +94,18 @@ benchmarks:
     temperature: 1.0
     max_tokens: 12000
     few_shot_num: 0
-    use_sandbox: false
+    use_sandbox: true
+    sandbox_workers: 5  # sandbox 并发数，可根据 CPU 核数调整
+
+  MBPP:
+    dataset_name: "mbpp"
+    repeats: 1
+    temperature: 1.0
+    max_tokens: 12000
+    few_shot_num: 0
+    use_sandbox: true  # MBPP 强制需要 sandbox
+    sandbox_workers: 5
+
   # General
   GPQA:
     dataset_name: "gpqa_diamond"

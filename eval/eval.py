@@ -268,6 +268,10 @@ class BenchmarkEvaluator:
         # 设置数据集
         task_config.datasets = [benchmark_config['dataset_name']]
 
+        # 设置样本数量限制（用于快速验证流程）
+        if 'limit' in benchmark_config:
+            task_config.limit = benchmark_config['limit']
+
         # 设置重复次数
         task_config.repeats = benchmark_config.get('repeats', 1)
 
@@ -321,16 +325,20 @@ class BenchmarkEvaluator:
             task_config.judge_worker_num = sandbox_workers
             logger.info(f"[{benchmark_name}] judge_worker_num设置为: {sandbox_workers}")
 
-            # 设置沙箱工作目录 (避免临时文件打爆主机存储)
             sandbox_config = self.config.get('sandbox', {})
-            if sandbox_config.get('work_dir'):
+            remote_url = sandbox_config.get('remote_url')
+            if remote_url:
+                # 远程沙盒模式：连接到已启动的 ms-enclave server
+                remote_config = {'base_url': remote_url}
+                if sandbox_config.get('timeout'):
+                    remote_config['timeout'] = sandbox_config['timeout']
+                task_config.sandbox_manager_config = remote_config
+                logger.info(f"[{benchmark_name}] 使用远程沙盒: {remote_url}")
+            elif sandbox_config.get('work_dir'):
+                # 本地沙盒模式：设置沙箱工作目录 (避免临时文件打爆主机存储)
                 sandbox_work_dir = sandbox_config['work_dir']
-                # 确保目录存在
                 Path(sandbox_work_dir).mkdir(parents=True, exist_ok=True)
-                # 配置沙箱管理器使用指定的工作目录
-                task_config.sandbox_manager_config = {
-                    'work_dir': sandbox_work_dir
-                }
+                task_config.sandbox_manager_config = {'work_dir': sandbox_work_dir}
                 logger.info(f"[{benchmark_name}] sandbox工作目录设置为: {sandbox_work_dir}")
 
         # 设置 judge_strategy

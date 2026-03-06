@@ -5,7 +5,7 @@ cd /home/u20240075/luoyashuo/projects/cdad/LlamaFactory
 mkdir -p logs
 
 # 提取公共环境变量，对后续所有命令生效
-export CUDA_VISIBLE_DEVICES="0,1,2,3"
+export CUDA_VISIBLE_DEVICES="0,1"
 export DISABLE_VERSION_CHECK=1
 export SWANLAB_API_KEY="xmtHYzg2Bw5uh1dprg81E"
 
