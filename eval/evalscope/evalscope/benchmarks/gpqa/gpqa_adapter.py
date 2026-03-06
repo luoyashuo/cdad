@@ -14,15 +14,6 @@ from evalscope.utils.multi_choices import FEW_SHOT_TEMPLATE, MultipleChoiceTempl
 
 logger = get_logger()
 
-BOXED_ANSWER_MCQ_TEMPLATE = (
-    'Answer the following multiple choice question. '
-    'Think step by step before answering. '
-    'Put the letter of your final answer (from {letters}) within \\boxed{{}}, '
-    'e.g., \\boxed{{[LETTER]}}.\n\n'
-    '{question}\n\n'
-    '{choices}'
-)
-
 
 @register_benchmark(
     BenchmarkMeta(
@@ -36,8 +27,7 @@ BOXED_ANSWER_MCQ_TEMPLATE = (
         few_shot_num=0,
         train_split=None,
         eval_split='train',  # only have train split
-        prompt_template=BOXED_ANSWER_MCQ_TEMPLATE,
-        system_prompt='Please reason step by step to solve the problem. Put the letter of your final answer (A, B, C, or D) in \\boxed{}, e.g., \\boxed{[LETTER]}.',
+        prompt_template=MultipleChoiceTemplate.SINGLE_ANSWER_COT,
     )
 )
 class GPQAAdapter(MultiChoiceAdapter):
@@ -67,10 +57,6 @@ class GPQAAdapter(MultiChoiceAdapter):
                 [record['Incorrect Answer 1'], record['Incorrect Answer 2'], record['Incorrect Answer 3']],
             },
         )
-
-    def extract_answer(self, prediction: str, task_state) -> str:
-        from evalscope.metrics.math_parser import extract_answer
-        return extract_answer(prediction)
 
     def format_fewshot_template(self, fewshot, sample):
         from .prompt import FEW_SHOT_SAMPLES

@@ -146,8 +146,7 @@ class LLMJudgeMixin:
         question = task_state.input_text
 
         # Request judge and obtain score
-        # Use filtered_prediction (the \boxed{}-extracted answer) to minimize token usage on judge API.
-        prompt = self.llm_judge.build_prompt(pred=filtered_prediction, gold=reference, question=question)
+        prompt = self.llm_judge.build_prompt(pred=original_prediction, gold=reference, question=question)
         judge_response = self.llm_judge.judge(prompt)
         judge_score = self.llm_judge.get_score(judge_response)
 

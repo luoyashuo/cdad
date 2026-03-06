@@ -17,7 +17,7 @@ mkdir -p "$LOG_DIR"
 BATCH_LOG="$LOG_DIR/batch_$(date '+%Y%m%d_%H%M%S').log"
 
 log() {
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$BATCH_LOG"
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"
 }
 
 # ============================================================
@@ -33,40 +33,34 @@ done
 log "训练进程已结束，开始执行评测"
 
 # ============================================================
-# Step 2: 定义待评测的 checkpoint 列表
+# Step 2: 定义待评测的 checkpoint 列表及对应配置文件
+# 格式: 每两个相邻元素为一组 (model_path, base_config)
 # ============================================================
-declare -a MODEL_PATHS=(
-    # "/fs/fast/u20240075/luoyashuo/cdad/checkpoints/vallina_sft/llama3_1b_vallina_sft_20k"
-    # "/fs/fast/u20240075/luoyashuo/cdad/checkpoints/vallina_sft/qwen2.5_1.5b_vallina_sft_20k"
-    # "/fs/fast/u20240075/luoyashuo/cdad/checkpoints/rv_optimal/llama3_1b_rv_optimal_20k"
-    # "/fs/fast/u20240075/luoyashuo/cdad/checkpoints/rv_optimal/qwen2.5_1.5b_rv_optimal_20k"
-    "/fs/fast/u20240075/luoyashuo/modelscope_cache/models/LLM-Research/Llama-3.2-1B-Instruct"
-    # "/fs/fast/u20240075/luoyashuo/modelscope_cache/models/LLM-Research/Llama-3.2-3B-Instruct"
-    # "/fs/fast/u20240075/luoyashuo/cdad/checkpoints/vallina_sft/llama3_1b_instruct_vallina_sft_50k"
-    # "/fs/fast/u20240075/hf_home/models/Yaseal-CDAD_CKPT/llama3_2_1b_rv_optimal_top50k"
-    # "/fs/fast/u20240075/hf_home/models/Yaseal-CDAD_CKPT/llama3_2_1b_rv_optimal_top50k_rewrite_mix"
-    "/fs/fast/u20240075/luoyashuo/cdad/checkpoints/rv_optimal/llama3_1b_instruct_rv_optimal_50k"
-    
+declare -a JOBS=(
+    # "/fs/fast/u20240075/luoyashuo/modelscope_cache/models/LLM-Research/Llama-3.2-1B-Instruct"    "eval_configs/eval_all.yaml"
+    "/fs/fast/u20240075/luoyashuo/cdad/checkpoints/rv_optimal/llama3_1b_instruct_rv_optimal_50k"  "eval_configs/eval_all_sft.yaml"
+    "/fs/fast/u20240075/luoyashuo/modelscope_cache/models/LLM-Research/Llama-3.2-3B-Instruct"    "eval_configs/eval_all.yaml"
 )
 
-BASE_CONFIG="eval_configs/eval_all.yaml"
-NUM_RUNS=1
+NUM_RUNS=3
 
 # ============================================================
 
-TOTAL=${#MODEL_PATHS[@]}
+TOTAL=$(( ${#JOBS[@]} / 2 ))
 log "========== 批量评测开始，共 $TOTAL 个模型，每个运行 $NUM_RUNS 次 =========="
 
 FAILED=0
-for i in "${!MODEL_PATHS[@]}"; do
-    MODEL_PATH="${MODEL_PATHS[$i]}"
+for (( i=0; i<${#JOBS[@]}; i+=2 )); do
+    MODEL_PATH="${JOBS[$i]}"
+    BASE_CONFIG="${JOBS[$i+1]}"
     MODEL_NAME=$(basename "$MODEL_PATH")
-    JOB_NUM=$((i + 1))
+    JOB_NUM=$(( i/2 + 1 ))
     LOG_FILE="$LOG_DIR/${MODEL_NAME}.log"
     TMP_CONFIG="eval_configs/${MODEL_NAME}.yaml"
 
     log "---------- 任务 $JOB_NUM/$TOTAL ----------"
     log "  模型路径 : $MODEL_PATH"
+    log "  基础配置 : $BASE_CONFIG"
     log "  任务日志 : $LOG_FILE"
 
     if [ ! -f "$BASE_CONFIG" ]; then

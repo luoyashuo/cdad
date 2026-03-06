@@ -349,7 +349,7 @@ class BenchmarkEvaluator:
                 'api_key': api_key,
                 'api_url': base_url,
                 'model_id': judge_model,
-                'generation_config': {'temperature': 0.0, 'max_tokens': 1024},
+                'generation_config': {'temperature': 0.0, 'max_tokens': 1024, 'extra_body': {'enable_thinking': False}},
             }
             # 限制 LLM judge 并发，避免触发 TPM/RPM 限制，默认串行 (1)
             judge_parallel = benchmark_config.get('judge_parallel', 1)
