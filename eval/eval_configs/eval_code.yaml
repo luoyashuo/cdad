@@ -23,7 +23,7 @@ eval:
 sandbox:
   remote_url: http://8.152.253.195:1234
   timeout: 120  # 代码执行超时时间（秒）
-
+  work_dir: /fs/fast/u20240075/luoyashuo/tmp/evalscope_sandbox
 # 评测配置 - 仅代码评测
 
 benchmarks:
@@ -31,7 +31,7 @@ benchmarks:
   # 支持本地执行（use_sandbox: false），无需 Docker
   BigCodeBench:
     dataset_name: "bigcodebench"
-    limit: 5  # 快速验证：只跑5个样本
+    # limit: 5  # 快速验证：只跑5个样本
     repeats: 1
     temperature: 1.0
     max_tokens: 12000
@@ -40,8 +40,8 @@ benchmarks:
   # HumanEval: 经典的代码生成评测，包含 164 个 Python 编程问题
   HumanEval:
     dataset_name: "humaneval"
-    limit: 5  # 快速验证：只跑5个样本
-    repeats: 8
+    # limit: 5  # 快速验证：只跑5个样本
+    repeats: 1
     temperature: 1.0
     max_tokens: 12000
     few_shot_num: 0
@@ -51,7 +51,7 @@ benchmarks:
   # LiveCodeBench: 包含 LeetCode 风格的编程题目
   LiveCodeBench:
     dataset_name: "live_code_bench"
-    limit: 5  # 快速验证：只跑5个样本
+    # limit: 5  # 快速验证：只跑5个样本
     repeats: 1
     temperature: 1.0
     max_tokens: 12000

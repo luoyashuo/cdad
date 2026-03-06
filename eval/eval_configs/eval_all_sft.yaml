@@ -82,11 +82,11 @@ benchmarks:
   # Code
   HumanEval:
     dataset_name: "humaneval"
-    repeats: 8
+    repeats: 1
     temperature: 0.7
     max_tokens: 12000
     few_shot_num: 0
-    use_sandbox: true
+    use_sandbox: false
     sandbox_workers: 5  # sandbox 并发数，可根据 CPU 核数调整
 
   LiveCodeBench:
@@ -95,17 +95,18 @@ benchmarks:
     temperature: 0.7
     max_tokens: 12000
     few_shot_num: 0
-    use_sandbox: true
+    use_sandbox: false
     sandbox_workers: 5  # sandbox 并发数，可根据 CPU 核数调整
 
-  MBPP:
-    dataset_name: "mbpp"
+  # BigCodeBench: 1140个高质量 Python 编程任务，使用 unittest 验证
+  # 支持本地执行（use_sandbox: false），无需 Docker
+  BigCodeBench:
+    dataset_name: "bigcodebench"
     repeats: 1
-    temperature: 0.7
+    temperature: 1.0
     max_tokens: 12000
     few_shot_num: 0
-    use_sandbox: true  # MBPP 强制需要 sandbox
-    sandbox_workers: 5
+    use_sandbox: false  # 本地 multiprocessing 执行，无需 Docker
   # General
   GPQA:
     dataset_name: "gpqa_diamond"
