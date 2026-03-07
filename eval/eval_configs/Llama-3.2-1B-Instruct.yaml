@@ -1,0 +1,73 @@
+# EvalScope 评测配置文件 - 仅测试代码评测 (HumanEval, LiveCodeBench, MBPP)
+# 模型路径
+model_path: /fs/fast/u20240075/luoyashuo/modelscope_cache/models/LLM-Research/Llama-3.2-1B-Instruct
+
+# 千问 API (用于 LLM judge，代码评测通常不需要)
+BASE_URL: https://dashscope.aliyuncs.com/compatible-mode/v1
+API_KEY: sk-9ae88192c0e54080831b8a7408d2da8d
+
+# vLLM配置
+vllm:
+  tp: 2  # tensor parallel size
+  gpu_memory_utilization: 0.9  # GPU显存利用率
+  max_model_len: 16384  # vLLM启动时的最大上下文长度（prompt + completion）
+
+# 评测并发配置
+eval:
+  parallel: 25  # 并发请求数，增加可提高测试速度，但需要确保服务端能承受
+
+# 沙箱配置
+# 远程沙盒模式（推荐，Docker 本地不可用时使用）：
+#   在有 Docker 的机器上运行: ms-enclave server --host 0.0.0.0 --port 8001
+#   然后填写下面的 remote_url
+sandbox:
+  remote_url: http://8.152.253.195:1234
+  timeout: 120  # 代码执行超时时间（秒）
+  work_dir: /fs/fast/u20240075/luoyashuo/tmp/evalscope_sandbox
+# 评测配置 - 仅代码评测
+
+benchmarks:
+  # BigCodeBench: 1140个高质量 Python 编程任务，使用 unittest 验证
+  # 支持本地执行（use_sandbox: false），无需 Docker
+  BigCodeBench:
+    dataset_name: "bigcodebench"
+    # limit: 5  # 快速验证：只跑5个样本
+    repeats: 1
+    temperature: 1.0
+    max_tokens: 12000
+    few_shot_num: 0
+    use_sandbox: false  # 本地 multiprocessing 执行，无需 Docker
+  # HumanEval: 经典的代码生成评测，包含 164 个 Python 编程问题
+  HumanEval:
+    dataset_name: "humaneval"
+    # limit: 5  # 快速验证：只跑5个样本
+    repeats: 1
+    temperature: 1.0
+    max_tokens: 12000
+    few_shot_num: 0
+    use_sandbox: false
+    sandbox_workers: 5
+
+  # LiveCodeBench: 包含 LeetCode 风格的编程题目
+  LiveCodeBench:
+    dataset_name: "live_code_bench"
+    # limit: 5  # 快速验证：只跑5个样本
+    repeats: 1
+    temperature: 1.0
+    max_tokens: 12000
+    few_shot_num: 0
+    use_sandbox: false
+    sandbox_workers: 5
+
+
+
+  # MBPP: Mostly Basic Python Problems，基础 Python 编程问题
+  MBPP:
+    dataset_name: "mbpp"
+    # limit: 5  # 快速验证：只跑5个样本
+    repeats: 1
+    temperature: 1.0
+    max_tokens: 12000
+    few_shot_num: 0
+    use_sandbox: false
+    sandbox_workers: 5

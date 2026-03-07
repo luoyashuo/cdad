@@ -1,5 +1,6 @@
 # Copyright (c) Alibaba, Inc. and its affiliates.
 
+import multiprocessing
 from typing import Any, Dict
 
 from evalscope.api.benchmark import BenchmarkMeta, DefaultDataAdapter
@@ -115,12 +116,6 @@ class MBPPAdapter(DefaultDataAdapter):
         self, original_prediction: str, filtered_prediction: str, reference: str, task_state: TaskState
     ) -> Score:
 
-        if not self.use_sandbox:
-            raise RuntimeError(
-                f'{self.pretty_name} benchmark requires sandboxed code '
-                'execution for safety reasons. Please set use_sandbox in the task configuration.'
-            )
-
         score = Score(
             extracted_prediction=filtered_prediction,
             prediction=original_prediction,
@@ -131,11 +126,75 @@ class MBPPAdapter(DefaultDataAdapter):
         for test in task_state.metadata['test_list']:
             completion += '\n' + test + '\n'
 
-        res = self.execute_code_in_sandbox(code=completion, timeout=self.review_timeout, language='python')
-        passed = res.get('status') == 'success'
+        if not self.use_sandbox:
+            work_dir = None
+            if self._task_config and self._task_config.sandbox_manager_config:
+                work_dir = self._task_config.sandbox_manager_config.get('work_dir')
+            res = _run_test_locally(completion, timeout=self.review_timeout, work_dir=work_dir)
+            passed = res['passed']
+        else:
+            res = self.execute_code_in_sandbox(code=completion, timeout=self.review_timeout, language='python')
+            passed = res.get('status') == 'success'
         # Set score values
         score.value = {'acc': passed}
         score.metadata = {'task_id': problem['task_id'], 'timeout': self.review_timeout, 'execution_result': res}
         score.main_score_name = 'acc'
 
         return score
+
+
+# ---------------------------------------------------------------------------
+# Local execution helpers (used when use_sandbox=False)
+# ---------------------------------------------------------------------------
+
+def _unsafe_execute(code: str, timeout: float, result: list, work_dir: str = None):
+    """Execute MBPP code + assert tests in a subprocess with timeout."""
+    import os
+    import signal
+    import tempfile
+
+    class _Timeout(Exception):
+        pass
+
+    def _handler(signum, frame):
+        raise _Timeout()
+
+    signal.signal(signal.SIGALRM, _handler)
+    signal.alarm(int(timeout) + 2)
+    try:
+        if work_dir:
+            exec_dir = os.path.join(work_dir, 'mbpp_' + os.urandom(8).hex())
+            os.makedirs(exec_dir, exist_ok=True)
+            os.chdir(exec_dir)
+            tempfile.tempdir = exec_dir
+        else:
+            tmpdir_ctx = tempfile.TemporaryDirectory()
+            exec_dir = tmpdir_ctx.__enter__()
+            os.chdir(exec_dir)
+            tempfile.tempdir = exec_dir
+
+        exec(code, {})  # noqa: S102
+        result.append({'passed': True, 'result': 'passed'})
+    except _Timeout:
+        result.append({'passed': False, 'result': 'timed out'})
+    except Exception as e:
+        result.append({'passed': False, 'result': f'{type(e).__name__}: {e}'})
+    finally:
+        signal.alarm(0)
+        if not work_dir:
+            tmpdir_ctx.__exit__(None, None, None)
+
+
+def _run_test_locally(code: str, timeout: float, work_dir: str = None) -> dict:
+    """Run MBPP test in a child process and return result."""
+    manager = multiprocessing.Manager()
+    result = manager.list()
+    p = multiprocessing.Process(target=_unsafe_execute, args=(code, timeout, result, work_dir))
+    p.start()
+    p.join(timeout=timeout + 3)
+    if p.is_alive():
+        p.kill()
+        p.join()
+    if not result:
+        return {'passed': False, 'result': 'timed out'}
+    return result[0]

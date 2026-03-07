@@ -31,9 +31,11 @@ COMPLETE_TEMPLATE = (
 )
 
 
-def _unsafe_execute(code: str, timeout: float, result: list):
+def _unsafe_execute(code: str, timeout: float, result: list, work_dir: str = None):
     """Execute BigCodeBench unittest in a subprocess with timeout."""
+    import os
     import signal
+    import tempfile
     import unittest
 
     class _Timeout(Exception):
@@ -45,6 +47,17 @@ def _unsafe_execute(code: str, timeout: float, result: list):
     signal.signal(signal.SIGALRM, _handler)
     signal.alarm(int(timeout) + 2)
     try:
+        if work_dir:
+            exec_dir = os.path.join(work_dir, 'bcb_' + os.urandom(8).hex())
+            os.makedirs(exec_dir, exist_ok=True)
+            os.chdir(exec_dir)
+            tempfile.tempdir = exec_dir
+        else:
+            tmpdir_ctx = tempfile.TemporaryDirectory()
+            exec_dir = tmpdir_ctx.__enter__()
+            os.chdir(exec_dir)
+            tempfile.tempdir = exec_dir
+
         exec_globals = {}
         exec(code, exec_globals)  # noqa: S102
 
@@ -68,13 +81,15 @@ def _unsafe_execute(code: str, timeout: float, result: list):
         result.append({'passed': False, 'result': f'{type(e).__name__}: {e}'})
     finally:
         signal.alarm(0)
+        if not work_dir:
+            tmpdir_ctx.__exit__(None, None, None)
 
 
-def _run_test_locally(code: str, timeout: float) -> dict:
+def _run_test_locally(code: str, timeout: float, work_dir: str = None) -> dict:
     """Run BigCodeBench test in a child process and return result."""
     manager = multiprocessing.Manager()
     result = manager.list()
-    p = multiprocessing.Process(target=_unsafe_execute, args=(code, timeout, result))
+    p = multiprocessing.Process(target=_unsafe_execute, args=(code, timeout, result, work_dir))
     p.start()
     p.join(timeout=timeout + 3)
     if p.is_alive():
@@ -174,10 +189,17 @@ class BigCodeBenchAdapter(DefaultDataAdapter):
         )
 
         if not self.use_sandbox:
-            res = _run_test_locally(exec_code, timeout=self.review_timeout)
+            work_dir = None
+            if self._task_config and self._task_config.sandbox_manager_config:
+                work_dir = self._task_config.sandbox_manager_config.get('work_dir')
+            res = _run_test_locally(exec_code, timeout=self.review_timeout, work_dir=work_dir)
             passed = res['passed']
         else:
-            res = self.execute_code_in_sandbox(code=exec_code, timeout=self.review_timeout, language='python')
+            work_dir = self._benchmark_meta.sandbox_config.get('working_dir', '/sandbox')
+            preamble = f'import os, tempfile\nos.chdir({work_dir!r})\ntempfile.tempdir = {work_dir!r}\n\n'
+            res = self.execute_code_in_sandbox(
+                code=preamble + exec_code, timeout=self.review_timeout, language='python'
+            )
             passed = res.get('status') == 'success'
 
         score.value = {'acc': passed}

@@ -106,6 +106,18 @@ benchmarks:
     max_tokens: 12000
     few_shot_num: 0
     use_sandbox: false  # 本地 multiprocessing 执行，无需 Docker
+
+
+  # MBPP: Mostly Basic Python Problems，基础 Python 编程问题
+  MBPP:
+    dataset_name: "mbpp"
+    repeats: 1
+    temperature: 1.0
+    max_tokens: 12000
+    few_shot_num: 0
+    use_sandbox: false
+    sandbox_workers: 5
+
   # General
   GPQA:
     dataset_name: "gpqa_diamond"

@@ -8,13 +8,13 @@ API_KEY: sk-9ae88192c0e54080831b8a7408d2da8d
 
 # vLLM配置
 vllm:
-  tp: 1  # tensor parallel size
+  tp: 2  # tensor parallel size
   gpu_memory_utilization: 0.9  # GPU显存利用率
   max_model_len: 16384  # vLLM启动时的最大上下文长度（prompt + completion）
 
 # 评测并发配置
 eval:
-  parallel: 12  # 并发请求数，增加可提高测试速度，但需要确保服务端能承受
+  parallel: 25  # 并发请求数，增加可提高测试速度，但需要确保服务端能承受
 
 # 沙箱配置
 # 远程沙盒模式（推荐，Docker 本地不可用时使用）：
@@ -62,12 +62,12 @@ benchmarks:
 
 
   # MBPP: Mostly Basic Python Problems，基础 Python 编程问题
-  # MBPP:
-  #   dataset_name: "mbpp"
-  #   limit: 5  # 快速验证：只跑5个样本
-  #   repeats: 1
-  #   temperature: 1.0
-  #   max_tokens: 12000
-  #   few_shot_num: 0
-  #   use_sandbox: true
-  #   sandbox_workers: 5
+  MBPP:
+    dataset_name: "mbpp"
+    # limit: 5  # 快速验证：只跑5个样本
+    repeats: 1
+    temperature: 1.0
+    max_tokens: 12000
+    few_shot_num: 0
+    use_sandbox: false
+    sandbox_workers: 5
