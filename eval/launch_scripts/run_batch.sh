@@ -23,7 +23,7 @@ log() {
 # ============================================================
 # Step 1: 等待训练进程结束 (修改这里为实际的训练脚本 PID)
 # ============================================================
-TRAIN_PID=12913  # run_exps.sh 的 PID
+TRAIN_PID=23845  # run_exps.sh 的 PID
 
 log "等待训练进程 PID $TRAIN_PID 结束..."
 while kill -0 "$TRAIN_PID" 2>/dev/null; do
@@ -45,7 +45,9 @@ declare -a JOBS=(
     # "/fs/fast/u20240075/luoyashuo/cdad/checkpoints/rv_optimal/llama3_1b_instruct_bespoke_code"   "eval_configs/eval_code.yaml"
     # "/fs/fast/u20240075/luoyashuo/cdad/checkpoints/rv_optimal/llama3_1b_instruct_rv_optimal_50k_bad_code" "eval_configs/eval_code.yaml"
     # "/fs/fast/u20240075/luoyashuo/cdad/checkpoints/rv_optimal/llama3_1b_instruct_kodcode_10k"  "eval_configs/eval_code.yaml"
-    "/fs/fast/u20240075/luoyashuo/cdad/checkpoints/rv_optimal/llama3_1b_instruct_rv_optimal_60k"  "eval_configs/eval_all_sft.yaml"
+    # "/fs/fast/u20240075/luoyashuo/cdad/checkpoints/rv_optimal/llama3_1b_instruct_rv_optimal_60k"  "eval_configs/eval_code.yaml"
+    # "/fs/fast/u20240075/luoyashuo/cdad/checkpoints/rv_optimal/llama3_1b_instruct_rv_optimal_100k"   "eval_configs/eval_code.yaml"
+    "/fs/fast/u20240075/luoyashuo/cdad/checkpoints/rv_optimal/llama3_1b_instruct_rv_optimal_math_50k"  "eval_configs/eval_code.yaml"
     
 )
 

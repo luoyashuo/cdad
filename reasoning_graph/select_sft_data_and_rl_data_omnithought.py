@@ -631,4 +631,11 @@ python reasoning_graph/select_sft_data_and_rl_data_omnithought.py \
     --rl-math 10000  --rl-code 10000 \
     --sft-output /fs/fast/u20240075/hf_home/datasets/Yaseal/CDAD_EXP/omnithought_sft_100k/train.jsonl \
     --rl-output  /fs/fast/u20240075/hf_home/datasets/Yaseal/CDAD_EXP/omnithought_rl_20k/train.jsonl
+    
+python reasoning_graph/select_sft_data_and_rl_data_omnithought.py \
+    --rv-min 3 --rv-max 5 --cd-min 0 --cd-max 6 \
+    --sft-math 50000 --sft-code 0 \
+    --rl-math 20000  --rl-code 0 \
+    --sft-output /fs/fast/u20240075/hf_home/datasets/Yaseal/CDAD_EXP/omnithought_sft_math_50k/train.jsonl \
+    --rl-output  /fs/fast/u20240075/hf_home/datasets/Yaseal/CDAD_EXP/omnithought_rl_math_20k/train.jsonl
 """

@@ -913,11 +913,11 @@ if __name__ == "__main__":
     exit(main())
 """
 python build_sharegpt_dataset.py \
-    -i /fs/fast/u20240075/hf_home/datasets/Yaseal/CDAD_EXP/omnithought_sft_60k/train.jsonl \
+    -i /fs/fast/u20240075/hf_home/datasets/Yaseal/CDAD_EXP/omnithought_sft_math_50k/train.jsonl \
     -s rv_optimal \
     --rv_min 3 --rv_max 5 \
     --cd_min 0 --cd_max 6 \
-    -o /fs/fast/u20240075/hf_home/datasets/Yaseal/CDAD_EXP/omnithought_rv_optimal_60k \
+    -o /fs/fast/u20240075/hf_home/datasets/Yaseal/CDAD_EXP/omnithought_rv_optimal_math_50k \
     --train-ratio 0.99 \
     -r ../LlamaFactory/data/dataset_info.json
     

@@ -6,15 +6,17 @@ model_path: /fs/fast/u20240075/luoyashuo/modelscope_cache/models/LLM-Research/Ll
 BASE_URL: https://dashscope.aliyuncs.com/compatible-mode/v1
 API_KEY: sk-9ae88192c0e54080831b8a7408d2da8d
 
-# vLLM配置
+# vLLM配置（离线模式，直接加载模型，无需HTTP服务）
 vllm:
-  tp: 2  # tensor parallel size
-  gpu_memory_utilization: 0.9  # GPU显存利用率
-  max_model_len: 16384  # vLLM启动时的最大上下文长度（prompt + completion）
+  tp: 1              # tensor parallel size（每个DP分片占几张GPU）
+  dp: 2              # data parallel size（几个LLM实例，dp>1时用Ray）
+  gpu_memory_utilization: 0.9
+  max_model_len: 16384
+  enforce_eager: true # 禁用CUDA graph编译
 
-# 评测并发配置
+# 评测配置
 eval:
-  parallel: 25  # 并发请求数，增加可提高测试速度，但需要确保服务端能承受
+  batch_size: 64      # evalscope每次传给模型的batch大小（离线模式下vLLM自动调度）
 
 # 沙箱配置
 # 远程沙盒模式（推荐，Docker 本地不可用时使用）：
@@ -41,7 +43,7 @@ benchmarks:
   #   dataset_name: "humaneval"
   #   # limit: 5  # 快速验证：只跑5个样本
   #   repeats: 1
-  #   temperature: 1.0
+  #   temperature: 0.7
   #   max_tokens: 12000
   #   few_shot_num: 0
   #   use_sandbox: false
@@ -58,7 +60,7 @@ benchmarks:
     dataset_name: "live_code_bench"
     # limit: 5  # 快速验证：只跑5个样本
     repeats: 1
-    temperature: 1.0
+    temperature: 0.6
     max_tokens: 12000
     few_shot_num: 0
     use_sandbox: false

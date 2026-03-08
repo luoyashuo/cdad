@@ -13,3 +13,4 @@ colorlog
 setuptools
 packaging
 ninja
+psutil>=5.9.0
