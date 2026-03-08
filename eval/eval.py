@@ -29,6 +29,26 @@ from evalscope.api.model.generate_config import GenerateConfig
 
 logger = get_logger()
 
+
+def _extract_report_subsets(dataset_result: dict) -> list:
+    """从序列化后的 Report 字典中提取 per-subset 分数列表（用于 difficulty 分类统计）。
+    返回 [{'name': 'easy', 'score': 0.5, 'num': 100}, ...] 或空列表。
+    """
+    try:
+        metrics = dataset_result.get('metrics', [])
+        if not (metrics and isinstance(metrics, list)):
+            return []
+        categories = metrics[0].get('categories', [])
+        if not (categories and isinstance(categories, list)):
+            return []
+        subsets = categories[0].get('subsets', [])
+        if subsets and isinstance(subsets, list) and len(subsets) > 0:
+            return subsets
+    except (IndexError, KeyError, TypeError, AttributeError):
+        pass
+    return []
+
+
 def run_task_with_progress(task_config: TaskConfig, benchmark_name: str):
     """运行评测任务并显示进度条"""
     logger.info(f"[进度条] {benchmark_name} 开始评测")
@@ -280,6 +300,9 @@ class BenchmarkEvaluator:
             'dataset_name': benchmark_config.get('subset', None),
             'few_shot_num': benchmark_config.get('few_shot_num', 0)
         }
+        # 透传 YAML 中声明的 extra_params（例如 LiveCodeBench 的 test_n）
+        if 'extra_params' in benchmark_config:
+            dataset_args['extra_params'] = benchmark_config['extra_params']
         task_config.dataset_args = {benchmark_config['dataset_name']: dataset_args}
 
         # 设置模型API参数 - 使用 GenerateConfig 对象而不是字典
@@ -512,33 +535,40 @@ class BenchmarkEvaluator:
         logger.info(f"详细结果已保存至: {json_path}")
 
     def _prepare_results_summary(self) -> pd.DataFrame:
-        """准备结果汇总"""
+        """准备结果汇总，支持 LiveCodeBench 按 difficulty 分类（easy/medium/hard/all）"""
         summary_data = {'benchmark': [], 'dataset': [], 'score': []}
 
-        # 先将结果转换为可序列化的字典格式，以便正确提取分数
         serializable_results = self._convert_to_serializable(self.results)
 
         for benchmark_name, result in serializable_results.items():
-            # run_task 返回的结果格式是 {dataset_name: {score: xxx, ...}}
-            # 需要遍历内层字典来提取分数
             if isinstance(result, dict):
                 for dataset_name, dataset_result in result.items():
-                    if isinstance(dataset_result, dict):
-                        # 从嵌套字典中提取分数
-                        if 'score' in dataset_result:
-                            score = dataset_result['score']
-                        elif 'accuracy' in dataset_result:
-                            score = dataset_result['accuracy']
-                        else:
-                            score = 'N/A'
-                    else:
-                        score = 'N/A'
+                    if not isinstance(dataset_result, dict):
+                        summary_data['benchmark'].append(benchmark_name)
+                        summary_data['dataset'].append(dataset_name)
+                        summary_data['score'].append('N/A')
+                        continue
 
-                    summary_data['benchmark'].append(benchmark_name)
-                    summary_data['dataset'].append(dataset_name)
-                    summary_data['score'].append(score)
+                    overall_score = dataset_result.get('score', dataset_result.get('accuracy', 'N/A'))
+
+                    # 尝试从 Report 结构中提取 per-difficulty subsets
+                    subsets = _extract_report_subsets(dataset_result)
+
+                    if subsets:
+                        # 按 difficulty 分别记录
+                        for subset in subsets:
+                            summary_data['benchmark'].append(benchmark_name)
+                            summary_data['dataset'].append(f"{dataset_name}/{subset['name']}")
+                            summary_data['score'].append(round(subset.get('score', 0), 4))
+                        # all = 全量加权平均分（Report 顶层 score）
+                        summary_data['benchmark'].append(benchmark_name)
+                        summary_data['dataset'].append(f"{dataset_name}/all")
+                        summary_data['score'].append(overall_score)
+                    else:
+                        summary_data['benchmark'].append(benchmark_name)
+                        summary_data['dataset'].append(dataset_name)
+                        summary_data['score'].append(overall_score)
             else:
-                # 兜底处理
                 summary_data['benchmark'].append(benchmark_name)
                 summary_data['dataset'].append('unknown')
                 summary_data['score'].append('N/A')
@@ -621,36 +651,55 @@ class MultiRunEvaluator:
         # 收集每个benchmark在所有运行中的分数
         benchmark_scores = {}
         
+        # _convert_to_serializable 是 BenchmarkEvaluator 的方法，这里复用同一逻辑
+        def _serialize(obj):
+            if obj is None or isinstance(obj, (str, int, float, bool)):
+                return obj
+            if isinstance(obj, (list, tuple)):
+                return [_serialize(i) for i in obj]
+            if isinstance(obj, dict):
+                return {k: _serialize(v) for k, v in obj.items()}
+            if hasattr(obj, 'to_dict'):
+                return _serialize(obj.to_dict())
+            if hasattr(obj, '__dict__'):
+                return _serialize(obj.__dict__)
+            return str(obj)
+
         for run_data in self.all_results:
             run_id = run_data['run_id']
-            results = run_data['results']
-            
+            results = _serialize(run_data['results'])
+
             for benchmark_name, result in results.items():
                 if benchmark_name not in benchmark_scores:
                     benchmark_scores[benchmark_name] = {}
-                    
-                # 解析结果获取分数
-                if isinstance(result, dict):
-                    for dataset_name, dataset_result in result.items():
-                        key = f"{benchmark_name}/{dataset_name}"
-                        if key not in benchmark_scores[benchmark_name]:
-                            benchmark_scores[benchmark_name][key] = {
+
+                if not isinstance(result, dict):
+                    continue
+
+                for dataset_name, dataset_result in result.items():
+                    if not isinstance(dataset_result, dict):
+                        continue
+
+                    overall_score = dataset_result.get('score', dataset_result.get('accuracy'))
+
+                    # 提取 per-difficulty subsets（如 LiveCodeBench）
+                    subsets = _extract_report_subsets(dataset_result)
+
+                    if subsets:
+                        score_entries = [(f"{dataset_name}/{s['name']}", s.get('score')) for s in subsets]
+                        score_entries.append((f"{dataset_name}/all", overall_score))
+                    else:
+                        score_entries = [(dataset_name, overall_score)]
+
+                    for key_suffix, score in score_entries:
+                        full_key = f"{benchmark_name}/{key_suffix}"
+                        if full_key not in benchmark_scores[benchmark_name]:
+                            benchmark_scores[benchmark_name][full_key] = {
                                 'scores': [],
-                                'dataset_name': dataset_name
+                                'dataset_name': key_suffix,
                             }
-                        
-                        if isinstance(dataset_result, dict):
-                            if 'score' in dataset_result:
-                                score = dataset_result['score']
-                            elif 'accuracy' in dataset_result:
-                                score = dataset_result['accuracy']
-                            else:
-                                score = None
-                        else:
-                            score = None
-                            
                         if score is not None:
-                            benchmark_scores[benchmark_name][key]['scores'].append(score)
+                            benchmark_scores[benchmark_name][full_key]['scores'].append(score)
         
         # 计算统计信息
         import numpy as np

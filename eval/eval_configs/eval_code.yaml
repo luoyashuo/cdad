@@ -27,28 +27,33 @@ sandbox:
 # 评测配置 - 仅代码评测
 
 benchmarks:
-  # BigCodeBench: 1140个高质量 Python 编程任务，使用 unittest 验证
-  # 支持本地执行（use_sandbox: false），无需 Docker
-  BigCodeBench:
-    dataset_name: "bigcodebench"
-    # limit: 5  # 快速验证：只跑5个样本
-    repeats: 1
-    temperature: 1.0
-    max_tokens: 12000
-    few_shot_num: 0
-    use_sandbox: false  # 本地 multiprocessing 执行，无需 Docker
+  # MBPP: Mostly Basic Python Problems，基础 Python 编程问题
+  # MBPP:
+  #   dataset_name: "mbpp"
+  #   # limit: 5  # 快速验证：只跑5个样本
+  #   repeats: 1
+  #   temperature: 1.0
+  #   max_tokens: 12000
+  #   few_shot_num: 0
+  #   use_sandbox: false
   # HumanEval: 经典的代码生成评测，包含 164 个 Python 编程问题
-  HumanEval:
-    dataset_name: "humaneval"
-    # limit: 5  # 快速验证：只跑5个样本
-    repeats: 1
-    temperature: 1.0
-    max_tokens: 12000
-    few_shot_num: 0
-    use_sandbox: false
-    sandbox_workers: 5
+  # HumanEval:
+  #   dataset_name: "humaneval"
+  #   # limit: 5  # 快速验证：只跑5个样本
+  #   repeats: 1
+  #   temperature: 1.0
+  #   max_tokens: 12000
+  #   few_shot_num: 0
+  #   use_sandbox: false
+
 
   # LiveCodeBench: 包含 LeetCode 风格的编程题目
+  # test_n 版本选择（单版本：v1~v6；累积版本：release_v1~release_v6 / release_latest）
+  #   v1        → test.jsonl  (400 题，2023-08 起)
+  #   v2        → test2.jsonl (111 题)
+  #   v3~v6     → test3~6.jsonl
+  #   release_latest → 全部 6 个文件
+  # 结果按 difficulty 分类输出：easy / medium / hard / all
   LiveCodeBench:
     dataset_name: "live_code_bench"
     # limit: 5  # 快速验证：只跑5个样本
@@ -57,17 +62,19 @@ benchmarks:
     max_tokens: 12000
     few_shot_num: 0
     use_sandbox: false
-    sandbox_workers: 5
+    extra_params:
+      version: v2  # 可选：v1~v6 / release_v1~release_v6 / release_latest
 
 
 
-  # MBPP: Mostly Basic Python Problems，基础 Python 编程问题
-  MBPP:
-    dataset_name: "mbpp"
-    # limit: 5  # 快速验证：只跑5个样本
-    repeats: 1
-    temperature: 1.0
-    max_tokens: 12000
-    few_shot_num: 0
-    use_sandbox: false
-    sandbox_workers: 5
+
+  # BigCodeBench: 1140个高质量 Python 编程任务，使用 unittest 验证
+  # 支持本地执行（use_sandbox: false），无需 Docker
+  # BigCodeBench:
+  #   dataset_name: "bigcodebench"
+  #   # limit: 5  # 快速验证：只跑5个样本
+  #   repeats: 1
+  #   temperature: 1.0
+  #   max_tokens: 12000
+  #   few_shot_num: 0
+  #   use_sandbox: false  # 本地 multiprocessing 执行，无需 Docker

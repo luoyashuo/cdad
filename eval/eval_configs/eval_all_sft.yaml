@@ -94,7 +94,8 @@ benchmarks:
     few_shot_num: 0
     use_sandbox: false
     sandbox_workers: 5  # sandbox 并发数，可根据 CPU 核数调整
-
+    extra_params:
+      version: v2  # 可选：v1~v6 / release_v1~release_v6 / release_latest
   # BigCodeBench: 1140个高质量 Python 编程任务，使用 unittest 验证
   # 支持本地执行（use_sandbox: false），无需 Docker
   BigCodeBench:

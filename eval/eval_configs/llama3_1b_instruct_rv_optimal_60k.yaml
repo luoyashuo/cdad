@@ -1,0 +1,127 @@
+# EvalScope 评测配置文件 - 测试所有子集版本
+# 模型路径
+# model_path: /fs/fast/u20240075/luoyashuo/checkpoints/cold_start/qwen2.5_1.5b_meta_math_40k
+model_path: /fs/fast/u20240075/luoyashuo/cdad/checkpoints/rv_optimal/llama3_1b_instruct_rv_optimal_60k
+# 硅基流动
+# API_KEY: sk-xidkzkywwvpdhmhpbvxvhwndfksfjgsccfsydurhrvnicyxm
+# BASE_URL: https://api.siliconflow.cn/v1/chat/completions
+# 火山
+# API_KEY: b57d6d28-9ab6-4678-905c-6025d4d431cf
+# BASE_URL: https://ark.cn-beijing.volces.com/api/coding/v3
+# 千问
+BASE_URL: https://dashscope.aliyuncs.com/compatible-mode/v1
+API_KEY: sk-9ae88192c0e54080831b8a7408d2da8d
+
+# vLLM配置
+vllm:
+  tp: 2  # tensor parallel size
+  gpu_memory_utilization: 0.9  # GPU显存利用率
+  max_model_len: 16384  # vLLM启动时的最大上下文长度（prompt + completion）
+
+# 评测并发配置
+eval:
+  parallel: 25  # 并发请求数，增加可提高测试速度，但需要确保服务端能承受
+
+# 沙箱配置 - 临时文件存储路径 (避免打爆主机存储)
+sandbox:
+  work_dir: /fs/fast/u20240075/luoyashuo/tmp/evalscope_sandbox
+
+# 评测配置 - 不指定子集，测试所有默认子集
+benchmarks:
+  # MATH
+  MinervaMath:
+    dataset_name: "minerva_math"
+    repeats: 1
+    temperature: 0.7
+    max_tokens: 12000
+    few_shot_num: 0
+    judge_strategy: llm_recall   # 先规则验证，规则不通过再用 LLM judge
+    # judge_model: "Pro/MiniMaxAI/MiniMax-M2.5" # SiliconFlow 上的 judge 模型
+    judge_model: "qwen3-235b-a22b"
+    judge_parallel: 8           # LLM judge 并发数，默认 1（串行）避免触发 TPM/RPM 限制
+
+  MATH500:
+    dataset_name: "math_500"
+    repeats: 1
+    temperature: 0.7
+    max_tokens: 12000
+    few_shot_num: 0
+
+  AMC:
+    dataset_name: "amc"
+    subset: "amc24"  # AMC 必须指定年份作为子集
+    repeats: 1
+    temperature: 0.7
+    max_tokens: 12000
+    few_shot_num: 0
+
+  IMOAnswerBench:
+    dataset_name: "imo_answer_bench"
+    repeats: 1
+    temperature: 0.7
+    max_tokens: 12000
+    few_shot_num: 0
+
+  AGIEvalMath:
+    dataset_name: "agieval_math"
+    repeats: 1
+    temperature: 0.7
+    max_tokens: 12000
+    few_shot_num: 0
+
+  GSM8K:
+    dataset_name: "gsm8k"
+    repeats: 1
+    temperature: 0.7
+    max_tokens: 12000
+    few_shot_num: 0
+
+  # Code
+  HumanEval:
+    dataset_name: "humaneval"
+    repeats: 1
+    temperature: 0.7
+    max_tokens: 12000
+    few_shot_num: 0
+    use_sandbox: false
+    sandbox_workers: 5  # sandbox 并发数，可根据 CPU 核数调整
+
+  LiveCodeBench:
+    dataset_name: "live_code_bench"
+    repeats: 1
+    temperature: 0.7
+    max_tokens: 12000
+    few_shot_num: 0
+    use_sandbox: false
+    sandbox_workers: 5  # sandbox 并发数，可根据 CPU 核数调整
+    extra_params:
+      version: v2  # 可选：v1~v6 / release_v1~release_v6 / release_latest
+  # BigCodeBench: 1140个高质量 Python 编程任务，使用 unittest 验证
+  # 支持本地执行（use_sandbox: false），无需 Docker
+  BigCodeBench:
+    dataset_name: "bigcodebench"
+    repeats: 1
+    temperature: 0.7
+    max_tokens: 12000
+    few_shot_num: 0
+    use_sandbox: false  # 本地 multiprocessing 执行，无需 Docker
+
+
+  # MBPP: Mostly Basic Python Problems，基础 Python 编程问题
+  MBPP:
+    dataset_name: "mbpp"
+    repeats: 1
+    temperature: 0.7
+    max_tokens: 12000
+    few_shot_num: 0
+    use_sandbox: false
+    sandbox_workers: 5
+
+  # General
+  GPQA:
+    dataset_name: "gpqa_diamond"
+    repeats: 1
+    temperature: 0.7
+    max_tokens: 12000
+    few_shot_num: 0
+    use_sandbox: false

@@ -1,17 +1,37 @@
 # flake8: noqa: E501
+import os
 from typing import Any, Dict
 
 from evalscope.api.benchmark import BenchmarkMeta, DefaultDataAdapter
-from evalscope.api.dataset import Sample
+from evalscope.api.dataset import DatasetDict, Sample
 from evalscope.api.evaluator import TaskState
 from evalscope.api.messages.chat_message import ChatMessageUser
 from evalscope.api.metric import Score
 from evalscope.api.registry import register_benchmark
 from evalscope.constants import Tags
-from evalscope.utils.io_utils import convert_normal_types
+from evalscope.utils.io_utils import convert_normal_types, jsonl_to_list
 from evalscope.utils.logger import get_logger
 
 logger = get_logger()
+
+_LCB_LOCAL_PATH = '/fs/fast/u20240075/hf_home/datasets/livecodebench/code_generation_lite'
+
+# 版本 -> 文件列表的映射（与 code_generation_lite.py 中的 ALLOWED_FILES 保持一致）
+_LCB_VERSION_FILES = {
+    'v1': ['test.jsonl'],
+    'v2': ['test2.jsonl'],
+    'v3': ['test3.jsonl'],
+    'v4': ['test4.jsonl'],
+    'v5': ['test5.jsonl'],
+    'v6': ['test6.jsonl'],
+    'release_v1': ['test.jsonl'],
+    'release_v2': ['test.jsonl', 'test2.jsonl'],
+    'release_v3': ['test.jsonl', 'test2.jsonl', 'test3.jsonl'],
+    'release_v4': ['test.jsonl', 'test2.jsonl', 'test3.jsonl', 'test4.jsonl'],
+    'release_v5': ['test.jsonl', 'test2.jsonl', 'test3.jsonl', 'test4.jsonl', 'test5.jsonl'],
+    'release_v6': ['test.jsonl', 'test2.jsonl', 'test3.jsonl', 'test4.jsonl', 'test5.jsonl', 'test6.jsonl'],
+    'release_latest': ['test.jsonl', 'test2.jsonl', 'test3.jsonl', 'test4.jsonl', 'test5.jsonl', 'test6.jsonl'],
+}
 
 
 @register_benchmark(
@@ -22,8 +42,8 @@ logger = get_logger()
         description=
         'Live Code Bench is a benchmark for evaluating code generation models on real-world coding tasks. It includes a variety of programming problems with test cases to assess the model\'s ability to generate correct and efficient code solutions. '
         '**By default the code is executed in local environment. We recommend using sandbox execution to safely run and evaluate the generated code, please refer to the [documentation](https://evalscope.readthedocs.io/en/latest/user_guides/sandbox.html) for more details.**',
-        dataset_id='AI-ModelScope/code_generation_lite',
-        subset_list=['release_latest'],
+        dataset_id=_LCB_LOCAL_PATH,
+        subset_list=['easy', 'medium', 'hard'],
         metric_list=['acc'],
         aggregation='mean_and_pass_at_k',
         eval_split='test',
@@ -31,6 +51,15 @@ logger = get_logger()
         '### Question:\n{question_content}\n\n{format_prompt} ### Answer: (use the provided format with backticks)\n\n',
         review_timeout=6,
         extra_params={
+            'version': {
+                'type': 'str',
+                'description': (
+                    '要测试的 LiveCodeBench 版本。单版本: v1~v6；累积版本: release_v1~release_v6 / release_latest。'
+                    '例如 v2 仅测试第 2 批题目，release_latest 测试全部题目。'
+                ),
+                'value': 'release_latest',
+                'choices': list(_LCB_VERSION_FILES.keys()),
+            },
             'start_date': {
                 'type': 'str | null',
                 'description': 'Filter problems starting from this date (YYYY-MM-DD). Null keeps all.',
@@ -59,16 +88,73 @@ logger = get_logger()
 class LiveCodeBenchAdapter(DefaultDataAdapter):
     """
     Live Code Bench adapter using the new data processing framework.
+    支持通过 test_n 参数自由选择版本（v1~v6 / release_latest 等），
+    并按 difficulty 字段（easy / medium / hard）分类统计结果。
     """
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
 
+        self.version = self.extra_params.get('version', 'release_latest')
         self.debug = self.extra_params.get('debug', False)
         self.start_date = self.extra_params.get('start_date')
         self.end_date = self.extra_params.get('end_date')
 
         self.save_metadata = False  # Don't save metadata, since they are large
+
+    def load_dataset(self) -> DatasetDict:
+        """直接从本地 JSONL 文件加载数据，按 difficulty 分组后返回 DatasetDict。"""
+        from evalscope.api.dataset import MemoryDataset
+        from .load_utils import filter_date
+
+        files = _LCB_VERSION_FILES.get(self.version, _LCB_VERSION_FILES['release_latest'])
+        logger.info(f'[LiveCodeBench] 加载版本 {self.version}，文件列表: {files}')
+
+        all_records = []
+        for fname in files:
+            fpath = os.path.join(_LCB_LOCAL_PATH, fname)
+            records = jsonl_to_list(fpath)
+            all_records.extend(records)
+        logger.info(f'[LiveCodeBench] 共加载 {len(all_records)} 条样本')
+
+        # 转换为 Sample，按 difficulty 分组
+        samples_by_diff: Dict[str, list] = {'easy': [], 'medium': [], 'hard': []}
+        for record in all_records:
+            # 日期过滤（仅在设置了日期范围且 contest_date 非空时执行）
+            contest_date = record.get('contest_date', '')
+            if (self.start_date or self.end_date) and contest_date:
+                if not filter_date(contest_date, start_date=self.start_date, end_date=self.end_date):
+                    continue
+
+            sample = self.record_to_sample(record)
+            diff = sample.subset_key or 'unknown'
+            if diff in samples_by_diff:
+                samples_by_diff[diff].append(sample)
+
+        # 应用 limit（按 easy/medium/hard 顺序依次截断，总数不超过 limit）
+        if self.limit:
+            limit = int(self.limit)
+            remaining = limit
+            for diff in list(samples_by_diff.keys()):
+                take = min(remaining, len(samples_by_diff[diff]))
+                samples_by_diff[diff] = samples_by_diff[diff][:take]
+                remaining -= take
+
+        # 构建 DatasetDict
+        dataset_dict_data = {}
+        for diff, diff_samples in samples_by_diff.items():
+            if not diff_samples:
+                continue
+            ds = MemoryDataset(diff_samples, name=f'live_code_bench_{diff}')
+            ds.reindex(group_size=self.repeats)
+            dataset_dict_data[diff] = ds
+
+        counts = {d: len(s) for d, s in samples_by_diff.items()}
+        logger.info(f'[LiveCodeBench] 各难度样本数: {counts}')
+
+        self.test_dataset = DatasetDict(dataset_dict_data)
+        self.fewshot_dataset = None
+        return self.test_dataset
 
     def record_to_sample(self, record: Dict[str, Any]) -> Sample:
         """Convert a data record to a Sample object."""
@@ -83,16 +169,17 @@ class LiveCodeBenchAdapter(DefaultDataAdapter):
         return Sample(
             input=[ChatMessageUser(content=full_prompt)],
             target='',
+            subset_key=record.get('difficulty'),  # 用于按难度分组统计
             metadata={
                 'evaluation_sample': record['evaluation_sample'],
-                'contest_date': record['contest_date']
+                'contest_date': record['contest_date'],
+                'difficulty': record.get('difficulty', 'unknown'),
             }
         )
 
     def sample_filter(self, sample):
-        from .load_utils import filter_date
-
-        return filter_date(sample.metadata['contest_date'], start_date=self.start_date, end_date=self.end_date)
+        # 日期过滤已在 load_dataset 中处理，此处直接放行
+        return True
 
     def extract_answer(self, prediction: str, task_state: TaskState) -> str:
         """Extract code from the prediction."""

@@ -1399,5 +1399,83 @@
       "user_tag": "user",
       "assistant_tag": "assistant"
     }
+  },
+  "bespoke_code_train": {
+    "file_name": "/fs/fast/u20240075/hf_home/datasets/Yaseal/CDAD_EXP/bespoke_code/train.jsonl",
+    "formatting": "sharegpt",
+    "columns": {
+      "messages": "conversations"
+    },
+    "tags": {
+      "role_tag": "role",
+      "content_tag": "content",
+      "user_tag": "user",
+      "assistant_tag": "assistant"
+    }
+  },
+  "bespoke_code_val": {
+    "file_name": "/fs/fast/u20240075/hf_home/datasets/Yaseal/CDAD_EXP/bespoke_code/val.jsonl",
+    "formatting": "sharegpt",
+    "columns": {
+      "messages": "conversations"
+    },
+    "tags": {
+      "role_tag": "role",
+      "content_tag": "content",
+      "user_tag": "user",
+      "assistant_tag": "assistant"
+    }
+  },
+  "kodcode_10k_train": {
+    "file_name": "/fs/fast/u20240075/hf_home/datasets/Yaseal/CDAD_EXP/kodcode_10k/train.jsonl",
+    "formatting": "sharegpt",
+    "columns": {
+      "messages": "conversations"
+    },
+    "tags": {
+      "role_tag": "role",
+      "content_tag": "content",
+      "user_tag": "user",
+      "assistant_tag": "assistant"
+    }
+  },
+  "kodcode_10k_val": {
+    "file_name": "/fs/fast/u20240075/hf_home/datasets/Yaseal/CDAD_EXP/kodcode_10k/val.jsonl",
+    "formatting": "sharegpt",
+    "columns": {
+      "messages": "conversations"
+    },
+    "tags": {
+      "role_tag": "role",
+      "content_tag": "content",
+      "user_tag": "user",
+      "assistant_tag": "assistant"
+    }
+  },
+  "omnithought_rv_optimal_60k_train": {
+    "file_name": "/fs/fast/u20240075/hf_home/datasets/Yaseal/CDAD_EXP/omnithought_rv_optimal_60k/train.jsonl",
+    "formatting": "sharegpt",
+    "columns": {
+      "messages": "conversations"
+    },
+    "tags": {
+      "role_tag": "role",
+      "content_tag": "content",
+      "user_tag": "user",
+      "assistant_tag": "assistant"
+    }
+  },
+  "omnithought_rv_optimal_60k_val": {
+    "file_name": "/fs/fast/u20240075/hf_home/datasets/Yaseal/CDAD_EXP/omnithought_rv_optimal_60k/val.jsonl",
+    "formatting": "sharegpt",
+    "columns": {
+      "messages": "conversations"
+    },
+    "tags": {
+      "role_tag": "role",
+      "content_tag": "content",
+      "user_tag": "user",
+      "assistant_tag": "assistant"
+    }
   }
 }
