@@ -15,7 +15,7 @@ API_KEY: sk-9ae88192c0e54080831b8a7408d2da8d
 # vLLM配置（离线模式，直接加载模型，无需HTTP服务）
 vllm:
   tp: 1              # tensor parallel size（每个DP分片占几张GPU）
-  dp: 2              # data parallel size（几个LLM实例，dp>1时用Ray）
+  dp: 1              # data parallel size（几个LLM实例，dp>1时用Ray）
   gpu_memory_utilization: 0.9
   max_model_len: 16384
   enforce_eager: true
@@ -51,7 +51,7 @@ benchmarks:
 
   AMC:
     dataset_name: "amc"
-    subset: "amc24"  # AMC 必须指定年份作为子集
+    subset: "amc23"  # AMC 必须指定年份作为子集
     repeats: 1
     temperature: 0.7
     max_tokens: 12000
@@ -85,45 +85,4 @@ benchmarks:
     max_tokens: 12000
     few_shot_num: 0
     use_sandbox: false
-
-  # Code
-  # HumanEval:
-  #   dataset_name: "humaneval"
-  #   repeats: 1
-  #   temperature: 0.7
-  #   max_tokens: 12000
-  #   few_shot_num: 0
-  #   use_sandbox: false
-  #   sandbox_workers: 5  # sandbox 并发数，可根据 CPU 核数调整
-
-  # LiveCodeBench:
-  #   dataset_name: "live_code_bench"
-  #   repeats: 1
-  #   temperature: 0.7
-  #   max_tokens: 12000
-  #   few_shot_num: 0
-  #   use_sandbox: false
-  #   sandbox_workers: 5  # sandbox 并发数，可根据 CPU 核数调整
-  #   extra_params:
-  #     version: v2  # 可选：v1~v6 / release_v1~release_v6 / release_latest
-  # # BigCodeBench: 1140个高质量 Python 编程任务，使用 unittest 验证
-  # # 支持本地执行（use_sandbox: false），无需 Docker
-  # BigCodeBench:
-  #   dataset_name: "bigcodebench"
-  #   repeats: 1
-  #   temperature: 0.7
-  #   max_tokens: 12000
-  #   few_shot_num: 0
-  #   use_sandbox: false  # 本地 multiprocessing 执行，无需 Docker
-
-
-  # # MBPP: Mostly Basic Python Problems，基础 Python 编程问题
-  # MBPP:
-  #   dataset_name: "mbpp"
-  #   repeats: 1
-  #   temperature: 0.7
-  #   max_tokens: 12000
-  #   few_shot_num: 0
-  #   use_sandbox: false
-  #   sandbox_workers: 5
 

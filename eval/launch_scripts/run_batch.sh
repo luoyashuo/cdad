@@ -2,7 +2,7 @@
 # run_batch.sh - 等待当前 GPU 0,1 上的训练进程（及祖先链）结束后，依次评测多个 checkpoint
 # 启动方式: nohup bash launch_scripts/run_batch.sh > vllm_logs/batch_main.log 2>&1 &
 
-export CUDA_VISIBLE_DEVICES="0,1"
+export CUDA_VISIBLE_DEVICES="0"
 export no_proxy=localhost,127.0.0.1
 export HF_HOME=/fs/fast/u20240075/hf_home
 # 激活 uv 虚拟环境
@@ -23,7 +23,7 @@ log() {
 # ============================================================
 # Step 1: 等待训练进程结束 (修改这里为实际的训练脚本 PID)
 # ============================================================
-TRAIN_PID=23845  # run_exps.sh 的 PID
+TRAIN_PID=50389  # run_exps.sh 的 PID
 
 log "等待训练进程 PID $TRAIN_PID 结束..."
 while kill -0 "$TRAIN_PID" 2>/dev/null; do
@@ -47,7 +47,8 @@ declare -a JOBS=(
     # "/fs/fast/u20240075/luoyashuo/cdad/checkpoints/rv_optimal/llama3_1b_instruct_kodcode_10k"  "eval_configs/eval_code.yaml"
     # "/fs/fast/u20240075/luoyashuo/cdad/checkpoints/rv_optimal/llama3_1b_instruct_rv_optimal_60k"  "eval_configs/eval_code.yaml"
     # "/fs/fast/u20240075/luoyashuo/cdad/checkpoints/rv_optimal/llama3_1b_instruct_rv_optimal_100k"   "eval_configs/eval_code.yaml"
-    "/fs/fast/u20240075/luoyashuo/cdad/checkpoints/rv_optimal/llama3_1b_instruct_rv_optimal_math_50k"  "eval_configs/eval_code.yaml"
+    # "/fs/fast/u20240075/luoyashuo/cdad/checkpoints/rv_optimal/llama3_1b_instruct_rv_optimal_math_50k"  "eval_configs/eval_all_sft.yaml"
+    "/fs/fast/u20240075/hf_home/models/asas-ai-Llama-3.2-1B-Open-R1-Distill"    "eval_configs/eval_code.yaml"
     
 )
 

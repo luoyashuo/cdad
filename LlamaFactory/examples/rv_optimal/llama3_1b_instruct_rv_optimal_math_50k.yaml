@@ -13,12 +13,12 @@ deepspeed: /home/u20240075/luoyashuo/projects/cdad/LlamaFactory/examples/deepspe
 dataset: omnithought_rv_optimal_math_50k_train
 template: llama3
 # resize_vocab: true
-cutoff_len: 9999
+cutoff_len: 8192
 max_samples: 9999999999
 preprocessing_num_workers: 16
 dataloader_num_workers: 8
 dataloader_prefetch_factor: 4 
-neat_packing: true
+# neat_packing: true # 开启可以提高40%的速度，但是有时候会报和rope有关的错误，没搞清楚
 
 
 ### output
