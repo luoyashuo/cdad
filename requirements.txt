@@ -10,7 +10,7 @@ pyyaml>=6.0
 rich
 loguru
 colorlog
-setuptools
+setuptools==74.1.1
 packaging
 ninja
 psutil>=5.9.0

@@ -2,11 +2,13 @@
 # run_batch.sh - 等待当前 GPU 0,1 上的训练进程（及祖先链）结束后，依次评测多个 checkpoint
 # 启动方式: nohup bash launch_scripts/run_batch.sh > vllm_logs/batch_main.log 2>&1 &
 
-export CUDA_VISIBLE_DEVICES="0"
+# export CUDA_VISIBLE_DEVICES="0"
 export no_proxy=localhost,127.0.0.1
-export HF_HOME=/fs/fast/u20240075/hf_home
+export HF_HOME=/data/hf_home
+export MODELSCOPE_CACHE=/data/modelscope
+export HF_ENDPOINT=https://hf-mirror.com
 # 激活 uv 虚拟环境
-source /home/u20240075/luoyashuo/projects/cdad/.venv/bin/activate
+source /home/luoys/cdad/.venv/bin/activate
 
 # 切换到 eval 根目录
 cd "$(dirname "$0")/.." || exit 1
@@ -23,7 +25,7 @@ log() {
 # ============================================================
 # Step 1: 等待训练进程结束 (修改这里为实际的训练脚本 PID)
 # ============================================================
-TRAIN_PID=50389  # run_exps.sh 的 PID
+TRAIN_PID=919728  # run_exps.sh 的 PID
 
 log "等待训练进程 PID $TRAIN_PID 结束..."
 while kill -0 "$TRAIN_PID" 2>/dev/null; do
@@ -37,22 +39,13 @@ log "训练进程已结束，开始执行评测"
 # 格式: 每两个相邻元素为一组 (model_path, base_config)
 # ============================================================
 declare -a JOBS=(
-    # "/fs/fast/u20240075/luoyashuo/modelscope_cache/models/LLM-Research/Llama-3.2-1B-Instruct"    "eval_configs/eval_all.yaml"
-    # "/fs/fast/u20240075/luoyashuo/modelscope_cache/models/LLM-Research/Llama-3.2-1B-Instruct"    "eval_configs/eval_code.yaml"
-    # "/fs/fast/u20240075/luoyashuo/cdad/checkpoints/rv_optimal/llama3_1b_instruct_rv_optimal_50k"  "eval_configs/eval_all_sft.yaml"
-#     "/fs/fast/u20240075/luoyashuo/cdad/checkpoints/rv_optimal/llama3_1b_instruct_rv_optimal_50k"  "eval_configs/eval_code.yaml"
-#     "/fs/fast/u20240075/luoyashuo/modelscope_cache/models/LLM-Research/Llama-3.2-3B-Instruct"    "eval_configs/eval_all.yaml"
-    # "/fs/fast/u20240075/luoyashuo/cdad/checkpoints/rv_optimal/llama3_1b_instruct_bespoke_code"   "eval_configs/eval_code.yaml"
-    # "/fs/fast/u20240075/luoyashuo/cdad/checkpoints/rv_optimal/llama3_1b_instruct_rv_optimal_50k_bad_code" "eval_configs/eval_code.yaml"
-    # "/fs/fast/u20240075/luoyashuo/cdad/checkpoints/rv_optimal/llama3_1b_instruct_kodcode_10k"  "eval_configs/eval_code.yaml"
-    # "/fs/fast/u20240075/luoyashuo/cdad/checkpoints/rv_optimal/llama3_1b_instruct_rv_optimal_60k"  "eval_configs/eval_code.yaml"
-    # "/fs/fast/u20240075/luoyashuo/cdad/checkpoints/rv_optimal/llama3_1b_instruct_rv_optimal_100k"   "eval_configs/eval_code.yaml"
-    # "/fs/fast/u20240075/luoyashuo/cdad/checkpoints/rv_optimal/llama3_1b_instruct_rv_optimal_math_50k"  "eval_configs/eval_all_sft.yaml"
-    "/fs/fast/u20240075/hf_home/models/asas-ai-Llama-3.2-1B-Open-R1-Distill"    "eval_configs/eval_code.yaml"
+    "/data/modelscope_cache/models/Qwen/Qwen2.5-1.5B-Instruct"    "eval_configs/eval_all_sft.yaml"
+    "/data/modelscope_cache/models/Qwen/Qwen2.5-3B-Instruct"    "eval_configs/eval_all_sft.yaml"
+    "/data/cdad/checkpoints/vallina_sft/qwen2.5_1.5b_instruct_vallina_sft_50k"    "eval_configs/eval_all_sft.yaml"
     
 )
 
-NUM_RUNS=3
+NUM_RUNS=4
 
 # ============================================================
 
@@ -60,6 +53,8 @@ TOTAL=$(( ${#JOBS[@]} / 2 ))
 log "========== 批量评测开始，共 $TOTAL 个模型，每个运行 $NUM_RUNS 次 =========="
 
 FAILED=0
+declare -a SUCCEEDED_PATHS=()
+
 for (( i=0; i<${#JOBS[@]}; i+=2 )); do
     MODEL_PATH="${JOBS[$i]}"
     BASE_CONFIG="${JOBS[$i+1]}"
@@ -86,6 +81,7 @@ for (( i=0; i<${#JOBS[@]}; i+=2 )); do
 
     if [ $EXIT_CODE -eq 0 ]; then
         log "  [完成] 任务 $JOB_NUM/$TOTAL ($MODEL_NAME) 成功"
+        SUCCEEDED_PATHS+=("$MODEL_PATH")
     else
         log "  [失败] 任务 $JOB_NUM/$TOTAL ($MODEL_NAME) 退出码: $EXIT_CODE"
         FAILED=$((FAILED + 1))
@@ -94,3 +90,21 @@ for (( i=0; i<${#JOBS[@]}; i+=2 )); do
 done
 
 log "========== 批量评测结束：$TOTAL 个模型，失败 $FAILED 个 =========="
+
+# ============================================================
+# Step 3: 汇总所有成功模型的结果到一个 Excel 文件
+# ============================================================
+if [ ${#SUCCEEDED_PATHS[@]} -gt 0 ]; then
+    SUMMARY_XLSX="$LOG_DIR/batch_summary_$(date '+%Y%m%d_%H%M%S').xlsx"
+    log "========== 开始汇总结果到 $SUMMARY_XLSX =========="
+    python collect_results.py "${SUCCEEDED_PATHS[@]}" \
+        --output "$SUMMARY_XLSX" \
+        --num-runs "$NUM_RUNS"
+    if [ $? -eq 0 ]; then
+        log "========== 汇总完成：$SUMMARY_XLSX =========="
+    else
+        log "========== 汇总失败，请手动运行 collect_results.py =========="
+    fi
+else
+    log "没有成功完成的任务，跳过汇总。"
+fi

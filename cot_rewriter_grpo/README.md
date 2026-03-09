@@ -71,15 +71,8 @@ R_logic = 1 if FSF(Rewrite_CoT) < FSF(Original_CoT) else 0
 
 ```bash
 cd cot_rewriter_grpo
-
-# 使用 uv 创建虚拟环境（Python 3.12 推荐）
 uv venv --python 3.12
-
-# 激活虚拟环境
 source .venv/bin/activate
-
-
-# 安装 VERL 框架（在父目录的 verl 中）
 cd verl
 uv pip install -e .
 uv pip install vllm==0.8.5.post1

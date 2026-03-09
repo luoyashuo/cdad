@@ -39,7 +39,7 @@ install_requires = [
     "torchdata",
     "tensordict>=0.8.0,<=0.9.1,!=0.9.0",
     "transformers",
-    "wandb",
+    "wandb>=0.16.0",
     "packaging>=20.0",
 ]
 

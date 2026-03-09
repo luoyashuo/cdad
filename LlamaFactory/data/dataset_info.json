@@ -1529,5 +1529,31 @@
       "user_tag": "user",
       "assistant_tag": "assistant"
     }
+  },
+  "deepmath_plain_50k_train": {
+    "file_name": "/data/hf_home/datasets/Yaseal/CDAD_EXP/deepmath_plain_50k/train.jsonl",
+    "formatting": "sharegpt",
+    "columns": {
+      "messages": "conversations"
+    },
+    "tags": {
+      "role_tag": "role",
+      "content_tag": "content",
+      "user_tag": "user",
+      "assistant_tag": "assistant"
+    }
+  },
+  "deepmath_plain_50k_val": {
+    "file_name": "/data/hf_home/datasets/Yaseal/CDAD_EXP/deepmath_plain_50k/val.jsonl",
+    "formatting": "sharegpt",
+    "columns": {
+      "messages": "conversations"
+    },
+    "tags": {
+      "role_tag": "role",
+      "content_tag": "content",
+      "user_tag": "user",
+      "assistant_tag": "assistant"
+    }
   }
 }

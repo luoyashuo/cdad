@@ -10,11 +10,11 @@
 5. 分别随机抽取 SFT 和 RL 数据，保证数据隔离
 
 输入文件：
-  - /fs/fast/u20240075/hf_home/datasets/alibaba-pai/OmniThought/data/*.parquet
+  - /data/hf_home/datasets/alibaba-pai/OmniThought/data/*.parquet
 
 输出文件：
-  - /fs/fast/u20240075/hf_home/datasets/Yaseal/CDAD_EXP/omnithought_sft_60k/train.jsonl
-  - /fs/fast/u20240075/hf_home/datasets/Yaseal/CDAD_EXP/omnithought_rl_20k/train.jsonl
+  - /data/hf_home/datasets/Yaseal/CDAD_EXP/omnithought_sft_60k/train.jsonl
+  - /data/hf_home/datasets/Yaseal/CDAD_EXP/omnithought_rl_20k/train.jsonl
 
 输出格式与 select_sft_data_and_rl_data.py 保持一致：
   {"question": "...", "reasoning": [...]}
@@ -33,9 +33,9 @@ from tqdm import tqdm
 
 
 # 默认配置
-DEFAULT_INPUT = "/fs/fast/u20240075/hf_home/datasets/alibaba-pai/OmniThought/data"
-DEFAULT_SFT_OUTPUT = "/fs/fast/u20240075/hf_home/datasets/Yaseal/CDAD_EXP/omnithought_sft_60k/train.jsonl"
-DEFAULT_RL_OUTPUT = "/fs/fast/u20240075/hf_home/datasets/Yaseal/CDAD_EXP/omnithought_rl_20k/train.jsonl"
+DEFAULT_INPUT = "/data/hf_home/datasets/alibaba-pai/OmniThought/data"
+DEFAULT_SFT_OUTPUT = "/data/hf_home/datasets/Yaseal/CDAD_EXP/omnithought_sft_60k/train.jsonl"
+DEFAULT_RL_OUTPUT = "/data/hf_home/datasets/Yaseal/CDAD_EXP/omnithought_rl_20k/train.jsonl"
 DEFAULT_SFT_MATH = 30000
 DEFAULT_SFT_CODE = 30000
 DEFAULT_RL_MATH = 10000
@@ -50,7 +50,7 @@ DEFAULT_CD_MAX = 10
 DEFAULT_MIN_THOUGHTS = 1
 
 # Token 长度过滤默认值
-DEFAULT_TOKENIZER = "/fs/fast/u20240075/luoyashuo/modelscope_cache/models/LLM-Research/Llama-3.2-1B-Instruct"
+DEFAULT_TOKENIZER = "/data/luoyashuo/modelscope_cache/models/LLM-Research/Llama-3.2-1B-Instruct"
 DEFAULT_MAX_THOUGHT_TOKENS = 4096
 DEFAULT_MAX_QUESTION_TOKENS = 1024
 TOKENIZE_BATCH_SIZE = 512
@@ -629,13 +629,13 @@ python reasoning_graph/select_sft_data_and_rl_data_omnithought.py \
     --rv-min 3 --rv-max 5 --cd-min 0 --cd-max 6 \
     --sft-math 50000 --sft-code 50000 \
     --rl-math 10000  --rl-code 10000 \
-    --sft-output /fs/fast/u20240075/hf_home/datasets/Yaseal/CDAD_EXP/omnithought_sft_100k/train.jsonl \
-    --rl-output  /fs/fast/u20240075/hf_home/datasets/Yaseal/CDAD_EXP/omnithought_rl_20k/train.jsonl
+    --sft-output /data/hf_home/datasets/Yaseal/CDAD_EXP/omnithought_sft_100k/train.jsonl \
+    --rl-output  /data/hf_home/datasets/Yaseal/CDAD_EXP/omnithought_rl_20k/train.jsonl
     
 python reasoning_graph/select_sft_data_and_rl_data_omnithought.py \
     --rv-min 3 --rv-max 5 --cd-min 0 --cd-max 6 \
     --sft-math 50000 --sft-code 0 \
     --rl-math 20000  --rl-code 0 \
-    --sft-output /fs/fast/u20240075/hf_home/datasets/Yaseal/CDAD_EXP/omnithought_sft_math_50k/train.jsonl \
-    --rl-output  /fs/fast/u20240075/hf_home/datasets/Yaseal/CDAD_EXP/omnithought_rl_math_20k/train.jsonl
+    --sft-output /data/hf_home/datasets/Yaseal/CDAD_EXP/omnithought_sft_math_50k/train.jsonl \
+    --rl-output  /data/hf_home/datasets/Yaseal/CDAD_EXP/omnithought_rl_math_20k/train.jsonl
 """

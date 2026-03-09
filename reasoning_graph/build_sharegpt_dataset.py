@@ -6,7 +6,13 @@
   1. cd_optimal: 选择 CD 在指定范围内的 CoT（默认 0-6，适合 7B 模型）
   2. rv_optimal: 选择 RV 在指定范围内的 CoT（默认 3-5，适合 7B 模型）
   3. combined: 双规则概率采样（P1: CD匹配模型能力 + P2: CD-RV差距惩罚）
-  4. 旧策略: selected_by_cognitive_difficulty, selected_by_reasoning_verbosity, selected_by_lowest_fsf
+  4. plain: 无 CD/RV 过滤，随机取一个 thought — 适用于 DeepMath 等无 CD/RV 指标的数据
+  5. 旧策略: selected_by_cognitive_difficulty, selected_by_reasoning_verbosity, selected_by_lowest_fsf
+
+输入格式兼容两种 reasoning 子项格式：
+  OmniThought: {"thought": "...", "full_response": "...", "Cognitive_Difficulty": {...}, ...}
+  DeepMath:    {"thought": "...", "solution": "..."}
+  — 缺少 full_response 时，自动由 thought+solution 拼装：<think>\\n{thought}\\n</think>\\n{solution}
 
 额外参数:
   --fsf_lowest: 在候选范围内直接选择 FSF 最低的 CoT（而非概率采样）
@@ -118,12 +124,14 @@ def parse_arguments():
             "rv_optimal",           # RV 范围筛选
             "combined",             # 双规则概率采样
             "random",               # 随机筛选（在CD/RV范围内随机选择）
+            # DeepMath / 无CD-RV指标数据专用
+            "plain",                # 直接随机取一个 thought，无 CD/RV 过滤
             # 旧策略（直接使用预选字段）
             "selected_by_cognitive_difficulty",
             "selected_by_lowest_fsf",
             "selected_by_reasoning_verbosity"
         ],
-        help="选择策略: cd_optimal/rv_optimal/combined/random（论文方法）或旧字段选择器"
+        help="选择策略: cd_optimal/rv_optimal/combined/random（论文方法）、plain（DeepMath 等无CD/RV指标数据）或旧字段选择器"
     )
     parser.add_argument(
         "--output", "-o",
@@ -532,6 +540,8 @@ def select_thought_by_strategy(
         )
     elif strategy == "random":
         return select_random(reasoning, cd_min, cd_max, rv_min, rv_max)
+    elif strategy == "plain":
+        return select_plain(reasoning)
     else:
         # 旧策略：直接使用预选字段
         return item.get(strategy, None)
@@ -615,10 +625,10 @@ def convert_to_sharegpt_with_strategy(
     if selected_thought is None:
         return None
 
-    # 提取 thought 和 full_response
-    full_response = selected_thought.get("full_response", "").strip()
+    # 构建 assistant 内容：优先用 full_response，否则由 thought+solution 拼装
+    assistant_content = build_assistant_content(selected_thought)
 
-    # 提取 FSF 用于后续排序
+    # 提取 FSF 用于后续排序（DeepMath 无此字段，默认 0.0）
     reasoning_graph = selected_thought.get("reasoning_graph", [])
     fsf = reasoning_graph[0].get("fsf", 0.0) if reasoning_graph else 0.0
 
@@ -631,7 +641,7 @@ def convert_to_sharegpt_with_strategy(
             },
             {
                 "role": "assistant",
-                "content": full_response
+                "content": assistant_content
             }
         ],
         "_fsf": fsf  # 临时保存 FSF 用于后续排序
@@ -640,9 +650,37 @@ def convert_to_sharegpt_with_strategy(
     return sharegpt_item
 
 
+def select_plain(reasoning: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """
+    Plain 策略：不做 CD/RV 过滤，从 reasoning 中随机取一个 thought。
+    适用于 DeepMath 等没有 CD/RV 指标的数据。
+    """
+    if not reasoning:
+        return None
+    return random.choice(reasoning)
+
+
+def build_assistant_content(selected_thought: Dict[str, Any]) -> str:
+    """
+    构建 assistant 的回复内容。
+    优先使用 full_response 字段（OmniThought 格式）；
+    若不存在，则由 thought + solution 拼装（DeepMath 格式）：
+      <think>\\n{thought}\\n</think>\\n{solution}
+    """
+    full_response = selected_thought.get("full_response", "").strip()
+    if full_response:
+        return full_response
+
+    thought = selected_thought.get("thought", "").strip()
+    solution = selected_thought.get("solution", "").strip()
+    if thought and solution:
+        return f"<think>\n{thought}\n</think>\n{solution}"
+    return thought or solution
+
+
 def is_new_strategy(selector: str) -> bool:
-    """判断是否为新策略（论文方法）"""
-    return selector in ["cd_optimal", "rv_optimal", "combined", "random"]
+    """判断是否为新策略（论文方法或 plain）"""
+    return selector in ["cd_optimal", "rv_optimal", "combined", "random", "plain"]
 
 
 def register_to_dataset_info(dataset_info_path: str, dataset_name: str, file_path: str) -> bool:
@@ -723,12 +761,15 @@ def main():
 
     # 如果是新策略，显示参数配置
     if is_new_strategy(args.selector):
-        logger.info(f"   📊 CD 范围: [{args.cd_min}, {args.cd_max}]")
-        logger.info(f"   📊 RV 范围: [{args.rv_min}, {args.rv_max}]")
-        if args.selector == "combined":
-            logger.info(f"   📊 μ_CD (模型能力阈值): {args.mu_cd}")
-            logger.info(f"   📊 β (P1/P2 权重): {args.beta}")
-        logger.info(f"   📊 FSF 最低优先: {args.fsf_lowest}")
+        if args.selector == "plain":
+            logger.info(f"   📊 plain 策略：无 CD/RV 过滤，随机取一个 thought（适用于 DeepMath 等数据）")
+        else:
+            logger.info(f"   📊 CD 范围: [{args.cd_min}, {args.cd_max}]")
+            logger.info(f"   📊 RV 范围: [{args.rv_min}, {args.rv_max}]")
+            if args.selector == "combined":
+                logger.info(f"   📊 μ_CD (模型能力阈值): {args.mu_cd}")
+                logger.info(f"   📊 β (P1/P2 权重): {args.beta}")
+            logger.info(f"   📊 FSF 最低优先: {args.fsf_lowest}")
     if args.fsf_topk:
         logger.info(f"   📊 FSF Top-K 选择: {args.fsf_topk} 条（按 FSF 倒序）")
 
@@ -913,31 +954,39 @@ if __name__ == "__main__":
     exit(main())
 """
 python build_sharegpt_dataset.py \
-    -i /fs/fast/u20240075/hf_home/datasets/Yaseal/CDAD_EXP/omnithought_sft_math_50k/train.jsonl \
+    -i /data/hf_home/datasets/Yaseal/CDAD_EXP/omnithought_sft_math_50k/train.jsonl \
     -s rv_optimal \
     --rv_min 3 --rv_max 5 \
     --cd_min 0 --cd_max 6 \
-    -o /fs/fast/u20240075/hf_home/datasets/Yaseal/CDAD_EXP/omnithought_rv_optimal_math_50k \
+    -o /data/hf_home/datasets/Yaseal/CDAD_EXP/omnithought_rv_optimal_math_50k \
     --train-ratio 0.99 \
     -r ../LlamaFactory/data/dataset_info.json
     
 python build_sharegpt_dataset.py \
-    -i /fs/fast/u20240075/hf_home/datasets/Yaseal/CDAD_EXP/omnithought_sft_50k/train.jsonl \
+    -i /data/hf_home/datasets/Yaseal/CDAD_EXP/omnithought_sft_50k/train.jsonl \
     -s combined \
     --rv_min 3 --rv_max 5 \
     --cd_min 0 --cd_max 6 \
-    -o /fs/fast/u20240075/hf_home/datasets/Yaseal/CDAD_EXP/omnithought_combined_50k \
+    -o /data/hf_home/datasets/Yaseal/CDAD_EXP/omnithought_combined_50k \
     --train-ratio 0.99 \
     --seed 307 \
     -r ../LlamaFactory/data/dataset_info.json
     
 python build_sharegpt_dataset.py \
-    -i /fs/fast/u20240075/hf_home/datasets/Yaseal/CDAD_EXP/omnithought_rl_50k/train.jsonl \
+    -i /data/hf_home/datasets/Yaseal/CDAD_EXP/omnithought_rl_50k/train.jsonl \
     -s random \
     --rv_min 0 --rv_max 10 \
     --cd_min 0 --cd_max 10 \
-    -o /fs/fast/u20240075/hf_home/datasets/Yaseal/CDAD_EXP/omnithought_rl_50k_sharegpt \
+    -o /data/hf_home/datasets/Yaseal/CDAD_EXP/omnithought_rl_50k_sharegpt \
     --train-ratio 0.99 \
     --seed 307 \
+    -r ../LlamaFactory/data/dataset_info.json
+    
+    
+python build_sharegpt_dataset.py \
+    -i /data/hf_home/datasets/Yaseal/CDAD_EXP/deepmath_sft_50k/train.jsonl \
+    -s plain \
+    -o /data/hf_home/datasets/Yaseal/CDAD_EXP/deepmath_plain_50k \
+    --train-ratio 0.99 \
     -r ../LlamaFactory/data/dataset_info.json
 """
