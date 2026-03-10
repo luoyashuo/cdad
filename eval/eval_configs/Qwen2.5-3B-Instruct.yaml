@@ -22,7 +22,7 @@ vllm:
 
 # 评测配置
 eval:
-  batch_size: 256      # evalscope每次传给模型的batch大小
+  batch_size: 8      # evalscope每次传给模型的batch大小
 
 # 沙箱配置 - 临时文件存储路径 (避免打爆主机存储)
 sandbox:
@@ -31,48 +31,47 @@ sandbox:
 # 评测配置 - 不指定子集，测试所有默认子集
 benchmarks:
   # MATH
-  # MATH500:
-  #   dataset_name: "math_500"
-  #   repeats: 1
-  #   temperature: 0.7
-  #   max_tokens: 12000
-  #   few_shot_num: 0
+  MATH500:
+    dataset_name: "math_500"
+    repeats: 1
+    temperature: 0.7
+    max_tokens: 12000
+    few_shot_num: 0
 
-  # AMC:
-  #   dataset_name: "amc"
-  #   subset: "amc23"  # AMC 必须指定年份作为子集
-  #   repeats: 1
-  #   temperature: 0.7
-  #   max_tokens: 12000
-  #   few_shot_num: 0
+  AMC:
+    dataset_name: "amc"
+    subset: "amc23"  # AMC 必须指定年份作为子集
+    repeats: 1
+    temperature: 0.7
+    max_tokens: 12000
+    few_shot_num: 0
 
 
-  # AGIEvalMath:
-  #   dataset_name: "agieval_math"
-  #   repeats: 1
-  #   temperature: 0.7
-  #   max_tokens: 12000
-  #   few_shot_num: 0
+  AGIEvalMath:
+    dataset_name: "agieval_math"
+    repeats: 1
+    temperature: 0.7
+    max_tokens: 12000
+    few_shot_num: 0
 
-  # GSM8K:
-  #   dataset_name: "gsm8k"
-  #   repeats: 1
-  #   temperature: 0.7
-  #   max_tokens: 12000
-  #   few_shot_num: 0
-  # # General
-  # GPQA:
-  #   dataset_name: "gpqa_extend"
-  #   repeats: 1
-  #   temperature: 0.7
-  #   max_tokens: 12000
-  #   few_shot_num: 0
-  #   use_sandbox: false
+  GSM8K:
+    dataset_name: "gsm8k"
+    repeats: 1
+    temperature: 0.7
+    max_tokens: 12000
+    few_shot_num: 0
+  # General
+  GPQA:
+    dataset_name: "gpqa_extend"
+    repeats: 1
+    temperature: 0.7
+    max_tokens: 12000
+    few_shot_num: 0
+    use_sandbox: false
 
   MMLUProNoMath:
     dataset_name: "mmlu_pro_no_math"
     repeats: 1
-    limit: 8
     temperature: 0.7
     max_tokens: 12000
     few_shot_num: 0

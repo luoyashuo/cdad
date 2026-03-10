@@ -140,7 +140,7 @@ class VLLMWorker:
     def generate(self, prompts: List[str],
                  sampling_params_dict: dict) -> List[dict]:
         from vllm import SamplingParams as _SP
-        outputs = self.llm.generate(prompts, _SP(**sampling_params_dict))
+        outputs = self.llm.generate(prompts, _SP(**sampling_params_dict), use_tqdm=False)
         return [
             {'text': o.outputs[0].text,
              'finish_reason': o.outputs[0].finish_reason}
@@ -158,14 +158,18 @@ class VLLMOfflineEngine:
     def __init__(self, model_path: str, tp: int = 1, dp: int = 1,
                  gpu_memory_utilization: float = 0.9,
                  max_model_len: Optional[int] = None,
-                 enforce_eager: bool = True):
+                 enforce_eager: bool = True,
+                 worker_chunk_size: int = 512):
         self.model_path = model_path
         self.tp = tp
         self.dp = dp
         self.model_name = _extract_model_name(model_path)
+        # dp>1 时每次给每个 Worker 的 prompt 数，控制负载均衡粒度
+        self._worker_chunk_size = worker_chunk_size
 
         logger.info(f"初始化 VLLMOfflineEngine: model={self.model_name}, "
-                    f"tp={tp}, dp={dp}, 总GPU={tp * dp}")
+                    f"tp={tp}, dp={dp}, 总GPU={tp * dp}"
+                    + (f", chunk_size={worker_chunk_size}" if dp > 1 else ""))
 
         if dp == 1:
             # ---------- 单进程模式 ----------
@@ -204,12 +208,11 @@ class VLLMOfflineEngine:
         # ---------- 请求批处理（线程安全） ----------
         # evalscope 用 ThreadPoolExecutor 逐条调 generate()，
         # 但 vLLM LLM.generate() 不是线程安全的。
-        # 这里用队列 + 后台线程，收集并发请求后统一批量提交。
+        # 这里用队列 + 后台调度线程统一分发。
         self._batch_lock = threading.Lock()
         self._batch_queue: List[tuple] = []   # [(prompt, SamplingParams, Future), ...]
         self._batch_event = threading.Event()
         self._batch_running = True
-        self._batch_wait = 0.1  # 等待 100ms 收集更多请求
         self._batch_thread = threading.Thread(
             target=self._batch_loop, daemon=True, name='vllm-batcher')
         self._batch_thread.start()
@@ -230,17 +233,20 @@ class VLLMOfflineEngine:
         return future.result()
 
     def _batch_loop(self):
-        """后台线程：收集并发请求，批量提交给 vLLM。"""
+        """后台调度线程入口：根据 dp 选择调度策略。"""
+        if self.dp == 1:
+            self._batch_loop_single()
+        else:
+            self._batch_loop_dp()
+
+    def _batch_loop_single(self):
+        """dp=1：收集请求后整体批量推理（vLLM 内部做 continuous batching）。"""
         while self._batch_running:
-            # 等待至少一个请求到来
             self._batch_event.wait(timeout=1.0)
             if not self._batch_running:
                 break
-
-            # 短暂等待以收集更多并发请求
-            # evalscope 的 ThreadPoolExecutor 会在极短时间内提交 eval_batch_size 个请求
-            time.sleep(self._batch_wait)
-
+            # 短暂等待，让 evalscope ThreadPool 把同一波请求都提交进来
+            time.sleep(0.05)
             with self._batch_lock:
                 if not self._batch_queue:
                     self._batch_event.clear()
@@ -249,54 +255,93 @@ class VLLMOfflineEngine:
                 self._batch_queue.clear()
                 self._batch_event.clear()
 
-            prompts = [item[0] for item in batch]
-            sp = batch[0][1]   # 同一 benchmark 的所有请求使用相同的采样参数
-            futures = [item[2] for item in batch]
-
-            logger.info(f"Batcher: 收集到 {len(prompts)} 个请求，批量推理中...")
-
+            prompts = [x[0] for x in batch]
+            sp = batch[0][1]
+            futures = [x[2] for x in batch]
+            logger.info(f"Batcher(dp=1): {len(prompts)} 个请求，推理中...")
             try:
-                results = self._do_generate(prompts, sp)
-                for fut, result in zip(futures, results):
-                    fut.set_result(result)
+                outputs = self.llm.generate(prompts, sp, use_tqdm=False)
+                results = [{'text': o.outputs[0].text,
+                            'finish_reason': o.outputs[0].finish_reason}
+                           for o in outputs]
+                for fut, res in zip(futures, results):
+                    fut.set_result(res)
             except Exception as e:
                 for fut in futures:
                     if not fut.done():
                         fut.set_exception(e)
 
-    def _do_generate(self, prompts: List[str],
-                     sampling_params: SamplingParams) -> List[dict]:
-        """内部批量推理（非线程安全，仅由 _batch_loop 调用）。"""
-        if not prompts:
-            return []
+    def _batch_loop_dp(self):
+        """dp>1：连续调度，Worker 完成后立即接收新任务，保证满负荷运行。
 
-        if self.dp == 1:
-            outputs = self.llm.generate(prompts, sampling_params)
-            return [
-                {'text': o.outputs[0].text,
-                 'finish_reason': o.outputs[0].finish_reason}
-                for o in outputs
-            ]
+        设计要点：
+        - 每次只给每个 Worker _worker_chunk_size 个 prompt（而非平均分割全量）
+        - 用 ray.wait(num_returns=1) 检测最先完成的 Worker，立刻分配新任务
+        - 绝不等待所有 Worker 同步完成，消除慢 Worker 拖慢快 Worker 的问题
+        """
+        import ray as _ray
 
-        # dp>1: 均分到各 Ray Worker 并行推理
-        import ray
-        sp_dict = self._sampling_params_to_dict(sampling_params)
-        n = len(prompts)
-        chunk_size = max(1, (n + self.dp - 1) // self.dp)
-        chunks = [prompts[i:i + chunk_size]
-                  for i in range(0, n, chunk_size)]
+        chunk = self._worker_chunk_size
+        pending: List[tuple] = []   # (prompt, sp, client_future)
+        inflight: dict = {}         # ray_ref -> (worker_idx, [client_future, ...])
 
-        ray_futures = [
-            worker.generate.remote(chunk, sp_dict)
-            for worker, chunk in zip(self._workers, chunks)
-            if chunk
-        ]
-        chunk_results = ray.get(ray_futures)
+        def _dispatch():
+            """将 pending 中的 prompt 均匀分配给所有空闲 Worker（每个最多 chunk 个）。"""
+            if not pending:
+                return
+            busy = {v[0] for v in inflight.values()}
+            free = [i for i in range(self.dp) if i not in busy]
+            if not free:
+                return
+            sp_dict = self._sampling_params_to_dict(pending[0][1])
+            # 均分给空闲 Worker，单次上限 chunk，避免把所有任务堆给一个 Worker
+            per_worker = min(chunk, max(1, len(pending) // len(free)))
+            for w_idx in free:
+                if not pending:
+                    break
+                take = pending[:per_worker]
+                del pending[:per_worker]
+                ref = self._workers[w_idx].generate.remote(
+                    [x[0] for x in take], sp_dict)
+                inflight[ref] = (w_idx, [x[2] for x in take])
+                logger.info(f"Dispatcher: Worker-{w_idx} <- {len(take)} prompts "
+                            f"(pending={len(pending)}, inflight={len(inflight)})")
 
-        all_results = []
-        for cr in chunk_results:
-            all_results.extend(cr)
-        return all_results
+        while True:
+            # 1. 等待：优先用 ray.wait 阻塞（检测 Worker 完成），无 inflight 时等新请求
+            if inflight:
+                done, _ = _ray.wait(
+                    list(inflight.keys()), num_returns=1, timeout=0.05)
+            else:
+                self._batch_event.wait(timeout=0.05)
+                done = []
+
+            # 2. 收集新到达的请求
+            with self._batch_lock:
+                if self._batch_queue:
+                    pending.extend(self._batch_queue)
+                    self._batch_queue.clear()
+                self._batch_event.clear()
+
+            # 3. 处理已完成的 Worker → 解决其 Future，立刻触发 _dispatch
+            for ref in done:
+                w_idx, cfuts = inflight.pop(ref)
+                try:
+                    results = _ray.get(ref)
+                    for fut, res in zip(cfuts, results):
+                        if not fut.done():
+                            fut.set_result(res)
+                except Exception as e:
+                    for fut in cfuts:
+                        if not fut.done():
+                            fut.set_exception(e)
+
+            # 4. 将 pending 分配给空闲 Worker
+            _dispatch()
+
+            # 5. 退出：_batch_running=False 且所有任务处理完毕
+            if not self._batch_running and not pending and not inflight:
+                break
 
     # ---- 生命周期 ----
 
@@ -413,13 +458,16 @@ class BenchmarkEvaluator:
 
     def __init__(self, config_file: str, run_id: int = None,
                  version: str = None,
-                 vllm_engine: Optional[VLLMOfflineEngine] = None):
+                 vllm_engine: Optional[VLLMOfflineEngine] = None,
+                 completed_benchmarks: Optional[set] = None):
         self.config_file = config_file
         self.config = self._load_config()
         self.vllm_engine = vllm_engine
         self.results = {}
         self.base_dir = Path(self.config['model_path'])
         self.version = version or datetime.now().strftime("version_%Y%m%d_%H%M%S")
+        # 断点续传：已完成的 benchmark 列表（跳过推理，直接加载已有结果）
+        self.completed_benchmarks = completed_benchmarks or set()
 
         if run_id is not None:
             self.output_dir = self.base_dir / "evalscope" / self.version / f"run_{run_id}"
@@ -434,6 +482,83 @@ class BenchmarkEvaluator:
     def _load_config(self) -> Dict:
         with open(self.config_file, 'r', encoding='utf-8') as f:
             return yaml.safe_load(f)
+
+    def _save_benchmark_result(self, benchmark_name: str, result):
+        """每个 benchmark 完成后立即持久化，用于断点续传。"""
+        result_path = self.output_dir / f"{benchmark_name}_result.json"
+        serializable = self._convert_to_serializable(result)
+        with open(result_path, 'w', encoding='utf-8') as f:
+            json.dump(serializable, f, ensure_ascii=False, indent=2)
+        logger.info(f"[断点续传] {benchmark_name} 结果已保存: {result_path}")
+
+    def _load_benchmark_result(self, benchmark_name: str):
+        """加载已有的 benchmark 结果（断点续传时使用）。
+
+        优先读取我们自己保存的 {benchmark}_result.json；
+        若不存在（旧版运行或首次引入该机制前的结果），则从 evalscope 原生
+        reports/ 目录中读取 JSON 并重建 {dataset_name: report_dict} 格式。
+        """
+        # 1. 新机制：直接读取
+        result_path = self.output_dir / f"{benchmark_name}_result.json"
+        if result_path.exists():
+            with open(result_path, 'r', encoding='utf-8') as f:
+                return json.load(f)
+
+        # 2. 旧机制回退：从 evalscope reports/ 目录读取
+        bm_dir = self.output_dir / benchmark_name
+        if not bm_dir.is_dir():
+            return None
+        # benchmark 目录下有一个时间戳子目录（evalscope 自动生成）
+        ts_dirs = sorted(bm_dir.iterdir(), key=lambda d: d.name)
+        for ts_dir in ts_dirs:
+            reports_dir = ts_dir / "reports"
+            if not reports_dir.is_dir():
+                continue
+            result = {}
+            for model_dir in reports_dir.iterdir():
+                if not model_dir.is_dir():
+                    continue
+                for report_file in model_dir.glob("*.json"):
+                    with open(report_file, 'r', encoding='utf-8') as f:
+                        result[report_file.stem] = json.load(f)
+            if result:
+                logger.info(f"[断点续传] {benchmark_name} 从 evalscope reports/ 加载结果")
+                return result
+        return None
+
+    def _find_partial_prediction_dir(self, benchmark_name: str) -> Optional[str]:
+        """查找已有 predictions 但尚无 reports 的时间戳目录。
+
+        这类目录说明上次推理中途中断，可通过 evalscope use_cache 机制续跑。
+        只在非 completed_benchmarks 场景下被调用（completed 的直接跳过）。
+        """
+        bm_dir = self.output_dir / benchmark_name
+        if not bm_dir.is_dir():
+            return None
+        # 取最新的时间戳子目录（evalscope 按时间命名）
+        for ts_dir in sorted(bm_dir.iterdir(), key=lambda d: d.name, reverse=True):
+            if not ts_dir.is_dir():
+                continue
+            pred_dir = ts_dir / "predictions"
+            rep_dir = ts_dir / "reports"
+            has_predictions = pred_dir.is_dir() and any(pred_dir.rglob("*.jsonl"))
+            has_reports = rep_dir.is_dir() and any(rep_dir.rglob("*.json"))
+            if has_predictions and not has_reports:
+                return str(ts_dir)
+        return None
+
+    @staticmethod
+    def _count_existing_predictions(ts_dir: str) -> int:
+        """统计已有 predictions JSONL 中的条目数（用于日志展示）。"""
+        total = 0
+        pred_root = Path(ts_dir) / "predictions"
+        if pred_root.is_dir():
+            for jsonl in pred_root.rglob("*.jsonl"):
+                try:
+                    total += sum(1 for _ in open(jsonl, 'rb'))
+                except OSError:
+                    pass
+        return total
 
     def _create_task_config(self, benchmark_name: str) -> TaskConfig:
         """创建 TaskConfig 配置"""
@@ -485,14 +610,28 @@ class BenchmarkEvaluator:
         task_config.generation_config = GenerateConfig.model_validate(
             generation_config_dict)
 
-        # 批次大小（控制 evalscope ThreadPoolExecutor 的并发线程数）
-        batch_size = self.config.get('eval', {}).get('batch_size',
-                     self.config.get('eval', {}).get('parallel', 64))
-        task_config.eval_batch_size = batch_size
-        task_config.generation_config.batch_size = batch_size
+        # evalscope ThreadPoolExecutor 并发数：足够大，让 pending 队列始终有余量
+        # 供连续调度器（_batch_loop_dp）分配给所有 Worker，无需手动配置
+        vllm_cfg = self.config.get('vllm', {})
+        _dp = vllm_cfg.get('dp', 1)
+        _chunk = vllm_cfg.get('worker_chunk_size', 512)
+        # dp=1 用适中并发；dp>1 至少能填满所有 Worker 的 2 轮 chunk
+        eval_batch_size = _chunk if _dp == 1 else max(2048, _dp * _chunk * 2)
+        task_config.eval_batch_size = eval_batch_size
+        task_config.generation_config.batch_size = eval_batch_size
 
         # 工作目录
         task_config.work_dir = str(self.output_dir / benchmark_name)
+
+        # prediction 级断点续传：检测已有 predictions（无 reports）→ 设置 use_cache
+        # evalscope 的 use_cache 机制会读取已有 JSONL、自动过滤已预测 sample、只跑剩余部分
+        partial_pred_dir = self._find_partial_prediction_dir(benchmark_name)
+        if partial_pred_dir:
+            task_config.use_cache = partial_pred_dir
+            existing = self._count_existing_predictions(partial_pred_dir)
+            logger.info(
+                f"[prediction续传] {benchmark_name}: 检测到 {existing} 条已有 predictions，"
+                f"续跑剩余部分（目录: {partial_pred_dir}）")
 
         # Sandbox 配置
         if 'use_sandbox' in benchmark_config:
@@ -538,7 +677,7 @@ class BenchmarkEvaluator:
         logger.info(f"[{benchmark_name}] TaskConfig创建完成: "
                     f"model={task_config.model_id}, "
                     f"datasets={task_config.datasets}, "
-                    f"batch_size={batch_size}")
+                    f"eval_batch_size={eval_batch_size}")
         return task_config
 
     def _save_config(self):
@@ -572,6 +711,7 @@ class BenchmarkEvaluator:
                     'gpu_memory_utilization', 0.9),
                 max_model_len=vllm_cfg.get('max_model_len', None),
                 enforce_eager=vllm_cfg.get('enforce_eager', True),
+                worker_chunk_size=vllm_cfg.get('worker_chunk_size', 512),
             )
             manage_engine = True
 
@@ -597,6 +737,20 @@ class BenchmarkEvaluator:
                 repeats = self.config['benchmarks'][benchmark_name].get(
                     'repeats', 1)
                 logger.info(f"\n{'='*50}")
+
+                # 断点续传：跳过已完成的 benchmark
+                if benchmark_name in self.completed_benchmarks:
+                    saved = self._load_benchmark_result(benchmark_name)
+                    if saved is not None:
+                        self.results[benchmark_name] = saved
+                        logger.info(
+                            f"[断点续传] 跳过 {benchmark_name}，加载已有结果 "
+                            f"({idx+1}/{total})")
+                        continue
+                    else:
+                        logger.warning(
+                            f"[断点续传] {benchmark_name} 标记为已完成但结果文件缺失，重新评测")
+
                 logger.info(
                     f"正在评估 {benchmark_name} "
                     f"(repeat: {repeats}次) "
@@ -608,6 +762,8 @@ class BenchmarkEvaluator:
                 logger.info(f"开始评测 {benchmark_name}...")
                 result = run_task_with_progress(task_config, benchmark_name)
                 self.results[benchmark_name] = result
+                # 立即保存，确保中断后可续跑
+                self._save_benchmark_result(benchmark_name, result)
                 logger.info(
                     f"完成评测 {benchmark_name} ({idx+1}/{total})")
 
@@ -693,18 +849,125 @@ class BenchmarkEvaluator:
 # ============================================================
 
 class MultiRunEvaluator:
-    """多次运行评测器，用于统计方差"""
+    """多次运行评测器，用于统计方差。支持断点续传（--resume）。"""
 
-    def __init__(self, config_file: str, num_runs: int = 1):
+    _PROGRESS_FILE = "progress.json"
+
+    def __init__(self, config_file: str, num_runs: int = 1,
+                 resume: bool = False, resume_dir: Optional[str] = None):
         self.config_file = config_file
         self.num_runs = num_runs
-        self.version = datetime.now().strftime("version_%Y%m%d_%H%M%S")
+        self.resume = resume or (resume_dir is not None)
 
         with open(config_file, 'r', encoding='utf-8') as f:
             self.config = yaml.safe_load(f)
         self.base_dir = Path(self.config['model_path'])
-        self.output_dir = self.base_dir / "evalscope" / self.version
         self.all_results = []
+
+        if resume_dir is not None:
+            self._init_resume(Path(resume_dir))
+        elif resume:
+            self._init_resume(None)
+        else:
+            self.version = datetime.now().strftime("version_%Y%m%d_%H%M%S")
+            self.output_dir = self.base_dir / "evalscope" / self.version
+
+    # ---- 断点续传 ----
+
+    def _init_resume(self, specified_dir: Optional[Path]):
+        """定位续跑目录。
+        - specified_dir 不为 None：直接使用该目录（支持旧版无 progress.json 的目录）
+        - specified_dir 为 None：自动选取 evalscope/ 下最新的 version_* 目录
+        """
+        if specified_dir is not None:
+            # 用户指定了目录
+            target = specified_dir.resolve()
+            if not target.is_dir():
+                logger.warning(
+                    f"[断点续传] 指定目录不存在: {target}，将新建评测")
+                self.version = datetime.now().strftime("version_%Y%m%d_%H%M%S")
+                self.output_dir = self.base_dir / "evalscope" / self.version
+                return
+            self.output_dir = target
+            self.version = target.name
+            logger.info(f"[断点续传] 使用指定目录: {target}")
+        else:
+            # 自动检测：取 evalscope/ 下最新的 version_* 目录
+            evalscope_dir = self.base_dir / "evalscope"
+            candidates = []
+            if evalscope_dir.exists():
+                candidates = sorted(
+                    [d for d in evalscope_dir.iterdir()
+                     if d.is_dir() and d.name.startswith("version_")],
+                    key=lambda d: d.name, reverse=True
+                )
+            if not candidates:
+                logger.info("[断点续传] 未找到历史版本目录，将新建评测")
+                self.version = datetime.now().strftime("version_%Y%m%d_%H%M%S")
+                self.output_dir = self.base_dir / "evalscope" / self.version
+                return
+            self.output_dir = candidates[0]
+            self.version = candidates[0].name
+            logger.info(f"[断点续传] 自动选取最新目录: {self.output_dir}")
+
+        # 从 progress.json 读取历史 num_runs（如有）
+        progress_path = self.output_dir / self._PROGRESS_FILE
+        if progress_path.exists():
+            with open(progress_path, 'r', encoding='utf-8') as f:
+                progress = json.load(f)
+            logger.info(
+                f"[断点续传] 版本: {self.version}，"
+                f"原始运行次数: {progress.get('num_runs', '?')}")
+
+    def _save_progress(self):
+        """保存 progress.json（版本标记，供下次 --resume 定位）。"""
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        progress = {
+            'version': self.version,
+            'num_runs': self.num_runs,
+            'config_file': self.config_file,
+            'created_at': datetime.now().isoformat(),
+        }
+        with open(self.output_dir / self._PROGRESS_FILE, 'w', encoding='utf-8') as f:
+            json.dump(progress, f, ensure_ascii=False, indent=2)
+
+    def _get_completed_benchmarks(self, run_id: int) -> set:
+        """扫描 run_N 目录，返回已完成的 benchmark 集合。
+
+        判定规则（按优先级）：
+        1. 存在 {benchmark}_result.json  → 完成（新机制）
+        2. evalscope 原生 reports/ 目录中存在 *.json → 完成（旧机制回退）
+        只有 predictions/ 没有 reports/ → 未完成（推理中断）
+        """
+        run_dir = self.output_dir / f"run_{run_id}"
+        if not run_dir.exists():
+            return set()
+
+        completed = set()
+
+        # 新机制：{benchmark}_result.json
+        for p in run_dir.glob('*_result.json'):
+            completed.add(p.stem[:-len('_result')])
+
+        # 旧机制回退：扫描 evalscope 原生目录结构
+        for bm_dir in run_dir.iterdir():
+            if not bm_dir.is_dir() or bm_dir.name.endswith('_result.json'):
+                continue
+            bm_name = bm_dir.name
+            if bm_name in completed:
+                continue
+            # 在时间戳子目录下找 reports/*.json
+            for ts_dir in bm_dir.iterdir():
+                if not ts_dir.is_dir():
+                    continue
+                reports_dir = ts_dir / "reports"
+                if reports_dir.is_dir() and any(reports_dir.rglob("*.json")):
+                    completed.add(bm_name)
+                    break
+
+        return completed
+
+    # ---- 主流程 ----
 
     def run_all(self):
         logger.info(f"\n{'='*70}")
@@ -712,27 +975,64 @@ class MultiRunEvaluator:
         logger.info(f"总输出目录: {self.output_dir}")
         logger.info(f"{'='*70}\n")
 
-        # 创建离线引擎（一次加载，多次评测复用）
-        vllm_cfg = self.config.get('vllm', {})
-        engine = VLLMOfflineEngine(
-            model_path=self.config['model_path'],
-            tp=vllm_cfg.get('tp', 1),
-            dp=vllm_cfg.get('dp', 1),
-            gpu_memory_utilization=vllm_cfg.get(
-                'gpu_memory_utilization', 0.9),
-            max_model_len=vllm_cfg.get('max_model_len', None),
-            enforce_eager=vllm_cfg.get('enforce_eager', True),
-        )
+        # 保存进度标记（首次或续跑均保存，供下次 --resume 定位）
+        self._save_progress()
+
+        all_benchmarks = set(self.config.get('benchmarks', {}).keys())
+
+        # 判断哪些 run 还有待完成的 benchmark，决定是否需要引擎
+        run_plan = []  # list of (run_id, done_set, remaining_list)
+        for run_id in range(1, self.num_runs + 1):
+            done = self._get_completed_benchmarks(run_id)
+            remaining = [b for b in self.config['benchmarks'] if b not in done]
+            run_plan.append((run_id, done, remaining))
+
+        needs_engine = any(remaining for _, _, remaining in run_plan)
+
+        engine = None
+        if needs_engine:
+            vllm_cfg = self.config.get('vllm', {})
+            engine = VLLMOfflineEngine(
+                model_path=self.config['model_path'],
+                tp=vllm_cfg.get('tp', 1),
+                dp=vllm_cfg.get('dp', 1),
+                gpu_memory_utilization=vllm_cfg.get(
+                    'gpu_memory_utilization', 0.9),
+                max_model_len=vllm_cfg.get('max_model_len', None),
+                enforce_eager=vllm_cfg.get('enforce_eager', True),
+                worker_chunk_size=vllm_cfg.get('worker_chunk_size', 512),
+            )
 
         try:
-            for run_id in range(1, self.num_runs + 1):
+            for run_id, done_benchmarks, remaining in run_plan:
                 logger.info(f"\n{'#'*70}")
                 logger.info(f"# 第 {run_id}/{self.num_runs} 次运行")
+                if done_benchmarks:
+                    logger.info(f"# [断点续传] 已完成: {sorted(done_benchmarks)}")
+                    logger.info(f"# [断点续传] 待运行: {remaining}")
                 logger.info(f"{'#'*70}\n")
+
+                if not remaining:
+                    # 整个 run 已完成，直接从磁盘加载结果
+                    logger.info(f"第 {run_id} 次运行已全部完成，加载已有结果")
+                    run_dir = self.output_dir / f"run_{run_id}"
+                    results = {}
+                    for bm in all_benchmarks:
+                        result_path = run_dir / f"{bm}_result.json"
+                        if result_path.exists():
+                            with open(result_path, 'r', encoding='utf-8') as f:
+                                results[bm] = json.load(f)
+                    self.all_results.append({
+                        'run_id': run_id,
+                        'results': results,
+                        'output_dir': run_dir
+                    })
+                    continue
 
                 evaluator = BenchmarkEvaluator(
                     self.config_file, run_id=run_id,
-                    version=self.version, vllm_engine=engine)
+                    version=self.version, vllm_engine=engine,
+                    completed_benchmarks=done_benchmarks)
                 evaluator.run_evaluation()
                 evaluator.save_results()
 
@@ -743,14 +1043,15 @@ class MultiRunEvaluator:
                 })
                 logger.info(f"第 {run_id} 次运行完成")
 
-                if run_id < self.num_runs:
+                if run_id < self.num_runs and remaining:
                     logger.info("等待 5 秒后开始下一次运行...")
                     time.sleep(5)
 
             self._summarize_results()
 
         finally:
-            engine.shutdown()
+            if engine is not None:
+                engine.shutdown()
 
     def _summarize_results(self):
         logger.info(f"\n{'='*70}")
@@ -869,38 +1170,45 @@ class MultiRunEvaluator:
 # ============================================================
 
 def main():
-    if len(sys.argv) < 2:
-        print("用法: python eval.py <config_file> [num_runs]")
-        print("例如: python eval.py eval_configs/example.yaml")
-        print("例如: python eval.py eval_configs/example.yaml 5  # 运行5次")
+    import argparse
+    parser = argparse.ArgumentParser(
+        description="EvalScope 离线评测脚本",
+        formatter_class=argparse.RawTextHelpFormatter)
+    parser.add_argument('config_file', help="评测配置文件路径")
+    parser.add_argument('num_runs', nargs='?', type=int, default=1,
+                        help="运行次数（默认 1，>1 时统计均值/方差）")
+    parser.add_argument('--resume', action='store_true',
+                        help="断点续传：自动选取最新 version_* 目录，跳过已完成的 benchmark 继续评测")
+    parser.add_argument('--resume-dir', metavar='DIR',
+                        help="断点续传：直接指定上次的版本目录路径\n"
+                             "例: --resume-dir /data/.../evalscope/version_20260310_043148")
+    args = parser.parse_args()
+
+    if args.num_runs < 1:
+        print("运行次数必须大于等于 1")
         sys.exit(1)
 
-    config_file = sys.argv[1]
-
-    num_runs = 1
-    if len(sys.argv) >= 3:
-        try:
-            num_runs = int(sys.argv[2])
-            if num_runs < 1:
-                print("运行次数必须大于等于1")
-                sys.exit(1)
-        except ValueError:
-            print(f"无效的运行次数: {sys.argv[2]}")
-            sys.exit(1)
-
-    if not os.path.exists(config_file):
-        print(f"配置文件不存在: {config_file}")
+    if not os.path.exists(args.config_file):
+        print(f"配置文件不存在: {args.config_file}")
         sys.exit(1)
 
-    logger.info(f"开始运行评测，配置文件: {config_file}, 运行次数: {num_runs}")
+    is_resume = args.resume or bool(args.resume_dir)
+    resume_hint = (f"，断点续传模式（指定目录: {args.resume_dir}）" if args.resume_dir
+                   else "，断点续传模式（自动检测）" if args.resume else "")
+    logger.info(
+        f"开始运行评测，配置文件: {args.config_file}, "
+        f"运行次数: {args.num_runs}{resume_hint}")
 
-    if num_runs > 1:
-        multi_evaluator = MultiRunEvaluator(config_file, num_runs=num_runs)
-        multi_evaluator.run_all()
-    else:
-        evaluator = BenchmarkEvaluator(config_file)
+    # num_runs=1 且无 resume 时走单次路径；其他情况均走 MultiRunEvaluator
+    if args.num_runs == 1 and not is_resume:
+        evaluator = BenchmarkEvaluator(args.config_file)
         evaluator.run_evaluation()
         evaluator.save_results()
+    else:
+        multi_evaluator = MultiRunEvaluator(
+            args.config_file, num_runs=args.num_runs,
+            resume=args.resume, resume_dir=args.resume_dir)
+        multi_evaluator.run_all()
 
     logger.info("评测完成")
 

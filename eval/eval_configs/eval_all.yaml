@@ -15,15 +15,15 @@ API_KEY: sk-9ae88192c0e54080831b8a7408d2da8d
 # vLLM配置（离线模式，直接加载模型，无需HTTP服务）
 vllm:
   tp: 1              # tensor parallel size（每个DP分片占几张GPU）
-  dp: 1              # data parallel size（几个LLM实例，dp>1时用Ray）
+  dp: 8              # data parallel size（几个LLM实例，dp>1时用Ray）
   gpu_memory_utilization: 0.9
   max_model_len: 16384
   enforce_eager: true
+  worker_chunk_size: 32   # dp>1时每个Worker每轮的prompt数（越小负载越均衡，越大Ray开销越低）
 
-# 评测配置
-eval:
-  batch_size: 64      # evalscope每次传给模型的batch大小
-
+# 沙箱配置 - 临时文件存储路径 (避免打爆主机存储)
+sandbox:
+  work_dir: /data/tmp/evalscope_sandbox
 # 沙箱配置 - 临时文件存储路径 (避免打爆主机存储)
 sandbox:
   work_dir: /fs/fast/u20240075/luoyashuo/tmp/evalscope_sandbox
