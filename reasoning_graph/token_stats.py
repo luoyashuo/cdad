@@ -7,9 +7,9 @@ from tqdm import tqdm
 from multiprocessing import Pool
 import os
 
-DATASET_PATH = "/fs/fast/u20240075/hf_home/datasets/Yaseal/CDAD_EXP/omnithought_rv_optimal_math_50k/train.jsonl"
-TOKENIZER_PATH = "/fs/fast/u20240075/luoyashuo/modelscope_cache/models/LLM-Research/Llama-3.2-1B-Instruct"
-OUTPUT_DIR = "/fs/fast/u20240075/hf_home/datasets/Yaseal/CDAD_EXP/omnithought_rv_optimal_math_50k"
+DATASET_PATH = "/data/hf_home/datasets/Yaseal/CDAD_EXP/deepmath_plain_50k/train.jsonl"
+TOKENIZER_PATH = "/data/modelscope_cache/models/Qwen/Qwen2.5-1.5B-Instruct"
+OUTPUT_DIR = "/data/hf_home/datasets/Yaseal/CDAD_EXP/deepmath_plain_50k"
 NUM_WORKERS = 32
 CHUNK_SIZE = 500  # lines per worker chunk
 

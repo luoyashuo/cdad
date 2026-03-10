@@ -1,0 +1,48 @@
+### model
+model_name_or_path: /data/modelscope_cache/models/Qwen/Qwen2.5-7B-Instruct
+trust_remote_code: true
+
+### method
+stage: sft
+do_train: true
+finetuning_type: full
+deepspeed: /home/luoys/cdad/LlamaFactory/examples/deepspeed/ds_z3_config.json
+
+### dataset
+dataset: deepmath_plain_50k_train
+template: qwen
+# resize_vocab: true
+cutoff_len: 9000
+max_samples: 9999999999
+preprocessing_num_workers: 16
+dataloader_num_workers: 8
+dataloader_prefetch_factor: 4 
+neat_packing: true
+
+### output
+output_dir: /data/cdad/checkpoints/vallina_sft/qwen2.5_7b_instruct_vallina_sft_50k
+logging_steps: 10
+save_strategy: epoch
+plot_loss: true
+overwrite_output_dir: true
+save_only_model: false
+report_to: swanlab
+
+### train
+per_device_train_batch_size: 1
+gradient_accumulation_steps: 2
+gradient_checkpointing: true
+learning_rate: 2.0e-5
+num_train_epochs: 2.0
+lr_scheduler_type: cosine
+warmup_ratio: 0.1
+bf16: true
+ddp_timeout: 180000000
+resume_from_checkpoint: null
+flash_attn: fa2 
+max_grad_norm: 1.0 # 建议加上，之前效果不好貌似都有grad spike
+### eval
+eval_dataset: deepmath_plain_50k_val
+per_device_eval_batch_size: 1
+eval_strategy: steps
+eval_steps: 1000

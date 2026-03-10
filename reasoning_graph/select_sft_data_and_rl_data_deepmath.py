@@ -5,12 +5,11 @@
 实际数据格式（parquet，每行字段）：
   columns: question, final_answer, difficulty, topic, r1_solution_1, r1_solution_2, r1_solution_3
 
-每个 r1_solution_i 为完整的推理文本（多行），末尾含 \\boxed{answer}。
-解析方式（参考格式提示）：
-  thought = r1_solution_i          # 完整推理文本作为 thought
-  answer  = final_answer           # final_answer 字段作为 solution
-  full_response = f"<think>\\n{thought}\\n</think>\\n{answer}"
-
+每个 r1_solution_i 为完整的推理文本（含 <think>...</think> 标签）。
+解析方式：
+  thought = r1_solution_i.split("</think>")[0].strip()   # <think> 内的推理内容
+  answer  = r1_solution_i.split("</think>")[1].strip()   # </think> 之后的答案文本
+  full_response = f"<think>\n{thought}\n</think>\n\n{answer}"
 功能：
 1. 按文件批量读取 parquet，多进程并行处理，攒够所需数据即提前停止
 2. 字符数下界快速预判：字符数 < max_tokens * 2 → 直接通过，跳过 tokenize
@@ -55,7 +54,6 @@ DEFAULT_MIN_SOLUTIONS = 1
 # Token 长度过滤默认值
 DEFAULT_TOKENIZER = "/data/modelscope_cache/models/Qwen/Qwen2.5-1.5B-Instruct"
 DEFAULT_MAX_THOUGHT_TOKENS = 4096
-DEFAULT_MAX_QUESTION_TOKENS = 1024
 TOKENIZE_BATCH_SIZE = 2048
 
 # 字符数下界快速预判：chars < max_tokens * CHAR_PER_TOKEN_LOWER → 必然通过，跳过 tokenize
@@ -125,9 +123,9 @@ def parse_arguments():
     parser.add_argument("--tokenizer", type=str, default=DEFAULT_TOKENIZER,
                         help=f"tokenizer 路径（默认: {DEFAULT_TOKENIZER}）")
     parser.add_argument("--max-thought-tokens", type=int, default=DEFAULT_MAX_THOUGHT_TOKENS,
-                        help=f"thought 最大 token 数，超过则丢弃该 solution（默认: {DEFAULT_MAX_THOUGHT_TOKENS}）")
-    parser.add_argument("--max-question-tokens", type=int, default=DEFAULT_MAX_QUESTION_TOKENS,
-                        help=f"question 最大 token 数，超过则丢弃整条数据（默认: {DEFAULT_MAX_QUESTION_TOKENS}）")
+                        help=f"thought 最大 token 数（默认: {DEFAULT_MAX_THOUGHT_TOKENS}）")
+    parser.add_argument("--strict-thought-filter", action="store_true", default=False,
+                        help="严格模式：任意一个 thought 超长则丢弃整条数据（确保每条都有全部 solution）")
     # 其他
     parser.add_argument("--seed", type=int, default=DEFAULT_SEED,
                         help=f"随机种子（默认: {DEFAULT_SEED}）")
@@ -199,11 +197,12 @@ def process_one_file(args_tuple) -> Tuple[List[Dict], Dict[str, int]]:
       {"question": "...", "reasoning": [{"thought": "...", "solution": "..."}, ...]}
 
     过滤顺序：
-      1. question 字符数快速预判 + tokenize 过滤超长问题
-      2. thought 字符数快速预判 + tokenize 过滤超长 solution
-      3. 剩余 solution 数 < min_solutions → 丢弃整条
+      1. thought 字符数快速预判 + tokenize 过滤超长 solution
+         - 默认模式：丢弃超长的单个 thought
+         - strict 模式：任意一个 thought 超长则丢弃整条
+      2. 剩余 solution 数 < min_solutions → 丢弃整条
     """
-    fpath, tokenizer_path, max_thought_tokens, max_question_tokens, min_solutions = args_tuple
+    fpath, tokenizer_path, max_thought_tokens, min_solutions, strict_thought_filter = args_tuple
 
     import pandas as pd
     from transformers import AutoTokenizer
@@ -213,9 +212,9 @@ def process_one_file(args_tuple) -> Tuple[List[Dict], Dict[str, int]]:
 
     stats = {
         "total": len(df),
-        "q_filtered": 0,
         "t_total": 0,
         "t_filtered_token": 0,
+        "row_filtered_strict": 0,
         "kept": 0,
     }
 
@@ -223,21 +222,9 @@ def process_one_file(args_tuple) -> Tuple[List[Dict], Dict[str, int]]:
     if not sol_cols:
         return [], stats
 
-    # Step 1: 过滤超长 question
-    questions = df["question"].tolist()
-    q_pass = batch_tokenize_needed(questions, max_question_tokens, tokenizer)
+    valid_indices = list(range(len(df)))
 
-    valid_indices = []
-    for i, passed in enumerate(q_pass):
-        if passed:
-            valid_indices.append(i)
-        else:
-            stats["q_filtered"] += 1
-
-    if not valid_indices:
-        return [], stats
-
-    # Step 2: 收集所有有效行的 thought 文本，过滤超长 thought
+    # Step 1: 收集所有行的 thought 文本，过滤超长 thought
     all_thought_texts: List[str] = []
     thought_map: List[Tuple[int, str]] = []  # (valid_row_pos, col_name)
 
@@ -245,8 +232,13 @@ def process_one_file(args_tuple) -> Tuple[List[Dict], Dict[str, int]]:
         row = df.iloc[vi]
         stats["t_total"] += len(sol_cols)
         for col in sol_cols:
-            val = row[col]
-            all_thought_texts.append(str(val) if val is not None else "")
+            val = str(row[col]) if row[col] is not None else ""
+            # 取 </think> 之前的推理内容用于 token 长度过滤，去除 <think> 标签
+            raw_thought = val.split("</think>")[0] if "</think>" in val else val
+            if raw_thought.lstrip().startswith("<think>"):
+                raw_thought = raw_thought.lstrip()[len("<think>"):]
+            thought = raw_thought.strip()
+            all_thought_texts.append(thought)
             thought_map.append((vpos, col))
 
     t_pass = batch_tokenize_needed(all_thought_texts, max_thought_tokens, tokenizer) if all_thought_texts else []
@@ -257,21 +249,36 @@ def process_one_file(args_tuple) -> Tuple[List[Dict], Dict[str, int]]:
         if not passed:
             stats["t_filtered_token"] += 1
 
-    # Step 3: 构建输出 item
+    # Step 2: 构建输出 item
     items: List[Dict] = []
 
     for vpos, vi in enumerate(valid_indices):
         row = df.iloc[vi]
         final_answer = str(row["final_answer"]) if row["final_answer"] is not None else ""
-        valid_reasoning = []
 
+        # strict 模式：任意一个 thought 超长则丢弃整条
+        if strict_thought_filter:
+            if not all(thought_pass.get((vpos, col), False) for col in sol_cols):
+                stats["row_filtered_strict"] += 1
+                continue
+
+        valid_reasoning = []
         for col in sol_cols:
             if not thought_pass.get((vpos, col), False):
                 continue
-            val = row[col]
+            val = str(row[col]) if row[col] is not None else ""
+            if "</think>" in val:
+                raw_thought = val.split("</think>")[0]
+                if raw_thought.lstrip().startswith("<think>"):
+                    raw_thought = raw_thought.lstrip()[len("<think>"):]
+                thought = raw_thought.strip()
+                answer = val.split("</think>")[1].strip()
+            else:
+                thought = val.strip()
+                answer = final_answer
             valid_reasoning.append({
-                "thought": str(val) if val is not None else "",
-                "solution": final_answer,
+                "thought": thought,
+                "solution": answer,
             })
 
         if len(valid_reasoning) < min_solutions:
@@ -383,7 +390,7 @@ def main():
     logger.info("=" * 70)
     logger.info(f"输入目录: {args.input}")
     logger.info(f"tokenizer: {args.tokenizer}")
-    logger.info(f"token 过滤: question < {args.max_question_tokens}, thought < {args.max_thought_tokens}")
+    logger.info(f"token 过滤: thought < {args.max_thought_tokens}，严格模式: {args.strict_thought_filter}")
     logger.info(f"字符快速预判下界: chars < max_tokens * {CHAR_PER_TOKEN_LOWER} → 直接通过")
     if args.mode in ("sft", "both"):
         logger.info(f"SFT 输出: {args.sft_output}")
@@ -422,14 +429,14 @@ def main():
     total_stats = {
         "files_processed": 0,
         "total_rows": 0,
-        "q_filtered": 0,
         "t_total": 0,
         "t_filtered_token": 0,
+        "row_filtered_strict": 0,
         "kept": 0,
     }
 
     task_args = [
-        (fpath, args.tokenizer, args.max_thought_tokens, args.max_question_tokens, args.min_solutions)
+        (fpath, args.tokenizer, args.max_thought_tokens, args.min_solutions, args.strict_thought_filter)
         for fpath in parquet_files
     ]
 
@@ -450,9 +457,9 @@ def main():
 
                 total_stats["files_processed"] += 1
                 total_stats["total_rows"] += fstats["total"]
-                total_stats["q_filtered"] += fstats["q_filtered"]
                 total_stats["t_total"] += fstats["t_total"]
                 total_stats["t_filtered_token"] += fstats["t_filtered_token"]
+                total_stats["row_filtered_strict"] += fstats["row_filtered_strict"]
                 total_stats["kept"] += fstats["kept"]
 
                 pbar.update(1)
@@ -471,12 +478,13 @@ def main():
     # 过滤统计
     logger.info("\n" + "-" * 60)
     logger.info("过滤统计:")
-    logger.info(f"  处理文件数        : {total_stats['files_processed']} / {len(parquet_files)}")
-    logger.info(f"  处理总行数        : {total_stats['total_rows']:,}")
-    logger.info(f"  question 过长丢弃 : {total_stats['q_filtered']:,}")
-    logger.info(f"  solution 总数     : {total_stats['t_total']:,}")
-    logger.info(f"  solution token过长: {total_stats['t_filtered_token']:,}")
-    logger.info(f"  最终保留行数      : {total_stats['kept']:,}")
+    logger.info(f"  处理文件数          : {total_stats['files_processed']} / {len(parquet_files)}")
+    logger.info(f"  处理总行数          : {total_stats['total_rows']:,}")
+    logger.info(f"  solution 总数       : {total_stats['t_total']:,}")
+    logger.info(f"  solution token 过长 : {total_stats['t_filtered_token']:,}")
+    if args.strict_thought_filter:
+        logger.info(f"  严格模式丢弃行数    : {total_stats['row_filtered_strict']:,}")
+    logger.info(f"  最终保留行数        : {total_stats['kept']:,}")
     logger.info(f"  math pool         : {len(math_pool):,} 条（需要 {math_needed:,} 条）")
 
     if not math_pool:
@@ -531,7 +539,7 @@ def main():
             "rl_math": args.rl_math,
             "min_solutions": args.min_solutions,
             "max_thought_tokens": args.max_thought_tokens,
-            "max_question_tokens": args.max_question_tokens,
+            "strict_thought_filter": args.strict_thought_filter,
             "seed": args.seed,
             "mode": args.mode,
             "workers": args.workers,
@@ -558,7 +566,7 @@ def main():
     logger.info("\n" + "=" * 70)
     logger.info("  处理完成！")
     logger.info("=" * 70)
-    logger.info(f"筛选条件: question < {args.max_question_tokens} tokens, thought < {args.max_thought_tokens} tokens")
+    logger.info(f"筛选条件: thought < {args.max_thought_tokens} tokens，严格模式: {args.strict_thought_filter}")
     if sft_data:
         logger.info(f"\nSFT 数据集: {args.sft_output}")
         logger.info(f"  总计: {len(sft_data)} 条")
@@ -588,11 +596,12 @@ python reasoning_graph/select_sft_data_and_rl_data_deepmath.py --mode sft
 # 自定义 token 过滤和并行数
 python reasoning_graph/select_sft_data_and_rl_data_deepmath.py \\
     --max-thought-tokens 2048 --max-question-tokens 512 --workers 8
-
-# 自定义数据量和输出路径
+    
 python reasoning_graph/select_sft_data_and_rl_data_deepmath.py \
-    --sft-math 50000 --rl-math 10000 \
-    --max-thought-tokens 4096 --max-question-tokens 1024 \
-    --sft-output /data/hf_home/datasets/Yaseal/CDAD_EXP/deepmath_sft_50k/train.jsonl \
-    --rl-output  /data/hf_home/datasets/Yaseal/CDAD_EXP/deepmath_rl_10k/train.jsonl
+    --sft-math 30000 --rl-math 5000 \
+    --max-thought-tokens 4096 \
+    --sft-output /data/hf_home/datasets/Yaseal/CDAD_EXP/deepmath_sft_30k/train.jsonl \
+    --rl-output  /data/hf_home/datasets/Yaseal/CDAD_EXP/deepmath_rl_5k/train.jsonl \
+    --workers 32 \
+    --strict-thought-filter
 """

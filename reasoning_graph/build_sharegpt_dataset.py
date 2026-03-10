@@ -674,7 +674,7 @@ def build_assistant_content(selected_thought: Dict[str, Any]) -> str:
     thought = selected_thought.get("thought", "").strip()
     solution = selected_thought.get("solution", "").strip()
     if thought and solution:
-        return f"<think>\n{thought}\n</think>\n{solution}"
+        return f"<think>\n{thought}\n</think>\n\n{solution}"
     return thought or solution
 
 
@@ -983,10 +983,11 @@ python build_sharegpt_dataset.py \
     -r ../LlamaFactory/data/dataset_info.json
     
     
+    
 python build_sharegpt_dataset.py \
-    -i /data/hf_home/datasets/Yaseal/CDAD_EXP/deepmath_sft_50k/train.jsonl \
+    -i /data/hf_home/datasets/Yaseal/CDAD_EXP/deepmath_sft_30k/train.jsonl \
     -s plain \
-    -o /data/hf_home/datasets/Yaseal/CDAD_EXP/deepmath_plain_50k \
+    -o /data/hf_home/datasets/Yaseal/CDAD_EXP/deepmath_plain_30k \
     --train-ratio 0.99 \
     -r ../LlamaFactory/data/dataset_info.json
 """

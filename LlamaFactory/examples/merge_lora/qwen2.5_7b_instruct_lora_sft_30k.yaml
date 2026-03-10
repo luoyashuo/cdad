@@ -1,0 +1,11 @@
+### model
+model_name_or_path: /data/modelscope_cache/models/Qwen/Qwen2.5-7B-Instruct
+adapter_name_or_path: /data/cdad/checkpoints/vallina_sft/qwen2.5_7b_instruct_lora_sft_30k
+template: qwen
+trust_remote_code: true
+
+### export
+export_dir: /data/cdad/checkpoints/vallina_sft/qwen2.5_7b_instruct_lora_sft_30k/merged
+export_size: 5
+export_device: cpu
+export_legacy_format: false

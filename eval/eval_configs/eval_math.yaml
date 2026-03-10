@@ -1,0 +1,45 @@
+# EvalScope 评测配置文件 - 仅测试代码评测 (HumanEval, LiveCodeBench, MBPP)
+# 模型路径
+model_path: /fs/fast/u20240075/luoyashuo/modelscope_cache/models/LLM-Research/Llama-3.2-1B-Instruct
+
+# 千问 API (用于 LLM judge，代码评测通常不需要)
+BASE_URL: https://dashscope.aliyuncs.com/compatible-mode/v1
+API_KEY: sk-9ae88192c0e54080831b8a7408d2da8d
+# vLLM配置（离线模式，直接加载模型，无需HTTP服务）
+vllm:
+  tp: 1              # tensor parallel size（每个DP分片占几张GPU）
+  dp: 8              # data parallel size（几个LLM实例，dp>1时用Ray）
+  gpu_memory_utilization: 0.9
+  max_model_len: 16384
+  enforce_eager: false
+  worker_chunk_size: 20   # dp>1时每个Worker每轮的prompt数（越小负载越均衡，越大Ray开销越低）
+
+# 沙箱配置 - 临时文件存储路径 (避免打爆主机存储)
+sandbox:
+  work_dir: /data/tmp/evalscope_sandbox
+
+# 沙箱配置
+# 远程沙盒模式（推荐，Docker 本地不可用时使用）：
+#   在有 Docker 的机器上运行: ms-enclave server --host 0.0.0.0 --port 8001
+#   然后填写下面的 remote_url
+sandbox:
+  remote_url: http://8.152.253.195:1234
+  timeout: 120  # 代码执行超时时间（秒）
+  work_dir: /fs/fast/u20240075/luoyashuo/tmp/evalscope_sandbox
+# 评测配置 - 仅代码评测
+
+benchmarks:
+  AIME25:
+    dataset_name: "aime25"
+    repeats: 8
+    temperature: 0.6
+    max_tokens: 14000
+    few_shot_num: 0
+    use_sandbox: false
+  AIME24:
+    dataset_name: "aime24"
+    repeats: 8
+    temperature: 0.6
+    max_tokens: 14000
+    few_shot_num: 0
+    use_sandbox: false

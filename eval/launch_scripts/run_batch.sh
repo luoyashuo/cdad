@@ -89,14 +89,18 @@ wait_for_gpu_memory
 # 格式: 每两个相邻元素为一组 (model_path, base_config)
 # ============================================================
 declare -a JOBS=(
-    "/data/modelscope_cache/models/Qwen/Qwen2.5-1.5B-Instruct"    "eval_configs/eval_all_sft.yaml"
-    "/data/cdad/checkpoints/vallina_sft/qwen2.5_1.5b_instruct_vallina_sft_50k"    "eval_configs/eval_all_sft.yaml"
-    "/data/modelscope_cache/models/Qwen/Qwen2.5-3B-Instruct"    "eval_configs/eval_all_sft.yaml"
+    # "/data/modelscope_cache/models/Qwen/Qwen2.5-7B-Instruct"    "eval_configs/eval_all_sft.yaml"
+    # "/data/cdad/checkpoints/vallina_sft/qwen2.5_7b_instruct_lora_sft_30k/merged"    "eval_configs/eval_all_sft.yaml"
+    "/data/cdad/checkpoints/vallina_sft/qwen2.5_7b_instruct_lora_sft_30k/merged"    "eval_configs/eval_math.yaml"
+    "/data/modelscope_cache/models/Qwen/Qwen2.5-7B-Instruct"    "eval_configs/eval_math.yaml"
+    # "/data/modelscope_cache/models/Qwen/Qwen2.5-1.5B-Instruct"    "eval_configs/eval_all_sft.yaml"
+    # "/data/cdad/checkpoints/vallina_sft/qwen2.5_1.5b_instruct_vallina_sft_50k"    "eval_configs/eval_all_sft.yaml"
+    # "/data/modelscope_cache/models/Qwen/Qwen2.5-3B-Instruct"    "eval_configs/eval_all_sft.yaml"
 
     
 )
 
-NUM_RUNS=3
+NUM_RUNS=1
 
 # 断点续传配置（二选一，同时设置时 RESUME_DIRS 优先）：
 #   RESUME=1               每个模型自动检测最新 version_* 目录续跑
@@ -108,10 +112,10 @@ NUM_RUNS=3
 #       ""                                  # 3B 模型全新跑
 #       "/data/.../vallina_sft/evalscope/version_20260310_001550"
 #   )
-RESUME=1
-RESUME_DIRS=(
-    "/data/modelscope_cache/models/Qwen/Qwen2.5-1.5B-Instruct/evalscope/version_20260310_043148"
-)
+# RESUME=0
+# RESUME_DIRS=(
+#     "/data/modelscope_cache/models/Qwen/Qwen2.5-1.5B-Instruct/evalscope/version_20260310_043148"
+# )
 
 # ============================================================
 

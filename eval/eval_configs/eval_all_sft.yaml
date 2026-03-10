@@ -18,8 +18,8 @@ vllm:
   dp: 8              # data parallel size（几个LLM实例，dp>1时用Ray）
   gpu_memory_utilization: 0.9
   max_model_len: 16384
-  enforce_eager: true
-  worker_chunk_size: 32   # dp>1时每个Worker每轮的prompt数（越小负载越均衡，越大Ray开销越低）
+  enforce_eager: false # 对于RUC的机器需要关闭
+  worker_chunk_size: 20   # dp>1时每个Worker每轮的prompt数（越小负载越均衡，越大Ray开销越低）
 
 # 沙箱配置 - 临时文件存储路径 (避免打爆主机存储)
 sandbox:
@@ -31,7 +31,7 @@ benchmarks:
   MATH500:
     dataset_name: "math_500"
     repeats: 1
-    temperature: 0.7
+    temperature: 1.0
     max_tokens: 12000
     few_shot_num: 0
 
@@ -39,7 +39,7 @@ benchmarks:
     dataset_name: "amc"
     subset: "amc23"  # AMC 必须指定年份作为子集
     repeats: 1
-    temperature: 0.7
+    temperature: 1.0
     max_tokens: 12000
     few_shot_num: 0
 
@@ -47,21 +47,21 @@ benchmarks:
   AGIEvalMath:
     dataset_name: "agieval_math"
     repeats: 1
-    temperature: 0.7
+    temperature: 1.0
     max_tokens: 12000
     few_shot_num: 0
 
   GSM8K:
     dataset_name: "gsm8k"
     repeats: 1
-    temperature: 0.7
+    temperature: 1.0
     max_tokens: 12000
     few_shot_num: 0
   # General
   GPQA:
     dataset_name: "gpqa_extend"
     repeats: 1
-    temperature: 0.7
+    temperature: 1.0
     max_tokens: 12000
     few_shot_num: 0
     use_sandbox: false
@@ -69,7 +69,7 @@ benchmarks:
   MMLUProNoMath:
     dataset_name: "mmlu_pro_no_math"
     repeats: 1
-    temperature: 0.7
+    temperature: 1.0
     max_tokens: 12000
     few_shot_num: 0
 

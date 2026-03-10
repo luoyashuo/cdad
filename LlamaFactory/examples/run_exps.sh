@@ -14,12 +14,16 @@ LOG_DIR="logs"
 
 # 训练任务列表
 declare -a CONFIGS=(
-    "examples/vallina_sft/qwen2.5_1.5b_instruct_vallina_sft_50k.yaml"
+    # "examples/vallina_sft/qwen2.5_1.5b_instruct_vallina_sft_50k.yaml"
+    # "examples/vallina_sft/qwen2.5_3b_instruct_vallina_sft_50k.yaml"
+    "examples/vallina_sft/qwen2.5_7b_instruct_lora_sft_30k.yaml"
 
 )
 
 declare -a NAMES=(
-    "qwen2.5_1.5b_instruct_vallina_sft_50k"
+    # "qwen2.5_1.5b_instruct_vallina_sft_50k"
+    # "qwen2.5_3b_instruct_vallina_sft_50k"
+    "qwen2.5_7b_instruct_lora_sft_30k"
 )
 
 echo "=== 开始串行训练任务 ==="

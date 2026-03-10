@@ -216,7 +216,7 @@ class FSDPVLLMShardingManager(BaseShardingManager):
                         state_dict_config=FullStateDictConfig(offload_to_cpu=False, rank0_only=False)
                     ):
                         params = {
-                            name: param.detach().clone()
+                            name: param.detach()
                             for name, param in self.module.state_dict().items()
                             if "_flat_param" not in name
                         }
