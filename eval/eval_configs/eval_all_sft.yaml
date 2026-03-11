@@ -19,7 +19,7 @@ vllm:
   gpu_memory_utilization: 0.9
   max_model_len: 16384
   enforce_eager: false # 对于RUC的机器需要关闭
-  worker_chunk_size: 20   # dp>1时每个Worker每轮的prompt数（越小负载越均衡，越大Ray开销越低）
+  worker_chunk_size: 2   # dp>1时每个Worker每轮的prompt数（越小负载越均衡，越大Ray开销越低）
 
 # 沙箱配置 - 临时文件存储路径 (避免打爆主机存储)
 sandbox:
@@ -28,6 +28,22 @@ sandbox:
 # 评测配置 - 不指定子集，测试所有默认子集
 benchmarks:
   # MATH
+  AIME25:
+    dataset_name: "aime25"
+    repeats: 8
+    temperature: 0.6
+    max_tokens: 14000
+    few_shot_num: 0
+    use_sandbox: false
+    
+  AIME24:
+    dataset_name: "aime24"
+    repeats: 8
+    temperature: 0.6
+    max_tokens: 14000
+    few_shot_num: 0
+    use_sandbox: false
+
   MATH500:
     dataset_name: "math_500"
     repeats: 1

@@ -96,6 +96,11 @@ class SGLangWorkerActor:
         cuda_devices_str = ",".join(map(str, gpu_ids))
         os.environ["CUDA_VISIBLE_DEVICES"] = cuda_devices_str
 
+        # Set unique MASTER_PORT to avoid torch.distributed TCP rendezvous port conflicts
+        # when multiple workers initialize in parallel on the same machine.
+        os.environ["MASTER_PORT"] = str(base_port + 500)
+        os.environ["MASTER_ADDR"] = "127.0.0.1"
+
         # Log GPU memory status BEFORE loading model
         def get_nvidia_smi_memory_for_gpu(gpu_idx):
             """Get GPU memory from nvidia-smi for a specific GPU"""

@@ -12,18 +12,31 @@ export SWANLAB_API_KEY="xmtHYzg2Bw5uh1dprg81E"
 # 日志目录
 LOG_DIR="logs"
 
+TRAIN_PID=2944521  
+
+echo "等待训练进程 PID $TRAIN_PID 结束..."
+while kill -0 "$TRAIN_PID" 2>/dev/null; do
+    echo "训练仍在进行中，10s 后检查..."
+    sleep 10
+done
+log "训练进程已结束"
+
 # 训练任务列表
 declare -a CONFIGS=(
     # "examples/vallina_sft/qwen2.5_1.5b_instruct_vallina_sft_50k.yaml"
     # "examples/vallina_sft/qwen2.5_3b_instruct_vallina_sft_50k.yaml"
-    "examples/vallina_sft/qwen2.5_7b_instruct_lora_sft_30k.yaml"
+    # "examples/vallina_sft/qwen2.5_7b_instruct_lora_sft_30k.yaml"
+    # "examples/vallina_sft/qwen2.5_7b_instruct_full_sft_30k.yaml"
+    "examples/vallina_sft/qwen2.5_3b_instruct_full_sft_30k.yaml"
 
 )
 
 declare -a NAMES=(
     # "qwen2.5_1.5b_instruct_vallina_sft_50k"
     # "qwen2.5_3b_instruct_vallina_sft_50k"
-    "qwen2.5_7b_instruct_lora_sft_30k"
+    # "qwen2.5_7b_instruct_lora_sft_30k"
+    # "qwen2.5_7b_instruct_full_sft_30k"
+    "qwen2.5_3b_instruct_full_sft_30k"
 )
 
 echo "=== 开始串行训练任务 ==="

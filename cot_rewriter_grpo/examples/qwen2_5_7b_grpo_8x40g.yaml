@@ -96,8 +96,8 @@ actor_rollout_ref:
   # Rollout (推理) 配置
   rollout:
     name: vllm
-    tensor_model_parallel_size: 1
-    gpu_memory_utilization: 0.6    # LoRA: 只需加载 base model，可以适当提高 KV cache
+    tensor_model_parallel_size: 2    # TP=2: 每卡权重减半(7GB)，可用sleep_level=1+高SGLang显存
+    gpu_memory_utilization: 0.7    # TP=2: 7GB权重+14GB KV cache，sleep_level=1安全
     dtype: bfloat16
     load_format: auto
     log_prob_micro_batch_size_per_gpu: 1    # 降低到 1 避免 OOM
@@ -110,9 +110,9 @@ actor_rollout_ref:
     response_length: 10000
     max_num_batched_tokens: 48000
     max_model_len: 14800
-    enforce_eager: true
+    enforce_eager: false
     free_cache_engine: true
-    sleep_level: 2               # LoRA 可以用 sleep_level=2，权重恢复更可靠
+    sleep_level: 1               # sleep_level=2会乱码，只能sleep_level=1
     agent:
       num_workers: 8
   # Ref 模型配置 (用于 KL 散度计算)
@@ -190,8 +190,8 @@ custom_reward_function:
 
     # Student Model 推理后端配置
     reward_backend: sglang            # 可选: sglang | vllm
-    sglang_mem_fraction_static: 0.55   # actor 14GB常驻，可用26GB，0.5=20GB(14GB权重+6GB KV)
-    vllm_gpu_memory_utilization: 0.55  # 同上
+    sglang_mem_fraction_static: 0.55    # LoRA+sleep_level=2 后 actor 不占显存，0.4=16GB 给 Student
+    vllm_gpu_memory_utilization: 0.55   # LoRA+sleep_level=2 后 actor 不占显存
     cleanup_after_compute: true       # 计算后清理缓存
     # 认知奖励模式
     reward_mode: kl
@@ -229,11 +229,11 @@ custom_reward_function:
     use_logic_reward: true             # 是否启用 FSF penalty
     fsf_model_path: /data/hf_home/models/Yaseal-qwen3_4b_fsf_grm
     fsf_tensor_parallel_size: 1
-    fsf_temperature: 0.4
+    fsf_temperature: 0.3
     fsf_top_k: 20
     fsf_top_p: 0.95
     fsf_max_new_tokens: 3072
-    fsf_gpu_memory_utilization: 0.5   # actor 14GB常驻，0.5=20GB(8GB权重+12GB KV)
+    fsf_gpu_memory_utilization: 0.55   # 4B权重~8GB，预留10GB给KV cache和激活值
     fsf_max_model_len: 12000
     fsf_micro_batch_size: 2
     fsf_skip_group_on_parse_error: true
@@ -249,7 +249,7 @@ custom_reward_function:
     use_correct_judge: true
     correct_judge_model_path: /data/modelscope_cache/models/Qwen/Qwen3-4B
     correct_judge_tensor_parallel_size: 1
-    correct_judge_gpu_memory_utilization: 0.45  # actor 14GB常驻，0.45=18GB(8GB权重+10GB KV)
+    correct_judge_gpu_memory_utilization: 0.55   # 4B权重~8GB，预留10GB给KV cache
     correct_judge_max_model_len: 8192
     correct_judge_micro_batch_size: 4
     correct_judge_max_new_tokens: 10

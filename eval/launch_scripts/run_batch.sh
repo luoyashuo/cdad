@@ -72,7 +72,7 @@ kill_stray_ray() {
 # ============================================================
 # Step 1: 等待训练进程结束 (修改这里为实际的训练脚本 PID)
 # ============================================================
-TRAIN_PID=975504  # run_exps.sh 的 PID
+TRAIN_PID=3298868  # run_exps.sh 的 PID
 
 log "等待训练进程 PID $TRAIN_PID 结束..."
 while kill -0 "$TRAIN_PID" 2>/dev/null; do
@@ -89,13 +89,16 @@ wait_for_gpu_memory
 # 格式: 每两个相邻元素为一组 (model_path, base_config)
 # ============================================================
 declare -a JOBS=(
-    # "/data/modelscope_cache/models/Qwen/Qwen2.5-7B-Instruct"    "eval_configs/eval_all_sft.yaml"
-    # "/data/cdad/checkpoints/vallina_sft/qwen2.5_7b_instruct_lora_sft_30k/merged"    "eval_configs/eval_all_sft.yaml"
-    "/data/cdad/checkpoints/vallina_sft/qwen2.5_7b_instruct_lora_sft_30k/merged"    "eval_configs/eval_math.yaml"
-    "/data/modelscope_cache/models/Qwen/Qwen2.5-7B-Instruct"    "eval_configs/eval_math.yaml"
+#     "/data/modelscope_cache/models/Qwen/Qwen2.5-7B-Instruct"    "eval_configs/eval_all_sft.yaml"
+#     "/data/modelscope_cache/models/Qwen/Qwen2.5-3B-Instruct"    "eval_configs/eval_all_sft.yaml"
+    "/data/cdad/checkpoints/vallina_sft/qwen2.5_3b_instruct_full_sft_30k"    "eval_configs/eval_all_sft.yaml"
+    # "/data/cdad/checkpoints/vallina_sft/qwen2.5_7b_instruct_full_sft_30k"    "eval_configs/eval_all_sft.yaml"
+
+    # "/data/cdad/checkpoints/vallina_sft/qwen2.5_7b_instruct_lora_sft_30k/merged"    "eval_configs/eval_math.yaml"
+    # "/data/modelscope_cache/models/Qwen/Qwen2.5-7B-Instruct"    "eval_configs/eval_math.yaml"
     # "/data/modelscope_cache/models/Qwen/Qwen2.5-1.5B-Instruct"    "eval_configs/eval_all_sft.yaml"
     # "/data/cdad/checkpoints/vallina_sft/qwen2.5_1.5b_instruct_vallina_sft_50k"    "eval_configs/eval_all_sft.yaml"
-    # "/data/modelscope_cache/models/Qwen/Qwen2.5-3B-Instruct"    "eval_configs/eval_all_sft.yaml"
+
 
     
 )
@@ -112,10 +115,10 @@ NUM_RUNS=1
 #       ""                                  # 3B 模型全新跑
 #       "/data/.../vallina_sft/evalscope/version_20260310_001550"
 #   )
-# RESUME=0
-# RESUME_DIRS=(
-#     "/data/modelscope_cache/models/Qwen/Qwen2.5-1.5B-Instruct/evalscope/version_20260310_043148"
-# )
+RESUME=1
+RESUME_DIRS=(
+    "/data/cdad/checkpoints/vallina_sft/qwen2.5_3b_instruct_full_sft_30k/evalscope/version_20260311_125756"
+)
 
 # ============================================================
 

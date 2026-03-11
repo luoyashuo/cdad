@@ -502,17 +502,12 @@ def compute_reward_breakdown_metrics(reward_extra_infos_dict: dict[str, list[Any
     reward_components = [
         ("cognitive_rewards", "reward/cognitive"),
         ("useful_rewards", "reward/useful"),  # R_useful: CoT有用程度
-        ("logic_rewards", "reward/logic"),
         ("total_rewards", "reward/total"),
         ("reward_deltas", "raw_logprob_delta"),  # Display name: raw_logprob_delta, Key: reward_deltas
         ("length_ratio", "stats/length_ratio"),
         ("similarities", "stats/similarity"),  # Similarity between original and rewrite CoT
-        # PPL values (ppl mode only) - all under ppl group
-        ("rewrite_ppls", "ppl/rewrite"),
-        ("original_ppls", "ppl/original"),
-        ("relative_improvement_rates", "ppl/relative_improvement"),  # Formula 1: relative improvement rate
-        # FSF (Failure Step Fraction) - only track original for observation
-        ("original_fsfs", "fsf/original"),
+        # FSF (Failure Step Fraction) - track rewrite fsf with mean/max/min
+        ("rewrite_fsfs", "fsf/rewrite"),
     ]
 
     for dict_key, metric_prefix in reward_components:
@@ -543,6 +538,7 @@ def compute_reward_breakdown_metrics(reward_extra_infos_dict: dict[str, list[Any
         ("repeat_penalties_actual", "penalty/repeat"),
         ("correct_judge_penalties", "penalty/correct_judge"),
         ("overlong_rewards", "penalty/overlong"),
+        ("logic_rewards", "penalty/logic"),  # logic_rewards treated as penalty
     ]
 
     for dict_key, metric_prefix in penalty_rate_components:
@@ -568,21 +564,6 @@ def compute_reward_breakdown_metrics(reward_extra_infos_dict: dict[str, list[Any
             total_count = len(flags_array)
             metrics["penalty/any/rate"] = penalized_count / total_count if total_count > 0 else 0.0
             metrics["penalty/any/count"] = penalized_count
-
-    # Keep legacy penalty coefficient stats (too_short/too_long coefficients for observation)
-    for dict_key, metric_prefix in [
-        ("too_short_penalties", "penalty_coeff/too_short"),
-        ("too_long_penalties", "penalty_coeff/too_long"),
-        ("repeat_penalties", "penalty_coeff/repeat"),
-    ]:
-        if dict_key not in reward_extra_infos_dict:
-            continue
-        values = reward_extra_infos_dict[dict_key]
-        if not values or len(values) == 0:
-            continue
-        values_array = np.array(values, dtype=np.float64)
-        metrics[f"{metric_prefix}/mean"] = float(np.mean(values_array))
-        metrics[f"{metric_prefix}/max"] = float(np.max(values_array))
 
     # Additional aggregate statistics for flags
     if "format_valid" in reward_extra_infos_dict:

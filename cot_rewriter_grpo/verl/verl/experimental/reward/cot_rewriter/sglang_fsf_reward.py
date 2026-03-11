@@ -72,6 +72,12 @@ class SGLangFSFActor:
         cuda_devices_str = ",".join(map(str, gpu_ids))
         os.environ["CUDA_VISIBLE_DEVICES"] = cuda_devices_str
 
+        # Set unique MASTER_PORT to avoid torch.distributed TCP rendezvous port conflicts
+        # when multiple FSF workers initialize in parallel on the same machine.
+        # Each worker gets a unique port based on its base_port offset.
+        os.environ["MASTER_PORT"] = str(base_port + 500)
+        os.environ["MASTER_ADDR"] = "127.0.0.1"
+
         # Log GPU memory status
         def get_nvidia_smi_memory_for_gpu(gpu_idx):
             try:
