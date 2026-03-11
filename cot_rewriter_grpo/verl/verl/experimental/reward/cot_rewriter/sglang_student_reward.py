@@ -613,6 +613,17 @@ class SGLangStudentRewardClient:
         if self._initialized:
             return
 
+        # Clean up any leftover workers from a previous failed initialization attempt
+        # This prevents worker accumulation if initialize() is retried after a failure
+        if self.workers:
+            logger.warning(f"[SGLangStudentReward] Cleaning up {len(self.workers)} leftover workers from previous failed init")
+            for w in self.workers:
+                try:
+                    ray.kill(w)
+                except Exception:
+                    pass
+            self.workers = []
+
         # Initialize tokenizer (shared, for prompt building)
         self.tokenizer = AutoTokenizer.from_pretrained(self.model_path, trust_remote_code=True)
 

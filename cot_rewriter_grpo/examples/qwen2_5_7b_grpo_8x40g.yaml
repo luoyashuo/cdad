@@ -12,8 +12,8 @@ trainer:
   experiment_name: qwen2_5_7b_grpo_8x40g
   total_epochs: 1000
   total_training_steps: 500
-  save_freq: 25
-  test_freq: 5
+  save_freq: 10
+  test_freq: 10
   val_before_train: false
   device: cuda
   log_freq: 10
@@ -96,8 +96,8 @@ actor_rollout_ref:
   # Rollout (推理) 配置
   rollout:
     name: vllm
-    tensor_model_parallel_size: 2    # TP=2: 每卡权重减半(7GB)，可用sleep_level=1+高SGLang显存
-    gpu_memory_utilization: 0.7    # TP=2: 7GB权重+14GB KV cache，sleep_level=1安全
+    tensor_model_parallel_size: 4    # TP=2: 每卡权重减半(7GB)，可用sleep_level=1+高SGLang显存
+    gpu_memory_utilization: 0.6    # TP=2: 降低 KV cache 为 reward 模型留空间
     dtype: bfloat16
     load_format: auto
     log_prob_micro_batch_size_per_gpu: 1    # 降低到 1 避免 OOM
@@ -107,9 +107,9 @@ actor_rollout_ref:
     top_p: 0.95
     presence_penalty: 1.5
     prompt_length: 4800
-    response_length: 10000
+    response_length: 8192
     max_num_batched_tokens: 48000
-    max_model_len: 14800
+    max_model_len: 13000
     enforce_eager: false
     free_cache_engine: true
     sleep_level: 1               # sleep_level=2会乱码，只能sleep_level=1
@@ -184,14 +184,14 @@ custom_reward_function:
     # 使用 student model 计算回答困惑度作为认知奖励
     student_model_path: ${oc.env:MODEL_BASE_DIR}/models/Qwen/Qwen2.5-7B-Instruct
     student_tensor_parallel_size: 1    # 1B 模型用 TP=1
-    student_max_model_len: 12000
+    student_max_model_len: 8192
     student_micro_batch_size: 1
     student_max_num_seqs: 1
 
     # Student Model 推理后端配置
     reward_backend: sglang            # 可选: sglang | vllm
-    sglang_mem_fraction_static: 0.55    # LoRA+sleep_level=2 后 actor 不占显存，0.4=16GB 给 Student
-    vllm_gpu_memory_utilization: 0.55   # LoRA+sleep_level=2 后 actor 不占显存
+    sglang_mem_fraction_static: 0.50    # 40GB GPU，需为其他模型留空间
+    vllm_gpu_memory_utilization: 0.50   # 40GB GPU，需为其他模型留空间
     cleanup_after_compute: true       # 计算后清理缓存
     # 认知奖励模式
     reward_mode: kl
@@ -233,9 +233,9 @@ custom_reward_function:
     fsf_top_k: 20
     fsf_top_p: 0.95
     fsf_max_new_tokens: 3072
-    fsf_gpu_memory_utilization: 0.55   # 4B权重~8GB，预留10GB给KV cache和激活值
-    fsf_max_model_len: 12000
-    fsf_micro_batch_size: 2
+    fsf_gpu_memory_utilization: 0.35   # 40GB GPU，降低避免 OOM
+    fsf_max_model_len: 10000
+    fsf_micro_batch_size: 1
     fsf_skip_group_on_parse_error: true
     save_fsf_dot_outputs: true
     save_prompts: true
@@ -249,9 +249,9 @@ custom_reward_function:
     use_correct_judge: true
     correct_judge_model_path: /data/modelscope_cache/models/Qwen/Qwen3-4B
     correct_judge_tensor_parallel_size: 1
-    correct_judge_gpu_memory_utilization: 0.55   # 4B权重~8GB，预留10GB给KV cache
-    correct_judge_max_model_len: 8192
-    correct_judge_micro_batch_size: 4
+    correct_judge_gpu_memory_utilization: 0.50   # 40GB GPU，降低避免 OOM
+    correct_judge_max_model_len: 10000
+    correct_judge_micro_batch_size: 2
     correct_judge_max_new_tokens: 10
     correct_judge_filter_no_samples: true
     # ==================== 数据字段映射配置 ====================
