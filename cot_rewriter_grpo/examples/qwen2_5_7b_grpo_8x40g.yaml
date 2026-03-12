@@ -55,7 +55,8 @@ actor_rollout_ref:
     enable_gradient_checkpointing: true
     use_remove_padding: false
     lora_rank: 32              # LoRA rank，32 是一个较好的平衡点
-    lora_alpha: 32              # LoRA 缩放因子
+    lora_alpha: 64              # LoRA 缩放因子，alpha/rank=2
+    lora_dropout: 0.05          # LoRA dropout，增加探索性
     target_modules: all-linear   # 对所有线性层应用 LoRA
 
   # Actor 训练配置
@@ -85,6 +86,9 @@ actor_rollout_ref:
         param_dtype: bf16
         reduce_dtype: fp32
         buffer_dtype: bf16
+      wrap_policy:
+        transformer_layer_cls_to_wrap: [Qwen2DecoderLayer]
+        min_num_params: 0
     optim:
       lr: 3e-5                 # LoRA 使用更高的学习率
       weight_decay: 0.01
@@ -96,8 +100,8 @@ actor_rollout_ref:
   # Rollout (推理) 配置
   rollout:
     name: vllm
-    tensor_model_parallel_size: 4    # TP=2: 每卡权重减半(7GB)，可用sleep_level=1+高SGLang显存
-    gpu_memory_utilization: 0.6    # TP=2: 降低 KV cache 为 reward 模型留空间
+    tensor_model_parallel_size: 4    # TP=4: 7B 模型 8x40G 下分4卡推理
+    gpu_memory_utilization: 0.6    # 降低 KV cache 为 reward 模型留空间
     dtype: bfloat16
     load_format: auto
     log_prob_micro_batch_size_per_gpu: 1    # 降低到 1 避免 OOM
@@ -183,7 +187,7 @@ custom_reward_function:
     # ==================== Student Model 配置 (认知奖励 R_cog) ====================
     # 使用 student model 计算回答困惑度作为认知奖励
     student_model_path: ${oc.env:MODEL_BASE_DIR}/models/Qwen/Qwen2.5-7B-Instruct
-    student_tensor_parallel_size: 1    # 1B 模型用 TP=1
+    student_tensor_parallel_size: 1    # 7B 模型用 TP=1
     student_max_model_len: 8192
     student_micro_batch_size: 1
     student_max_num_seqs: 1
