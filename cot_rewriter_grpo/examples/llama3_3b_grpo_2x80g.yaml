@@ -12,8 +12,8 @@ trainer:
   experiment_name: llama3_3b_grpo_2x80g
   total_epochs: 1000
   total_training_steps: 500
-  save_freq: 25
-  test_freq: 5
+  save_freq: 20
+  test_freq: 20
   val_before_train: false
   device: cuda
   log_freq: 10
@@ -27,8 +27,8 @@ trainer:
 
 # ========== 数据配置 ==========
 data:
-  train_files: ${oc.env:DATA_BASE_DIR}/omnithought_rv_optimal_cot_rewrite_top2000_v2/train.jsonl
-  val_files: ${oc.env:DATA_BASE_DIR}/omnithought_rv_optimal_cot_rewrite_top2000_v2/val.jsonl
+  train_files: ${oc.env:DATA_BASE_DIR}/cot_rewrite_deepmath_random_5k/train.jsonl
+  val_files: ${oc.env:DATA_BASE_DIR}/cot_rewrite_deepmath_random_5k/val.jsonl
   train_batch_size: 16
   val_batch_size: 16
   gen_batch_size: 16
@@ -185,7 +185,7 @@ custom_reward_function:
   reward_kwargs:
     # ==================== Student Model 配置 (认知奖励 R_cog) ====================
     # 使用 student model 计算回答困惑度作为认知奖励
-    student_model_path: /fs/fast/u20240075/luoyashuo/checkpoints/cold_start/llama3_1b_meta_math_40k
+    student_model_path: /fs/fast/u20240075/luoyashuo/modelscope_cache/models/LLM-Research/Llama-3.2-1B-Instruct
     student_tensor_parallel_size: 2    # 1B 模型用 TP=1
     student_max_model_len: 12000
     student_micro_batch_size: 1

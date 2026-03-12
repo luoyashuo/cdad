@@ -1,0 +1,288 @@
+hydra:
+  searchpath:
+  - file://verl/verl/trainer/config
+
+defaults:
+- ppo_trainer
+- _self_
+
+# ========== 基础训练配置 ==========
+trainer:
+  project_name: cot_rewriter_grpo
+  experiment_name: llama3_8b_grpo_lora_2x80g
+  total_epochs: 1000
+  total_training_steps: 500
+  save_freq: 20
+  test_freq: 20
+  val_before_train: false
+  device: cuda
+  log_freq: 10
+  max_actor_ckpt_to_keep: 3
+  default_local_dir: ${oc.env:CHECKPOINT_BASE_DIR}/cot_rewriter_grpo/${trainer.experiment_name}
+  n_gpus_per_node: 2
+  nnodes: 1
+  logger: [swanlab, console]
+  rollout_data_dir: ${oc.env:CHECKPOINT_BASE_DIR}/rollout_data/${trainer.experiment_name}
+  validation_data_dir: ${oc.env:CHECKPOINT_BASE_DIR}/validation_data/${trainer.experiment_name}
+
+# ========== 数据配置 ==========
+data:
+  train_files: ${oc.env:DATA_BASE_DIR}/cot_rewrite_deepmath_random_5k/train.jsonl
+  val_files: ${oc.env:DATA_BASE_DIR}/cot_rewrite_deepmath_random_5k/val.jsonl
+  train_batch_size: 16          # 8B 模型减小 batch size
+  val_batch_size: 16
+  gen_batch_size: 16
+  max_prompt_length: 4800
+  max_response_length: 8000    # 适当缩短以节省显存
+  return_raw_chat: true
+  dataloader_num_workers: 8
+  reward_fn_key: reward_model
+  prompt_key: problem
+  apply_chat_template_kwargs:
+    enable_thinking: false
+  custom_cls:
+    path: ${oc.env:PROJECT_BASE_DIR}/verl/verl/utils/dataset/rl_dataset_jsonl.py
+    name: RLHFDatasetJSONL
+
+# ========== Actor & Rollout 配置 ==========
+actor_rollout_ref:
+  hybrid_engine: true
+
+  # 模型配置
+  model:
+    path: /fs/fast/u20240075/luoyashuo/modelscope_cache/models/LLM-Research/Meta-Llama-3.1-8B-Instruct
+    trust_remote_code: true
+    enable_gradient_checkpointing: true
+    use_remove_padding: false
+    lora_rank: 64              # 启用 LoRA，rank=64
+    lora_alpha: 128            # lora_alpha = 2 * lora_rank
+    lora_dropout: 0.05
+    target_modules: all-linear
+
+  # Actor 训练配置
+  actor:
+    strategy: fsdp
+    ppo_epochs: 1
+    policy_loss:
+      loss_mode: vanilla  # GRPO 算法
+    clip_ratio: 0.2
+    clip_ratio_low: 0.2
+    clip_ratio_high: 0.28
+    entropy_coeff: 0.0
+    entropy_coeff_lower_bound: 0.0
+    grad_clip: 1.0
+    ppo_mini_batch_size: 16
+    ppo_micro_batch_size_per_gpu: 1    # 8B 模型保持 1
+    use_kl_in_reward: false
+    use_kl_loss: true
+    kl_loss_coef: 0.01
+    kl_loss_type: low_var_kl
+    entropy_from_logits_with_chunking: true
+    fsdp_config:
+      dtype: bfloat16
+      param_offload: true        # 必须开启，8B 模型显存压力大
+      optimizer_offload: true    # LoRA 的 optimizer state 也 offload
+      mixed_precision:
+        param_dtype: bf16
+        reduce_dtype: fp32
+        buffer_dtype: bf16
+      wrap_policy:
+        transformer_layer_cls_to_wrap: [LlamaDecoderLayer]
+        min_num_params: 0
+    optim:
+      lr: 5e-5                 # LoRA 使用较高学习率
+      weight_decay: 0.01
+      lr_scheduler_type: cosine
+      lr_warmup_steps_ratio: 0.1
+      min_lr_ratio: 0.1
+      total_training_steps: -1
+
+  # Rollout (推理) 配置
+  rollout:
+    name: vllm
+    tensor_model_parallel_size: 2    # 8B 模型 TP=2
+    gpu_memory_utilization: 0.50     # 保守设置，为 FSDP 残留留空间
+    dtype: bfloat16
+    load_format: auto
+    log_prob_micro_batch_size_per_gpu: 1
+    n: 4                             # 减少 rollout 数量，节省显存和时间
+    temperature: 0.7
+    top_k: 50
+    top_p: 0.95
+    presence_penalty: 1.5
+    prompt_length: 4800
+    response_length: 8000
+    max_num_batched_tokens: 36000    # 8B 模型适当调低
+    max_model_len: 12800             # prompt + response
+    enforce_eager: true
+    free_cache_engine: true
+    sleep_level: 1
+    agent:
+      num_workers: 8
+
+  # Ref 模型配置
+  # LoRA 训练中，ref model = base model (不带 LoRA adapter)，显存占用小
+  ref:
+    enable: true
+    log_prob_micro_batch_size_per_gpu: 1
+    strategy: fsdp
+    fsdp_config:
+      dtype: bfloat16
+      param_offload: true    # 必须开启
+      mixed_precision:
+        param_dtype: bf16
+        reduce_dtype: fp32
+        buffer_dtype: bf16
+      wrap_policy:
+        transformer_layer_cls_to_wrap: [LlamaDecoderLayer]
+        min_num_params: 0
+
+# ========== 算法配置 ==========
+algorithm:
+  adv_estimator: grpo
+  norm_adv_by_std_in_group: true
+  gamma: 1.0
+  lam: 1.0
+  use_kl_in_reward: false
+  kl_penalty: kl
+
+  kl_ctrl:
+    type: fixed
+    kl_coef: 0.0
+
+  filter_groups:
+    _target_: verl.trainer.config.FilterGroupsConfig
+    enable: false
+    metric: length_ratio
+    max_num_gen_batches: -1
+
+# ========== Critic 配置 (GRPO 不需要) ==========
+critic:
+  enable: false
+
+# ========== Reward Model 配置 ==========
+reward_model:
+  enable: false
+  reward_manager: cot_rewriter
+  offload_rollout_for_reward: true
+  task_runner_num_gpus: 0
+
+  reward_kwargs:
+    overlong_buffer_cfg:
+      enable: true
+      len: 2000               # 超过 8000-2000=6000 tokens 时触发
+      log: false
+    max_resp_len: 8000
+
+# ========== 自定义奖励函数配置 ==========
+custom_reward_function:
+  path: ${oc.env:PROJECT_BASE_DIR}/verl/verl/experimental/reward/cot_rewriter/combined_reward.py
+  name: compute_cot_rewriter_reward
+
+  reward_kwargs:
+    # ==================== Student Model 配置 (认知奖励 R_cog) ====================
+    # 与 rollout 模型相同，均为 LLaMA-3.1-8B-Instruct
+    student_model_path: /fs/fast/u20240075/luoyashuo/modelscope_cache/models/LLM-Research/Meta-Llama-3.1-8B-Instruct
+    student_tensor_parallel_size: 2    # 8B 模型 TP=2
+    student_max_model_len: 10000
+    student_micro_batch_size: 1        # 保守设置
+    student_max_num_seqs: 1
+
+    # Student Model 推理后端配置
+    reward_backend: sglang
+    sglang_mem_fraction_static: 0.45   # 8B student 显存占比，保守设置
+    vllm_gpu_memory_utilization: 0.4   # vLLM 备用设置
+    cleanup_after_compute: true
+
+    # 认知奖励模式
+    reward_mode: kl
+    ppl_delta_temperature: 1.0
+    cot_effect_epsilon: 0.01
+    cot_effect_temperature: 1.0
+    cot_effect_ratio_ceiling: 2
+    ppl_ratio_ceiling: 999
+    ppl_on_full_response: true
+    print_samples: 2
+
+    # KL Reward 配置
+    alpha_kl: 0.01
+    kl_adaptive_beta: 0.5
+    kl_eps: 1e-6
+    kl_fallback_tau: 3.0
+
+    # 认知奖励公式配置
+    alpha: 0.01
+    use_reward_delta: false
+
+    # 阶梯式奖励配置
+    use_tiered_reward: false
+    tier_step: 0.001
+    tier_reward: 0.002
+
+    # ==================== FSF Penalty 配置 ====================
+    # 2x80G 显存紧张，关闭 FSF 以节省显存
+    use_logic_reward: false
+
+    # ==================== Correct Judge 配置 ====================
+    # 2x80G 显存紧张，关闭 correct judge 以节省显存
+    use_correct_judge: false
+
+    # ==================== Useful 奖励配置 ====================
+    use_useful_reward: false
+    lambda_useful: 1.0
+
+    # ==================== 数据字段映射配置 ====================
+    field_mapping:
+      prompt_key: problem
+      reward_model_key: reward_model
+      question_key: question
+      original_cot_key: original_cot
+      ground_truth_key: ground_truth
+
+    # ==================== Penalty 配置 ====================
+    use_repeat_penalty: false
+    similarity_threshold: 0.5
+    format_penalty: 1.0
+    too_short_max_penalty: 0.0
+    too_short_threshold_high: 0.4
+    too_long_max_penalty: 0.0
+    too_long_threshold_low: 4.0
+
+# ============ Reward Manager Configuration ============
+reward_manager:
+  source: importlib
+  name: CoTRewriterRewardManager
+  module:
+    path: ${oc.env:PROJECT_BASE_DIR}/verl/verl/experimental/reward/cot_rewriter/reward_manager.py
+
+# ============ Ray Configuration ============
+ray_init:
+  num_cpus:
+  timeline_json_file:
+
+ray_kwargs:
+  ray_init:
+    _temp_dir:
+    include_dashboard: false
+    dashboard_host: ''
+    dashboard_port:
+    ignore_reinit_error: true
+    logging_level: warning
+    local_mode: false
+    namespace: cot_rewriter_grpo
+    _system_config:
+      enable_metrics_collection: false
+      agent_register_timeout_ms: 120000
+    runtime_env:
+      env_vars:
+        PYTHONPATH: ${oc.env:PROJECT_BASE_DIR}/.venv/lib/python3.12/site-packages:${oc.env:PROJECT_BASE_DIR}:${oc.env:PROJECT_BASE_DIR}/src:${oc.env:PROJECT_BASE_DIR}/verl
+        TOKENIZERS_PARALLELISM: 'false'
+        RAY_DEDUP_LOGS: '1'
+        RAY_DASHBOARD_HOST: ''
+        RAY_enable_dashboard: '0'
+        RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO: '0'
+        PYTORCH_NVML_BASED_CUDA_CHECK: '1'
+        VLLM_USE_V1: '0'
+        VLLM_ATTENTION_BACKEND: FLASH_ATTN
+        SWANLAB_MODE: cloud
+        SWANLAB_API_KEY: xmtHYzg2Bw5uh1dprg81E

@@ -29,7 +29,7 @@ DEFAULT_GPUS="0,1"
 
 # DEFAULT_GPUS="2,3"
 
-DEFAULT_CONFIG="llama3_3b_grpo_2x80g"
+DEFAULT_CONFIG="llama3_8b_grpo_lora_2x80g"
 # 解析参数
 GPUS="${1:-$DEFAULT_GPUS}"
 CONFIG_NAME="${2:-$DEFAULT_CONFIG}"
