@@ -1,9 +1,9 @@
 #!/bin/bash
 #
 # 使用方法:
-#   bash scripts/grpo/start_qc.sh              # 默认使用 GPU 4,5
-#   bash scripts/grpo/start_qc.sh 6,7          # 指定 GPU
-#   bash scripts/grpo/start_qc.sh 4,5 qwen3_4b_grpo_2x40g_lora_sglang  # 指定 GPU 和配置
+#   bash scripts/grpo/start_a100.sh              # 默认使用 GPU 0-7
+#   bash scripts/grpo/start_a100.sh 6,7          # 指定 GPU
+#   bash scripts/grpo/start_a100.sh 0,1,2,3 qwen2_5_7b_grpo_8x40g  # 指定 GPU 和配置
 
 set -e
 
@@ -28,20 +28,6 @@ DEFAULT_CONFIG="qwen2_5_7b_grpo_8x40g"
 # 解析参数
 GPUS="${1:-$DEFAULT_GPUS}"
 CONFIG_NAME="${2:-$DEFAULT_CONFIG}"
-
-echo "============================================================"
-echo "CoT Rewriter GRPO Training"
-echo "============================================================"
-echo "Config: ${CONFIG_NAME}"
-echo "GPUs: ${GPUS}"
-echo ""
-echo "Path Configuration:"
-echo "  MODEL_BASE_DIR=${MODEL_BASE_DIR}"
-echo "  DATA_BASE_DIR=${DATA_BASE_DIR}"
-echo "  CHECKPOINT_BASE_DIR=${CHECKPOINT_BASE_DIR}"
-echo "  PROJECT_BASE_DIR=${PROJECT_BASE_DIR}"
-echo "============================================================"
-echo ""
 
 # 检查路径是否存在
 if [ ! -d "$MODEL_BASE_DIR" ]; then

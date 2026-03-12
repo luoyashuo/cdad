@@ -37,30 +37,51 @@ from verl.experimental.reward.cot_rewriter.training_logger import get_logger
 logger = get_logger("reward")
 
 
-def extract_rewrite_reasoning(text: str) -> Tuple[str, bool, str]:
+def check_response_format(text: str) -> Tuple[str, bool, str]:
     """
-    Extract content from <rewrite_reasoning> tags with STRICT format checking.
-
-    Strict format requirements:
-    - The text must START with <rewrite_reasoning> (after stripping leading whitespace)
-    - The text must END with </rewrite_reasoning> (after stripping trailing whitespace)
-    - Must have EXACTLY ONE opening tag and ONE closing tag
-    - Tags must be properly paired
-    - Must NOT contain "## Problem" (indicates format error)
-
-    FALLBACK extraction (when strict format fails):
-    - Uses strip().lstrip("<rewrite_reasoning>").rstrip("</rewrite_reasoning>")
-    - Returns the extracted content with success_flag=False
-    - This allows reward computation even with malformed format
-
+    Check response format for new data format (no XML tags).
+    
+    Format requirements (for new format):
+    - Must NOT be empty
+    - Must NOT contain "## " (indicates format error)
+    - Must NOT mention rewriting-related keywords at the beginning
+      ("rewrit", "process", "reasoning", "bridge", "clari", "deriv", "refin")
+    
     Args:
         text: The raw response text from the model
-
+        
     Returns:
-        Tuple of (extracted_content, success_flag, error_reason)
-        - extracted_content: The content inside the tags (strict or fallback extraction)
-        - success_flag: True if format is strictly valid, False otherwise
+        Tuple of (text, success_flag, error_reason)
+        - text: Original text (unchanged for new format)
+        - success_flag: True if format is valid, False otherwise
         - error_reason: Description of why validation failed (for logging)
+    """
+    if not text:
+        return "", False, "empty_text"
+    
+    # Check for "## " marker (format error)
+    if "## " in text:
+        return text, False, "contains_problem_marker"
+    
+    # Check for rewriting-related keywords at the beginning
+    content_prefix = text.strip()[:60].lower()
+    if "rewrit" in content_prefix:
+        return text, False, "mention_rewrite_in_reasoning"
+    elif "process" in content_prefix or "reasoning" in content_prefix:
+        return text, False, "mention_reasoning_process_in_reasoning"
+    elif "bridge" in content_prefix or "clari" in content_prefix or 'deriv' in content_prefix or "refin" in content_prefix:
+        return text, False, "mention_bridge_or_clari_in_reasoning"
+    
+    # Format valid
+    return text, True, "ok"
+
+
+def extract_rewrite_reasoning(text: str) -> Tuple[str, bool, str]:
+    """
+    DEPRECATED: Use check_response_format() for new data format.
+    
+    Extract content from <rewrite_reasoning> tags with STRICT format checking.
+    Kept for backward compatibility.
     """
     if not text:
         return "", False, "empty_text"
@@ -1601,23 +1622,16 @@ def compute_cot_rewriter_reward(
 
     print_samples = kwargs.get("print_samples", 2)
 
-    # Extract <rewrite_reasoning> content from rewrite_cots for reward computation
-    # and track which samples have valid format
-    extracted_rewrite_cots = []
+    # Check format for all samples (new format: no XML tags, but check content quality)
     format_valid_flags = []  # 1 if valid, 0 if invalid
-
     for i, rewrite_cot in enumerate(rewrite_cots):
-        extracted_cot, has_valid_format, error_reason = extract_rewrite_reasoning(rewrite_cot)
-        # Always use extracted content (strict or fallback), format_valid_flag controls penalty only
-        extracted_rewrite_cots.append(extracted_cot)
+        _, has_valid_format, error_reason = check_response_format(rewrite_cot)
         format_valid_flags.append(1 if has_valid_format else 0)
         if not has_valid_format:
-            stripped_preview = rewrite_cot.strip()[:100] if rewrite_cot else ""
-            extracted_preview = extracted_cot[:100] if extracted_cot else ""
+            preview = rewrite_cot[:100] if rewrite_cot else ""
             logger.info(
                 f"[REWARD] Sample {i}: Format violation - reason={error_reason}. "
-                f"Preview: '{stripped_preview}...'. "
-                f"Using fallback extraction: '{extracted_preview}...' (format penalty will be applied)"
+                f"Preview: '{preview}...' (format penalty will be applied)"
             )
 
     # Prepare result containers for all samples
@@ -1709,7 +1723,7 @@ def compute_cot_rewriter_reward(
     result = reward_computer.compute_reward(
         questions=questions,
         original_cots=original_cots,
-        rewrite_cots=extracted_rewrite_cots,
+        rewrite_cots=rewrite_cots,
         answers=answers,
         data=data,
         response_length=data.batch["responses"].shape[1],
@@ -1767,15 +1781,15 @@ def compute_cot_rewriter_reward(
                     f"reward will be set to 0"
                 )
             truncated_flags[i] = 1  # Always mark as truncated for DAPO filter_groups
-
-        # Format penalty: if response does not contain valid <rewrite_reasoning> tags
+        
+        # Format penalty: if response has format violations (e.g., mentions "rewrite", contains "## ", etc.)
         if format_valid_flags[i] == 0:
             if format_penalty > 0:  # Only penalize if format_penalty is configured > 0
                 penalized_flags[i] = True
                 penalty_reasons[i].append("format")
                 format_penalties[i] = 1.0  # Flag: penalized
                 logger.info(
-                    f"[FORMAT_PENALTY] Sample {i}: Format violation (no valid <rewrite_reasoning> tags found), "
+                    f"[FORMAT_PENALTY] Sample {i}: Format violation detected, "
                     f"response_preview='{rewrite_cots[i][:100]}...', reward will be set to 0"
                 )
 
@@ -1873,7 +1887,6 @@ def compute_cot_rewriter_reward(
             # DAPO filter_groups support: "truncated" flag (1 if truncated, 0 otherwise)
             "truncated": truncated_flags,
             # DAPO filter_groups support: "format_valid" flag (1 if valid, 0 if invalid)
-            # Used to filter out groups with all invalid format samples
             "format_valid": format_valid_flags,
             # DAPO filter_groups support: "length_ratio" metric for length-based filtering
             "length_ratio": length_ratios,
@@ -1960,20 +1973,12 @@ def compute_length_ratio_only(
                 orig_cot = reward_info.get(original_cot_key, "")
         original_cots.append(orig_cot if orig_cot else "")
 
-    # Extract <rewrite_reasoning> content and check format validity
-    extracted_rewrite_cots = []
-    format_valid_flags = []
-    for rewrite_cot in rewrite_cots:
-        extracted_cot, has_valid_format, _ = extract_rewrite_reasoning(rewrite_cot)
-        extracted_rewrite_cots.append(extracted_cot)  # Always use extracted content (strict or fallback)
-        format_valid_flags.append(1 if has_valid_format else 0)
-
+    # Note: New data format has no XML tags, use rewrite_cots directly
     # Compute length_ratios without loading Student Model
     length_ratios = [0.0] * batch_size
     for i in range(batch_size):
         original_text = original_cots[i] if original_cots[i] else ""
-        # Use extracted content (strict or fallback) for length calculation
-        rewrite_text = extracted_rewrite_cots[i] if extracted_rewrite_cots[i] else ""
+        rewrite_text = rewrite_cots[i] if rewrite_cots[i] else ""
 
         if original_text:
             original_token_len = len(tokenizer.encode(original_text, add_special_tokens=False))
@@ -1983,18 +1988,17 @@ def compute_length_ratio_only(
 
     # Log statistics
     valid_ratios = [r for r in length_ratios if r > 0]
-    valid_format_count = sum(format_valid_flags)
     if valid_ratios:
         logger.info(
             f"[LENGTH_RATIO_ONLY] batch_size={batch_size}, "
-            f"format_valid={valid_format_count}/{batch_size}, "
+            f"format_valid={batch_size}/{batch_size}, "
             f"mean={sum(valid_ratios)/len(valid_ratios):.3f}, "
             f"min={min(valid_ratios):.3f}, max={max(valid_ratios):.3f}"
         )
 
     return {
         "length_ratio": length_ratios,
-        "format_valid": format_valid_flags,
+        "format_valid": [1] * batch_size,  # All valid in new format
     }
 
 
@@ -2030,13 +2034,6 @@ def compute_group_wise_kl_reward(
     num_groups, group_size = r_kl_matrix.shape
     r_cog_01 = torch.zeros_like(r_kl_matrix)
     
-    # 记录调试信息
-    r_kl_stats = {
-        "r_kl_min": r_kl_matrix.min().item(),
-        "r_kl_max": r_kl_matrix.max().item(),
-        "r_kl_mean": r_kl_matrix.mean().item(),
-    }
-    
     for g in range(num_groups):
         r_group = r_kl_matrix[g]
         
@@ -2045,11 +2042,10 @@ def compute_group_wise_kl_reward(
         
         # 自适应 tau
         if group_size == 1:
-            # group_size=1 时使用 fallback_tau
             tau = fallback_tau
+            r_std = torch.tensor(0.0, device=r_group.device)
         else:
-            # 使用组内标准差 + 均值
-            r_std = r_group.std(unbiased=False)  # 使用有偏估计（除以 N）
+            r_std = r_group.std(unbiased=False)
             tau = torch.maximum(r_std, torch.tensor(eps, device=r_group.device)) + r_mean
         
         # 防止 tau 为 0 或负数
@@ -2057,19 +2053,6 @@ def compute_group_wise_kl_reward(
         
         # 归一化: R_cog = sigmoid(-r_KL / τ)
         r_cog_01[g] = torch.sigmoid(-r_group / tau)
-    
-    # 记录归一化后的统计信息
-    r_cog_stats = {
-        "r_cog_01_min": r_cog_01.min().item(),
-        "r_cog_01_max": r_cog_01.max().item(),
-        "r_cog_01_mean": r_cog_01.mean().item(),
-    }
-    
-    # 打印调试日志
-    logger.info(
-        f"[KL-v2] r_kl: min={r_kl_stats['r_kl_min']:.4f}, mean={r_kl_stats['r_kl_mean']:.4f}, max={r_kl_stats['r_kl_max']:.4f} "
-        f"→ r_cog_01: min={r_cog_stats['r_cog_01_min']:.4f}, mean={r_cog_stats['r_cog_01_mean']:.4f}, max={r_cog_stats['r_cog_01_max']:.4f}"
-    )
     
     return r_cog_01
 
@@ -2105,25 +2088,30 @@ def compute_kl_reward_from_logprobs(
     Returns:
         r_kl: [batch_size] 每个 sample 的 KL reward 聚合值
     """
-    # 计算 log ratio: log π_actor - log π_student = log(r)
-    # 方向: D_KL(actor || student)
+    batch_size, seq_len = actor_log_probs.shape
+    
+    # 数值保护：两层 clamp 策略（对齐 verl 的 kl_penalty 实现）
+    # 第一层 clamp: 限制 log_r 防止 exp() 溢出
     log_r = actor_log_probs - student_log_probs
+    log_r_clamped = torch.clamp(log_r, min=-20.0, max=20.0)
     
     # k3 估计器: k3 = (r - 1) - log(r) = exp(log_r) - 1 - log_r
-    # 无偏、方差小、始终非负
-    r = torch.exp(log_r)
-    kl_per_token = r - 1.0 - log_r
+    r = torch.exp(log_r_clamped)
+    kl_per_token = r - 1.0 - log_r_clamped
+    
+    # 第二层 clamp: 限制最终 KL 值（对齐 verl 的 kl_penalty 中的 low_var_kl/k3 实现）
+    kl_per_token = torch.clamp(kl_per_token, min=-10.0, max=10.0)
     
     # 应用 mask
     kl_per_token = kl_per_token * response_mask
     
     # 计算每个 sample 的统计量
-    batch_size = actor_log_probs.shape[0]
     r_kl = torch.zeros(batch_size, device=actor_log_probs.device, dtype=actor_log_probs.dtype)
     
     for i in range(batch_size):
         mask = response_mask[i].bool()
-        if mask.sum() > 0:
+        valid_tokens = mask.sum().item()
+        if valid_tokens > 0:
             kl_valid = kl_per_token[i][mask]
             avg_kl = kl_valid.mean()
             max_kl = kl_valid.max()

@@ -29,9 +29,9 @@ trainer:
 data:
   train_files: ${oc.env:DATA_BASE_DIR}/cot_rewrite_deepmath_random_5k/train.jsonl
   val_files: ${oc.env:DATA_BASE_DIR}/cot_rewrite_deepmath_random_5k/val.jsonl
-  train_batch_size: 16
-  val_batch_size: 16
-  gen_batch_size: 16
+  train_batch_size: 4
+  val_batch_size: 4
+  gen_batch_size: 4
   max_prompt_length: 4800
   max_response_length: 10000
   return_raw_chat: true
@@ -50,7 +50,7 @@ actor_rollout_ref:
 
   # 模型配置
   model:
-    path: ${oc.env:MODEL_BASE_DIR}/models/Qwen/Qwen2.5-7B-Instruct
+    path: ${oc.env:MODEL_BASE_DIR}/models/Qwen/Qwen2.5-3B-Instruct
     trust_remote_code: true
     enable_gradient_checkpointing: true
     use_remove_padding: false
@@ -70,7 +70,7 @@ actor_rollout_ref:
     entropy_coeff: 0.0 # 小一点，太大了不收敛
     entropy_coeff_lower_bound: 0.0
     grad_clip: 1.0
-    ppo_mini_batch_size: 16
+    ppo_mini_batch_size: 4
     ppo_micro_batch_size_per_gpu: 1    # 降低到 1 避免 OOM
     use_kl_in_reward: false
     use_kl_loss: true
@@ -101,7 +101,7 @@ actor_rollout_ref:
     dtype: bfloat16
     load_format: auto
     log_prob_micro_batch_size_per_gpu: 1    # 降低到 1 避免 OOM
-    n: 8
+    n: 4
     temperature: 0.7
     top_k: 50
     top_p: 0.95
@@ -182,7 +182,7 @@ custom_reward_function:
   reward_kwargs:
     # ==================== Student Model 配置 (认知奖励 R_cog) ====================
     # 使用 student model 计算回答困惑度作为认知奖励
-    student_model_path: ${oc.env:MODEL_BASE_DIR}/models/Qwen/Qwen2.5-7B-Instruct
+    student_model_path: ${oc.env:MODEL_BASE_DIR}/models/Qwen/Qwen2.5-3B-Instruct
     student_tensor_parallel_size: 1    # 1B 模型用 TP=1
     student_max_model_len: 8192
     student_micro_batch_size: 1
@@ -227,7 +227,7 @@ custom_reward_function:
     tier_reward: 0.002                  # 每阶梯奖励值
     # ==================== FSF Penalty 配置 ====================
     # FSF 现在作为 penalty：rewrite_fsf > 0 (存在失败步骤) → reward = 0
-    use_logic_reward: true             # 是否启用 FSF penalty
+    use_logic_reward: false             # 是否启用 FSF penalty
     fsf_model_path: /data/hf_home/models/Yaseal-qwen3_4b_fsf_grm
     fsf_tensor_parallel_size: 1
     fsf_temperature: 0.3
@@ -247,7 +247,7 @@ custom_reward_function:
     lambda_useful: 1.0                # useful 奖励权重 λ_useful
     # ==================== Correct Judge 配置 (正确性检测) ====================
     # 判断错误时 reward = 0
-    use_correct_judge: true
+    use_correct_judge: false
     correct_judge_model_path: /data/modelscope_cache/models/Qwen/Qwen3-4B
     correct_judge_tensor_parallel_size: 1
     correct_judge_gpu_memory_utilization: 0.50   # 40GB GPU，降低避免 OOM

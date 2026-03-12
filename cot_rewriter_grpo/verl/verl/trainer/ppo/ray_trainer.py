@@ -63,6 +63,7 @@ from verl.utils.torch_functional import masked_mean
 from verl.utils.tracking import ValidationGenerationsLogger
 from verl.experimental.reward.cot_rewriter.training_logger import get_logger as get_training_logger
 from verl.experimental.reward.cot_rewriter.combined_reward import (
+    check_response_format,
     compute_group_wise_kl_reward,
     compute_kl_reward_from_logprobs,
 )
@@ -855,6 +856,22 @@ class RayPPOTrainer:
                         # Scalar metadata - skip for validation (not per-sample data)
                         print(f"[VALIDATION] Skipping scalar metadata '{key}': {val}")
 
+            # Extract data fields from non_tensor_batch (original_cot, ground_truth, etc.)
+            # These are nested inside the "reward_model" dict per sample
+            batch_size = reward_tensor.shape[0]
+            reward_model_data = test_batch.non_tensor_batch.get("reward_model", None)
+            if reward_model_data is not None:
+                data_field_keys = ["original_cot", "ground_truth", "question"]
+                for fkey in data_field_keys:
+                    vals = []
+                    for si in range(batch_size):
+                        item = reward_model_data[si] if hasattr(reward_model_data, '__getitem__') else reward_model_data
+                        if isinstance(item, dict):
+                            vals.append(item.get(fkey, ""))
+                        else:
+                            vals.append("")
+                    reward_extra_infos_dict[fkey].extend(vals)
+
             # collect num_turns of each prompt
             if "__num_turns__" in test_batch.non_tensor_batch:
                 sample_turns.append(test_batch.non_tensor_batch["__num_turns__"])
@@ -1556,8 +1573,8 @@ class RayPPOTrainer:
                                 student_log_probs = batch.batch["student_log_probs"]
                             
                             if student_log_probs is not None:
-                                # Compute raw KL reward per sample
-                                # KL direction: D_KL(actor || student) using k3 estimator
+                                # Compute raw KL reward per sample using full response_mask
+                                # (No need to exclude XML tags as the new data format has no tags)
                                 r_kl_raw = compute_kl_reward_from_logprobs(
                                     actor_log_probs=actor_log_probs,
                                     student_log_probs=student_log_probs,
@@ -1657,11 +1674,6 @@ class RayPPOTrainer:
                                     metrics["reward/total/max"] = float(np.max(new_total_list))
                                     metrics["reward/total/min"] = float(np.min(new_total_list))
 
-                                    # 10. Sync total_rewards in non_tensor_batch for rollout dump
-                                    batch.non_tensor_batch["total_rewards"] = np.array(
-                                        new_total_list, dtype=object
-                                    )
-
                                     # Log KL reward metrics (grouped under reward/ for SwanLab)
                                     metrics["reward/r_kl/min"] = r_kl_raw.min().item()
                                     metrics["reward/r_kl/max"] = r_kl_raw.max().item()
@@ -1743,14 +1755,17 @@ class RayPPOTrainer:
                             reward_fields = [
                                 "original_cot", "ground_truth",
                                 # Reward breakdown fields
-                                "cognitive_rewards", "rewrite_mean_log_probs", "original_mean_log_probs", "no_cot_mean_log_probs",
+                                "cognitive_rewards", "useful_rewards",
+                                "rewrite_mean_log_probs", "original_mean_log_probs", "no_cot_mean_log_probs",
                                 "rewrite_ppls", "original_ppls",  # PPL values (ppl mode only)
                                 "relative_improvement_rates",  # Formula 1: avg_prob(rewrite)/avg_prob(original) - 1 (observation)
                                 "logic_rewards", "total_rewards", "original_fsfs", "rewrite_fsfs",
                                 "reward_deltas",  # rewrite-original log_prob diff
+                                "r_cog_before_correct_judge",
                                 # Penalty fields
                                 "truncation_penalties", "format_penalties", "too_short_penalties", "too_long_penalties",
                                 "too_short_penalties_actual", "too_long_penalties_actual",
+                                "repeat_penalties", "repeat_penalties_actual", "similarities",
                                 "penalized_flags", "penalty_reasons",
                                 # Correct Judge fields
                                 "is_correct_results", "correct_judge_penalties",
@@ -2321,14 +2336,17 @@ class RayDAPOTrainer(RayPPOTrainer):
                             reward_fields = [
                                 "request_id", "original_cot", "ground_truth",
                                 # Reward breakdown fields
-                                "cognitive_rewards", "rewrite_mean_log_probs", "original_mean_log_probs", "no_cot_mean_log_probs",
+                                "cognitive_rewards", "useful_rewards",
+                                "rewrite_mean_log_probs", "original_mean_log_probs", "no_cot_mean_log_probs",
                                 "rewrite_ppls", "original_ppls",  # PPL values (ppl mode only)
                                 "relative_improvement_rates",  # Formula 1: avg_prob(rewrite)/avg_prob(original) - 1 (observation)
                                 "logic_rewards", "total_rewards", "original_fsfs", "rewrite_fsfs",
                                 "reward_deltas",  # rewrite-original log_prob diff
+                                "r_cog_before_correct_judge",
                                 # Penalty fields
                                 "truncation_penalties", "format_penalties", "too_short_penalties", "too_long_penalties",
                                 "too_short_penalties_actual", "too_long_penalties_actual",
+                                "repeat_penalties", "repeat_penalties_actual", "similarities",
                                 "penalized_flags", "penalty_reasons",
                                 # Correct Judge fields
                                 "is_correct_results", "correct_judge_penalties",

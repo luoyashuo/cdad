@@ -172,10 +172,7 @@ pkill -u "$(whoami)" -f "ray::" 2>/dev/null || true
 pkill -u "$(whoami)" -f "raylet" 2>/dev/null || true
 pkill -u "$(whoami)" -f "gcs_server" 2>/dev/null || true
 pkill -u "$(whoami)" -f "ray._private" 2>/dev/null || true
-pkill -u "$(whoami)" -f "ray::IDLE" 2>/dev/null || true
-pkill -u "$(whoami)" -f "ray::Actor" 2>/dev/null || true
 pkill -u "$(whoami)" -f "sglang::*" 2>/dev/null || true
-pkill -u "$(whoami)" -f "python.*ray" 2>/dev/null || true
 
 # 清理 Ray 临时目录
 rm -rf "$RAY_TMPDIR"/session_* 2>/dev/null || true

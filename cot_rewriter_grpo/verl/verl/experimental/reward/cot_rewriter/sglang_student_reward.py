@@ -210,6 +210,94 @@ class SGLangWorkerActor:
 
         logger.info(f"[SGLangWorkerActor-{self.gpu_ids}] Engine created in {llm_elapsed:.2f}s")
 
+    def initialize_and_verify(self) -> bool:
+        """
+        Initialize the SGLang Engine and verify it can return valid logprobs.
+        
+        This method is called during worker initialization to ensure:
+        1. Engine is fully ready (CUDA graph capturing completed)
+        2. Can successfully return logprobs for valid prompts
+        
+        Returns:
+            True if initialization and verification succeeded
+            
+        Raises:
+            RuntimeError: If Engine cannot return valid logprobs
+        """
+        import time
+        
+        # Initialize engine (this triggers CUDA graph capturing)
+        self._init_engine()
+        
+        # Wait a bit for any background initialization
+        time.sleep(0.5)
+        
+        # Ensure event loop exists
+        self._ensure_event_loop()
+        
+        # Build a valid chat-formatted prompt for verification
+        # Use a simple math question that the model can handle
+        test_prompt = (
+            "<|im_start|>system\n"
+            "You are a helpful assistant.\n"
+            "<|im_end|>\n"
+            "<|im_start|>user\n"
+            "What is 2+2?\n"
+            "<|im_end|>\n"
+            "<|im_start|>assistant\n"
+            "4<|im_end|>"
+        )
+        
+        # Try to get logprobs with retries
+        max_retries = 5
+        retry_delay = 1.0  # seconds
+        
+        for attempt in range(max_retries):
+            try:
+                logger.info(f"[SGLangWorkerActor-{self.gpu_ids}] Verification attempt {attempt + 1}/{max_retries}...")
+                
+                outputs = self.engine.generate(
+                    prompt=test_prompt,
+                    sampling_params={"max_new_tokens": 1, "temperature": 0},
+                    return_logprob=True,
+                    logprob_start_len=0,  # Get logprobs for all input tokens
+                    top_logprobs_num=1,
+                )
+                
+                # Verify output format
+                if not isinstance(outputs, dict):
+                    raise RuntimeError(f"Expected dict output, got {type(outputs)}")
+                
+                meta_info = outputs.get("meta_info", {})
+                input_token_logprobs = meta_info.get("input_token_logprobs", [])
+                
+                if not input_token_logprobs:
+                    raise RuntimeError(f"No input_token_logprobs in meta_info. Keys: {list(meta_info.keys())}")
+                
+                if len(input_token_logprobs) == 0:
+                    raise RuntimeError("input_token_logprobs is empty list")
+                
+                # Successfully got logprobs
+                logger.info(
+                    f"[SGLangWorkerActor-{self.gpu_ids}] Verification SUCCESS: "
+                    f"got {len(input_token_logprobs)} input_token_logprobs"
+                )
+                return True
+                
+            except Exception as e:
+                logger.warning(
+                    f"[SGLangWorkerActor-{self.gpu_ids}] Verification attempt {attempt + 1} failed: {e}"
+                )
+                if attempt < max_retries - 1:
+                    logger.info(f"[SGLangWorkerActor-{self.gpu_ids}] Retrying in {retry_delay}s...")
+                    time.sleep(retry_delay)
+                else:
+                    raise RuntimeError(
+                        f"[SGLangWorkerActor-{self.gpu_ids}] Failed to verify Engine after {max_retries} attempts: {e}"
+                    )
+        
+        return False  # Should not reach here
+
     def compute_logprobs(
         self,
         prompts: List[str],
@@ -288,18 +376,12 @@ class SGLangWorkerActor:
         results = []
         for outputs, ans_start in zip(all_outputs, answer_starts):
             logprobs = self._extract_answer_logprobs(outputs, ans_start)
-            if logprobs:
-                results.append({
-                    "mean_log_prob": sum(logprobs) / len(logprobs),
-                    "min_log_prob": min(logprobs),
-                    "token_log_probs": logprobs,
-                })
-            else:
-                results.append({
-                    "mean_log_prob": -100.0,
-                    "min_log_prob": -100.0,
-                    "token_log_probs": [],
-                })
+            # _extract_answer_logprobs will raise RuntimeError if extraction fails
+            results.append({
+                "mean_log_prob": sum(logprobs) / len(logprobs),
+                "min_log_prob": min(logprobs),
+                "token_log_probs": logprobs,
+            })
 
         return results
 
@@ -311,6 +393,9 @@ class SGLangWorkerActor:
         - meta_info contains 'input_token_logprobs' which is a list of tuples:
           [(logprob, token_id, token_text), ...]
         - First token's logprob may be None
+        
+        Raises:
+            RuntimeError: If logprobs cannot be extracted (for strict validation during KL computation)
         """
         try:
             # Handle both dict and list outputs
@@ -319,12 +404,14 @@ class SGLangWorkerActor:
             elif isinstance(outputs, list) and len(outputs) > 0:
                 output = outputs[0]
             else:
-                logger.info(f"[SGLangWorkerActor] Empty or invalid outputs: {type(outputs)}")
-                return []
+                error_msg = f"[SGLangWorkerActor] Empty or invalid outputs: {type(outputs)}"
+                logger.error(error_msg)
+                raise RuntimeError(error_msg)
 
             if not isinstance(output, dict):
-                logger.info(f"[SGLangWorkerActor] output is not a dict: {type(output)}")
-                return []
+                error_msg = f"[SGLangWorkerActor] output is not a dict: {type(output)}"
+                logger.error(error_msg)
+                raise RuntimeError(error_msg)
 
             meta_info = output.get("meta_info", {})
             
@@ -332,8 +419,9 @@ class SGLangWorkerActor:
             input_token_logprobs = meta_info.get("input_token_logprobs", [])
             
             if not input_token_logprobs:
-                logger.info(f"[SGLangWorkerActor] No input_token_logprobs found. meta_info keys: {list(meta_info.keys())}")
-                return []
+                error_msg = f"[SGLangWorkerActor] No input_token_logprobs found. meta_info keys: {list(meta_info.keys())}"
+                logger.error(error_msg)
+                raise RuntimeError(error_msg)
 
             # Extract logprobs from tuples (logprob, token_id, token_text)
             # Note: Since we set logprob_start_len=ans_start in generate(),
@@ -352,14 +440,16 @@ class SGLangWorkerActor:
                 logger.info(f"[SGLangWorkerActor] Extracted {len(log_probs)} log_probs, mean={sum(log_probs)/len(log_probs):.4f}")
                 return log_probs
             else:
-                logger.info(f"[SGLangWorkerActor] No valid logprobs extracted")
-                return [-100.0]
+                error_msg = f"[SGLangWorkerActor] No valid logprobs extracted from SGLang output"
+                logger.error(error_msg)
+                raise RuntimeError(error_msg)
 
         except Exception as e:
-            logger.warning(f"[SGLangWorkerActor] Failed to extract logprobs: {e}")
+            error_msg = f"[SGLangWorkerActor] Failed to extract logprobs: {e}"
+            logger.error(error_msg)
             import traceback
-            logger.warning(f"[SGLangWorkerActor] Traceback: {traceback.format_exc()}")
-            return [-100.0]
+            logger.error(f"[SGLangWorkerActor] Traceback: {traceback.format_exc()}")
+            raise RuntimeError(error_msg) from e
 
     def _ensure_event_loop(self):
         """Ensure an event loop exists for the current thread."""
@@ -736,15 +826,18 @@ class SGLangStudentRewardClient:
         # - Worker 1 uses ports in [31100, 32000)
         # - etc.
         logger.info(f"[SGLangStudentReward] Initializing {len(self.workers)} workers IN PARALLEL with unique ports...")
+        logger.info(f"[SGLangStudentReward] Each worker will verify Engine readiness by testing logprob generation...")
+        
         init_futures = []
         for i, worker in enumerate(self.workers):
             logger.info(f"[SGLangStudentReward] Submitting init for worker {i}/{len(self.workers)} (base_port={assigned_ports[i]})...")
-            init_futures.append(worker.compute_logprobs.remote(["test"], [0]))
+            # Use initialize_and_verify to ensure Engine is fully ready before proceeding
+            init_futures.append(worker.initialize_and_verify.remote())
 
         # Wait for all workers to complete initialization in parallel
         try:
-            results = ray.get(init_futures, timeout=180)  # 3 min timeout for all workers
-            logger.info(f"[SGLangStudentReward] All {len(self.workers)} workers initialized successfully in parallel")
+            results = ray.get(init_futures, timeout=300)  # 5 min timeout for all workers (including retries)
+            logger.info(f"[SGLangStudentReward] All {len(self.workers)} workers initialized and verified successfully in parallel")
         except Exception as e:
             logger.error(f"[SGLangStudentReward] Parallel init FAILED: {e}")
             raise
@@ -798,7 +891,7 @@ class SGLangStudentRewardClient:
 
         return full_text, answer_start_idx
 
-    def _build_prompt_for_kl(self, question: str, cot: str) -> tuple[str, int]:
+    def _build_prompt_for_kl(self, question: str, cot: str) -> tuple[str, int, int]:
         """
         Build prompt for KL reward mode: Question + CoT only (no answer).
 
@@ -806,23 +899,24 @@ class SGLangStudentRewardClient:
         This measures how "surprising" the CoT is to a model that only knows the question.
 
         Returns:
-            tuple: (full_prompt, cot_start_token_idx)
+            tuple: (full_prompt, cot_start_token_idx, cot_end_token_idx)
+            - cot_start_token_idx: index of first CoT content token (after <think>\n)
+            - cot_end_token_idx: index of first token after CoT content (before \n</think>)
         """
         # Build full prompt: Q + CoT (no answer content)
         messages = [
             {'role': 'user', 'content': question},
-            {'role': 'assistant', 'content': '', 'reasoning_content': cot}
+            {'role': 'assistant', 'content': f'<think>\n{cot}\n</think>'}
         ]
         full_text = self.tokenizer.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=False
         )
 
-        # Find where CoT tokens start using the dummy technique
-        # (same approach as _build_prompt for answer_start)
+        # Find where CoT tokens start and end using the dummy technique
         dummy_cot = "X"
         messages_with_dummy = [
             {'role': 'user', 'content': question},
-            {'role': 'assistant', 'content': '', 'reasoning_content': dummy_cot}
+            {'role': 'assistant', 'content': f'<think>\n{dummy_cot}\n</think>'}
         ]
         text_with_dummy = self.tokenizer.apply_chat_template(
             messages_with_dummy, tokenize=False, add_generation_prompt=False
@@ -830,14 +924,21 @@ class SGLangStudentRewardClient:
         tokens_with_dummy = self.tokenizer.encode(text_with_dummy, add_special_tokens=False)
 
         dummy_token_id = self.tokenizer.encode(dummy_cot, add_special_tokens=False)[0]
-        # Search from back to front (in case "X" appears in the question)
+        
+        # Search from back to front to find dummy token position
         cot_start_idx = 0
         for i in range(len(tokens_with_dummy) - 1, -1, -1):
             if tokens_with_dummy[i] == dummy_token_id:
                 cot_start_idx = i
                 break
+        
+        # Calculate cot_end_idx: cot_start_idx + 1 (dummy is 1 token)
+        # In actual CoT, this will be cot_start_idx + len(cot_tokens)
+        # We'll compute this after tokenizing the actual CoT
+        cot_tokens = self.tokenizer.encode(cot, add_special_tokens=False)
+        cot_end_idx = cot_start_idx + len(cot_tokens)
 
-        return full_text, cot_start_idx
+        return full_text, cot_start_idx, cot_end_idx
 
     def _build_prompt_without_cot(self, question: str, answer: str) -> tuple[str, int]:
         """
@@ -1406,10 +1507,12 @@ class SGLangStudentRewardClient:
         # Phase 1: Build all KL prompts (CPU)
         kl_prompts = []
         kl_cot_starts = []
+        kl_cot_ends = []
         for i in range(batch_size):
-            prompt, cot_start = self._build_prompt_for_kl(questions[i], rewrite_cots[i])
+            prompt, cot_start, cot_end = self._build_prompt_for_kl(questions[i], rewrite_cots[i])
             kl_prompts.append(prompt)
             kl_cot_starts.append(cot_start)
+            kl_cot_ends.append(cot_end)
 
         prep_time = time.time() - start_time
 
@@ -1439,13 +1542,18 @@ class SGLangStudentRewardClient:
         inference_time = time.time() - inference_start
 
         # Phase 3: Build output tensor [batch_size, response_length]
+        # Extract only CoT portion (from cot_start to cot_end) for each sample
         student_log_probs = torch.zeros(batch_size, response_length)
         for i in range(batch_size):
             if kl_results[i] is not None:
                 token_lps = kl_results[i].get("token_log_probs", [])
-                n = min(len(token_lps), response_length)
+                # logprob_start_len=cot_start, so token_lps[0] corresponds to cot_start
+                # We need token_lps[0:cot_end-cot_start] which is the pure CoT content
+                cot_length = kl_cot_ends[i] - kl_cot_starts[i]
+                cot_logprobs = token_lps[:cot_length] if len(token_lps) >= cot_length else token_lps
+                n = min(len(cot_logprobs), response_length)
                 if n > 0:
-                    student_log_probs[i, :n] = torch.tensor(token_lps[:n])
+                    student_log_probs[i, :n] = torch.tensor(cot_logprobs[:n])
 
         total_time = time.time() - start_time
         logger.info(

@@ -54,7 +54,7 @@ Follow these guidelines:
 3. **Avoid Literal Repetition**: Rephrase the content in your own words rather than simply duplicating the text of the original process.
 
 **Output Rules:**
-- Directly output the rewritten reasoning strictly enclosed within <rewrite_reasoning> </rewrite_reasoning> tags.
+- Directly output the rewritten reasoning process.
 - Do NOT mention that you are rewriting another reasoning process."""
 
     user_prompt = f"""\
@@ -62,7 +62,10 @@ Follow these guidelines:
 {question}
 
 ## Original Reasoning Process
-{thought}"""
+{thought}
+
+## Rewritten Reasoning Process
+"""
 
     return system_prompt, user_prompt
 

@@ -500,9 +500,13 @@ def compute_reward_breakdown_metrics(reward_extra_infos_dict: dict[str, list[Any
     reward_components = [
         # reward group: all reward-related values
         ("cognitive_rewards", "reward/cognitive"),
+        ("useful_rewards", "reward/useful"),  # R_useful: CoT有用程度
         ("total_rewards", "reward/total"),
         ("reward_deltas", "reward/delta"),  # Raw rewrite-original log_prob difference
         # stats group: observation statistics (not directly used as reward)
+        ("rewrite_mean_log_probs", "stats/rewrite_mean_log_prob"),
+        ("original_mean_log_probs", "stats/original_mean_log_prob"),
+        ("no_cot_mean_log_probs", "stats/no_cot_mean_log_prob"),
         ("length_ratio", "stats/length_ratio"),
         ("similarities", "stats/similarity"),  # Similarity between original and rewrite CoT
         ("rewrite_fsfs", "stats/fsf_rewrite"),  # FSF (Failure Step Fraction) for rewrite CoTs
