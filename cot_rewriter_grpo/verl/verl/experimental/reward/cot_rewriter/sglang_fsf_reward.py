@@ -74,9 +74,21 @@ class SGLangFSFActor:
 
         # Set unique MASTER_PORT to avoid torch.distributed TCP rendezvous port conflicts
         # when multiple FSF workers initialize in parallel on the same machine.
-        # Each worker gets a unique port based on its base_port offset.
-        os.environ["MASTER_PORT"] = str(base_port + 500)
+        # Dynamically find an available port instead of using a fixed offset,
+        # to avoid EADDRINUSE errors when ports are still in TIME_WAIT state.
+        import socket
+        master_port = base_port + 500
+        for offset in range(100):
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                    s.bind(("127.0.0.1", master_port))
+                    break
+            except OSError:
+                master_port = base_port + 500 + offset + 1
+        os.environ["MASTER_PORT"] = str(master_port)
         os.environ["MASTER_ADDR"] = "127.0.0.1"
+        logger.info(f"[{worker_name}] Using MASTER_PORT={master_port}")
 
         # Log GPU memory status
         def get_nvidia_smi_memory_for_gpu(gpu_idx):
@@ -515,20 +527,29 @@ class SGLangFSFClient:
             except OSError:
                 return False
 
+        def is_port_range_available(base_port: int) -> bool:
+            """Check that both the SGLang port and the MASTER_PORT range are available."""
+            if not is_port_available(base_port):
+                return False
+            # Also check the MASTER_PORT range (base_port + 500 ~ +599)
+            if not is_port_available(base_port + 500):
+                return False
+            return True
+
         assigned_ports = []
         for group_idx in range(len(gpu_groups)):
             preferred_port = base_port_start + group_idx * port_spacing
             port = preferred_port
             attempts = 0
             max_attempts = 100
-            
-            while not is_port_available(port) and attempts < max_attempts:
+
+            while not is_port_range_available(port) and attempts < max_attempts:
                 attempts += 1
                 port = base_port_start + (group_idx + attempts * len(gpu_groups)) * port_spacing
-            
-            if not is_port_available(port):
+
+            if not is_port_range_available(port):
                 raise RuntimeError(f"Cannot find available port for worker {group_idx}")
-            
+
             assigned_ports.append(port)
 
         # Create Ray actors
@@ -604,18 +625,29 @@ class SGLangFSFClient:
             logger.warning(f"[SGLangFSFClient] Failed to resume memory: {e}")
 
     def shutdown(self):
-        """Shutdown all workers."""
+        """Shutdown all workers and kill Ray actors to fully release ports."""
         if not self._initialized:
             return
 
         try:
             futures = [w.shutdown.remote() for w in self.workers]
             ray.get(futures, timeout=60)
-            self.workers = []
-            self._initialized = False
             logger.info("[SGLangFSFClient] All workers shutdown")
         except Exception as e:
             logger.warning(f"[SGLangFSFClient] Shutdown error: {e}")
+
+        # Kill Ray actors to ensure ports are fully released
+        for w in self.workers:
+            try:
+                ray.kill(w, no_restart=True)
+            except Exception:
+                pass
+        self.workers = []
+        self._initialized = False
+
+        # Wait briefly for ports to be released from TIME_WAIT
+        import time
+        time.sleep(2)
 
     def compute_rewrite_fsf_only(
         self,
