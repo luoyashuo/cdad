@@ -43,7 +43,7 @@ uv pip install vllm==0.8.5.post1 -i https://pypi.tuna.tsinghua.edu.cn/simple
 ```bash
 uv pip install git+https://github.com/NICTA/pyairports.git
 uv pip install transformers==4.55.0 accelerate==1.11.0 deepspeed==0.16.9
-uv pip install swanlab
+uv pip install swanlab==0.7.6
 ```
 
 ## 4. 安装子模块依赖

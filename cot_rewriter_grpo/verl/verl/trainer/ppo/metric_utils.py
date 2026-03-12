@@ -485,29 +485,27 @@ def compute_reward_breakdown_metrics(reward_extra_infos_dict: dict[str, list[Any
                 (True = entire group's R_logic=0 due to parse failures, False = normal FSF reward applied)
 
     Returns:
-        A dictionary with metrics in the format:
-        {
-            "reward/{component}/mean": mean value,
-            "reward/{component}/max": max value,
-            "reward/{component}/min": min value,
-            ...
-        }
+        A dictionary with metrics grouped by SwanLab panel:
+        - reward/*: reward values (cognitive, total, delta, KL)
+        - stats/*: observation statistics (length_ratio, similarity, fsf, format, truncation)
+        - penalty/*: penalty rates and counts (truncation, format, fsf, correct_judge, etc.)
     """
     import numpy as np
 
     metrics = {}
 
     # Define reward components to track (mean/max/min statistics)
+    # Grouped by SwanLab panel: reward/* for reward metrics, stats/* for observation stats
     # Each component: (key in reward_extra_infos_dict, prefix for metric name)
     reward_components = [
+        # reward group: all reward-related values
         ("cognitive_rewards", "reward/cognitive"),
-        ("useful_rewards", "reward/useful"),  # R_useful: CoT有用程度
         ("total_rewards", "reward/total"),
-        ("reward_deltas", "raw_logprob_delta"),  # Display name: raw_logprob_delta, Key: reward_deltas
+        ("reward_deltas", "reward/delta"),  # Raw rewrite-original log_prob difference
+        # stats group: observation statistics (not directly used as reward)
         ("length_ratio", "stats/length_ratio"),
         ("similarities", "stats/similarity"),  # Similarity between original and rewrite CoT
-        # FSF (Failure Step Fraction) - track rewrite fsf with mean/max/min
-        ("rewrite_fsfs", "fsf/rewrite"),
+        ("rewrite_fsfs", "stats/fsf_rewrite"),  # FSF (Failure Step Fraction) for rewrite CoTs
     ]
 
     for dict_key, metric_prefix in reward_components:
@@ -538,7 +536,6 @@ def compute_reward_breakdown_metrics(reward_extra_infos_dict: dict[str, list[Any
         ("repeat_penalties_actual", "penalty/repeat"),
         ("correct_judge_penalties", "penalty/correct_judge"),
         ("overlong_rewards", "penalty/overlong"),
-        ("logic_rewards", "penalty/logic"),  # logic_rewards treated as penalty
     ]
 
     for dict_key, metric_prefix in penalty_rate_components:
@@ -597,10 +594,15 @@ def compute_reward_breakdown_metrics(reward_extra_infos_dict: dict[str, list[Any
     # FSF parse failure statistics (count of samples with parse failures)
     if "fsf_parse_failed_count" in reward_extra_infos_dict:
         fsf_parse_failed_count = reward_extra_infos_dict["fsf_parse_failed_count"]
-        metrics["fsf/parse_failed"] = float(fsf_parse_failed_count)
+        metrics["stats/fsf_parse_failed"] = float(fsf_parse_failed_count)
 
     if "fsf_group_skipped" in reward_extra_infos_dict:
         fsf_group_skipped = reward_extra_infos_dict["fsf_group_skipped"]
-        metrics["fsf/group_skipped"] = 1.0 if fsf_group_skipped else 0.0
+        metrics["stats/fsf_group_skipped"] = 1.0 if fsf_group_skipped else 0.0
+
+    # Correct Judge parse failure statistics
+    if "correct_judge_parse_failed_count" in reward_extra_infos_dict:
+        cj_parse_failed_count = reward_extra_infos_dict["correct_judge_parse_failed_count"]
+        metrics["stats/correct_judge_parse_failed"] = float(cj_parse_failed_count)
 
     return metrics

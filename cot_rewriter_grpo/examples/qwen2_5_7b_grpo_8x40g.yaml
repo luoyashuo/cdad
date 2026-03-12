@@ -8,7 +8,7 @@ defaults:
 
 # ========== 基础训练配置 ==========
 trainer:
-  project_name: cot_rewriter_grpo
+  project_name: cot_rewriter_grpo_kl
   experiment_name: qwen2_5_7b_grpo_8x40g
   total_epochs: 1000
   total_training_steps: 500

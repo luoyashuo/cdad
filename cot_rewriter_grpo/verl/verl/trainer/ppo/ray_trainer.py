@@ -1506,7 +1506,8 @@ class RayPPOTrainer:
                                               "use_tiered_reward", "tier_step", "tier_reward",
                                               "reward_mode", "use_reward_delta", "truncation_penalty",
                                               "format_penalty", "too_short_max_penalty", "too_long_max_penalty",
-                                              "fsf_parse_failed_count", "fsf_group_skipped"}  # Scalar counts, not per-sample
+                                              "fsf_parse_failed_count", "fsf_group_skipped",
+                                              "correct_judge_parse_failed_count"}  # Scalar counts, not per-sample
                             for k, v in reward_extra_infos_dict.items():
                                 # Skip global config values that are the same for all samples
                                 if k in global_config_keys:
@@ -1661,15 +1662,15 @@ class RayPPOTrainer:
                                         new_total_list, dtype=object
                                     )
 
-                                    # Log metrics
-                                    metrics["reward/r_kl_min"] = r_kl_raw.min().item()
-                                    metrics["reward/r_kl_max"] = r_kl_raw.max().item()
-                                    metrics["reward/r_kl_mean"] = r_kl_raw.mean().item()
-                                    metrics["reward/r_cog_01_min"] = r_cog_01_flat.min().item()
-                                    metrics["reward/r_cog_01_max"] = r_cog_01_flat.max().item()
-                                    metrics["reward/r_cog_01_mean"] = r_cog_01_flat.mean().item()
-                                    metrics["reward/penalty_portion_mean"] = penalty_portion.mean().item()
-                                    metrics["reward/new_total_mean"] = new_total.mean().item()
+                                    # Log KL reward metrics (grouped under reward/ for SwanLab)
+                                    metrics["reward/r_kl/min"] = r_kl_raw.min().item()
+                                    metrics["reward/r_kl/max"] = r_kl_raw.max().item()
+                                    metrics["reward/r_kl/mean"] = r_kl_raw.mean().item()
+                                    metrics["reward/r_cog_01/min"] = r_cog_01_flat.min().item()
+                                    metrics["reward/r_cog_01/max"] = r_cog_01_flat.max().item()
+                                    metrics["reward/r_cog_01/mean"] = r_cog_01_flat.mean().item()
+                                    metrics["reward/penalty_portion/mean"] = penalty_portion.mean().item()
+                                    metrics["reward/new_total/mean"] = new_total.mean().item()
 
                                     training_logger.info(
                                         f"[KL-v2] Applied group-wise KL reward normalization: "
@@ -1742,20 +1743,22 @@ class RayPPOTrainer:
                             reward_fields = [
                                 "original_cot", "ground_truth",
                                 # Reward breakdown fields
-                                "cognitive_rewards", "useful_rewards", "rewrite_mean_log_probs", "original_mean_log_probs", "no_cot_mean_log_probs",
+                                "cognitive_rewards", "rewrite_mean_log_probs", "original_mean_log_probs", "no_cot_mean_log_probs",
                                 "rewrite_ppls", "original_ppls",  # PPL values (ppl mode only)
                                 "relative_improvement_rates",  # Formula 1: avg_prob(rewrite)/avg_prob(original) - 1 (observation)
                                 "logic_rewards", "total_rewards", "original_fsfs", "rewrite_fsfs",
+                                "reward_deltas",  # rewrite-original log_prob diff
                                 # Penalty fields
                                 "truncation_penalties", "format_penalties", "too_short_penalties", "too_long_penalties",
-                                "too_short_penalties_actual", "too_long_penalties_actual",  # Actual penalties applied
+                                "too_short_penalties_actual", "too_long_penalties_actual",
+                                "penalized_flags", "penalty_reasons",
+                                # Correct Judge fields
+                                "is_correct_results", "correct_judge_penalties",
                                 # DAPO filter_groups flags
                                 "truncated", "format_valid", "length_ratio",
-                                "reward_deltas",  # NEW: rewrite-original diff
-                                # FSF V2: parse failure flags
-                                "fsf_parse_failed", "fsf_group_skipped",
+                                # FSF parse status
+                                "fsf_parse_failed_count", "fsf_group_skipped",
                                 # FSF DOT outputs (raw FSF outputs for debugging/analysis)
-                                # Note: original_dot_outputs is always None (original_cot FSF is pre-computed in dataset)
                                 "rewrite_dot_outputs",
                                 # Saved prompts for debugging (student_model and fsf_judge requests)
                                 "saved_prompts",
@@ -2318,20 +2321,22 @@ class RayDAPOTrainer(RayPPOTrainer):
                             reward_fields = [
                                 "request_id", "original_cot", "ground_truth",
                                 # Reward breakdown fields
-                                "cognitive_rewards", "useful_rewards", "rewrite_mean_log_probs", "original_mean_log_probs", "no_cot_mean_log_probs",
+                                "cognitive_rewards", "rewrite_mean_log_probs", "original_mean_log_probs", "no_cot_mean_log_probs",
                                 "rewrite_ppls", "original_ppls",  # PPL values (ppl mode only)
                                 "relative_improvement_rates",  # Formula 1: avg_prob(rewrite)/avg_prob(original) - 1 (observation)
                                 "logic_rewards", "total_rewards", "original_fsfs", "rewrite_fsfs",
+                                "reward_deltas",  # rewrite-original log_prob diff
                                 # Penalty fields
                                 "truncation_penalties", "format_penalties", "too_short_penalties", "too_long_penalties",
-                                "too_short_penalties_actual", "too_long_penalties_actual",  # Actual penalties applied
+                                "too_short_penalties_actual", "too_long_penalties_actual",
+                                "penalized_flags", "penalty_reasons",
+                                # Correct Judge fields
+                                "is_correct_results", "correct_judge_penalties",
                                 # DAPO filter_groups flags
                                 "truncated", "format_valid", "length_ratio",
-                                "reward_deltas",  # NEW: rewrite-original diff
-                                # FSF V2: parse failure flags
-                                "fsf_parse_failed", "fsf_group_skipped",
+                                # FSF parse status
+                                "fsf_parse_failed_count", "fsf_group_skipped",
                                 # FSF DOT outputs (raw FSF outputs for debugging/analysis)
-                                # Note: original_dot_outputs is always None (original_cot FSF is pre-computed in dataset)
                                 "rewrite_dot_outputs",
                                 # Saved prompts for debugging (student_model and fsf_judge requests)
                                 "saved_prompts",
