@@ -220,12 +220,32 @@ custom_reward_function:
 
     # ==================== FSF Penalty 配置 ====================
     # 2x80G 显存紧张，关闭 FSF 以节省显存
-    use_logic_reward: true
+    # FSF 现在作为 penalty：rewrite_fsf > 0 (存在失败步骤) → reward = 0
+    use_logic_reward: true             # 是否启用 FSF penalty
+    fsf_model_path: /fs/fast/u20240075/hf_home/models/Yaseal-qwen3_4b_fsf_grm
+    fsf_tensor_parallel_size: 2
+    fsf_temperature: 0.4
+    fsf_top_k: 20
+    fsf_top_p: 0.95
+    fsf_max_new_tokens: 3072
+    fsf_gpu_memory_utilization: 0.3
+    fsf_max_model_len: 12000
+    fsf_micro_batch_size: 4
+    fsf_skip_group_on_parse_error: true
+    save_fsf_dot_outputs: true
+    save_prompts: true
+    r_logic_repeat_n: 1
 
     # ==================== Correct Judge 配置 ====================
     # 2x80G 显存紧张，关闭 correct judge 以节省显存
     use_correct_judge: true
-
+    correct_judge_model_path: /fs/fast/u20240075/hf_home/models/Qwen/Qwen3-4B
+    correct_judge_tensor_parallel_size: 2
+    correct_judge_gpu_memory_utilization: 0.3
+    correct_judge_max_model_len: 8192
+    correct_judge_micro_batch_size: 4
+    correct_judge_max_new_tokens: 10
+    correct_judge_filter_no_samples: true
     # ==================== Useful 奖励配置 ====================
     use_useful_reward: false
     lambda_useful: 1.0
