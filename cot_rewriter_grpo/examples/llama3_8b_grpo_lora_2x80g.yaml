@@ -206,7 +206,6 @@ custom_reward_function:
 
     # KL Reward 配置
     alpha_kl: 0.01
-    kl_adaptive_beta: 0.5
     kl_eps: 1e-6
     kl_fallback_tau: 3.0
 

@@ -207,11 +207,12 @@ custom_reward_function:
     print_samples: 2                  # 打印样本数
     # ==================== KL Reward 配置 (reward_mode: kl) ====================
     # KL reward 使用 Group-wise 自适应归一化
-    # 公式: r_KL = avg(kl_t) + alpha_kl * max(kl_t)
-    #       R_cog = exp(-r_KL / τ), 其中 τ = max(range, ε) + beta * mean
+    # KL 方向: D_KL(actor || student)，使用 k3 估计器
+    # 公式: k3_t = (r - 1) - log(r), 其中 r = π_actor / π_student
+    #       r_KL = avg(k3_t) + alpha_kl * max(k3_t)
+    #       R_cog = sigmoid(-r_KL / τ), 其中 τ = max(r_std, ε) + r_mean
     # 当 reward_mode = "kl" 时启用
-    alpha_kl: 0.01                   # max(kl_t) 的权重系数 (默认 0.01)
-    kl_adaptive_beta: 0.5            # τ 计算中 range 与 mean 的平衡因子 (默认 0.5)
+    alpha_kl: 0.01                   # max(k3_t) 的权重系数 (默认 0.01)
     kl_eps: 1e-6                     # 防止除零的小量 (默认 1e-6)
     kl_fallback_tau: 3.0             # group_size=1 时的 fallback tau 值
     # ==================== 认知奖励公式配置 ====================

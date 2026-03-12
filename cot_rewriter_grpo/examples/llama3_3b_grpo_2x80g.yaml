@@ -214,7 +214,6 @@ custom_reward_function:
     #       R_cog = exp(-r_KL / τ), 其中 τ = max(range, ε) + beta * mean
     # 当 reward_mode = "kl" 时启用
     alpha_kl: 0.01                   # max(kl_t) 的权重系数 (默认 0.01)
-    kl_adaptive_beta: 0.5            # τ 计算中 range 与 mean 的平衡因子 (默认 0.5)
     kl_eps: 1e-6                     # 防止除零的小量 (默认 1e-6)
     kl_fallback_tau: 3.0             # group_size=1 时的 fallback tau 值
     # ==================== 认知奖励公式配置 ====================

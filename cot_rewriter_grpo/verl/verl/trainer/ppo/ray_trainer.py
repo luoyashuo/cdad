@@ -1540,7 +1540,6 @@ class RayPPOTrainer:
                         if reward_kwargs.get("reward_mode") == "kl":
                             # Get configuration
                             alpha_kl = reward_kwargs.get("alpha_kl", 0.01)
-                            kl_adaptive_beta = reward_kwargs.get("kl_adaptive_beta", 0.5)
                             kl_eps = reward_kwargs.get("kl_eps", 1e-6)
                             group_size = self.config.actor_rollout_ref.rollout.n
                             
@@ -1558,6 +1557,7 @@ class RayPPOTrainer:
                             
                             if student_log_probs is not None:
                                 # Compute raw KL reward per sample
+                                # KL direction: D_KL(actor || student) using k3 estimator
                                 r_kl_raw = compute_kl_reward_from_logprobs(
                                     actor_log_probs=actor_log_probs,
                                     student_log_probs=student_log_probs,
@@ -1577,9 +1577,9 @@ class RayPPOTrainer:
                                     r_kl_grouped = r_kl_raw.view(num_groups, group_size)
                                     
                                     # Apply group-wise adaptive normalization
+                                    # tau = max(r_std, eps) + r_mean
                                     r_cog_01 = compute_group_wise_kl_reward(
                                         r_kl_matrix=r_kl_grouped,
-                                        beta=kl_adaptive_beta,
                                         eps=kl_eps,
                                     )
                                     

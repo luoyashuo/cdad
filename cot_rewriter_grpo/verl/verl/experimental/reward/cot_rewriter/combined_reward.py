@@ -301,7 +301,6 @@ class CombinedRewardComputer:
         similarity_penalty: float = 0.5,  # Deprecated: kept for backward compatibility, use use_repeat_penalty instead
         # ========== KL Reward Configuration ==========
         alpha_kl: float = 0.01,  # Weight for max(kl_t) term in r_KL = avg(kl_t) + alpha_kl * max(kl_t)
-        kl_adaptive_beta: float = 0.5,  # Balance factor for tau = range + beta * mean
         kl_eps: float = 1e-6,  # Epsilon to prevent division by zero
         kl_fallback_tau: float = 3.0,  # Fallback tau value when group_size=1
         # ========== Correct Judge Configuration ==========
@@ -534,7 +533,6 @@ class CombinedRewardComputer:
 
         # ========== KL Reward Parameters ==========
         self.alpha_kl = alpha_kl
-        self.kl_adaptive_beta = kl_adaptive_beta
         self.kl_eps = kl_eps
         self.kl_fallback_tau = kl_fallback_tau
 
@@ -1436,7 +1434,6 @@ def compute_cot_rewriter_reward(
     # ========== KL Reward Parameters ==========
     # KL reward using group-wise adaptive normalization
     alpha_kl: float = 0.01,  # Weight for max(kl_t) term in r_KL = avg(kl_t) + alpha_kl * max(kl_t)
-    kl_adaptive_beta: float = 0.5,  # Balance factor for tau = range + beta * mean
     kl_eps: float = 1e-6,  # Epsilon to prevent division by zero
     kl_fallback_tau: float = 3.0,  # Fallback tau value when group_size=1
     # ========== Correct Judge Parameters ==========
@@ -1695,7 +1692,6 @@ def compute_cot_rewriter_reward(
         similarity_penalty=similarity_penalty,
         # ========== KL Reward Parameters ==========
         alpha_kl=alpha_kl,
-        kl_adaptive_beta=kl_adaptive_beta,
         kl_eps=kl_eps,
         kl_fallback_tau=kl_fallback_tau,
         # ========== Correct Judge Parameters ==========
@@ -2004,7 +2000,6 @@ def compute_length_ratio_only(
 
 def compute_group_wise_kl_reward(
     r_kl_matrix: torch.Tensor,
-    beta: float = 0.5,
     eps: float = 1e-6,
     fallback_tau: float = 3.0,
 ) -> torch.Tensor:
@@ -2012,21 +2007,20 @@ def compute_group_wise_kl_reward(
     Group-wise 自适应归一化 KL Reward
     
     对于每个 group（对应一个 question，包含 G 个 samples）：
-    - r_min = min(r_KL[0], ..., r_KL[G-1])
-    - r_max = max(r_KL[0], ..., r_KL[G-1])
     - r_mean = mean(r_KL[0], ..., r_KL[G-1])
-    - τ = max(r_max - r_min, ε) + β · r_mean
-    - R_cog = 1 / (1 + exp(r_KL / τ))  = sigmoid(-r_KL / τ)
+    - r_std = std(r_KL[0], ..., r_KL[G-1])
+    - τ = max(r_std, ε) + r_mean
+    - R_cog = sigmoid(-r_KL / τ)
 
     物理意义：
     - r_KL 表示 Student 面对 CoT 的"惊讶程度"（信息泄漏/跳步的量化）
-    - 每个 group 独立归一化，适配不同难度的问题
+    - 每个 group 独立归一化，使用组内标准差 + 均值作为温度参数
+    - 标准差反映组内样本的相对差异，均值反映整体难度水平
     - r_KL=0 时 R_cog=0.5，r_KL 越大 R_cog 越接近 0
     - 最终 reward 严格在 (0, 0.5] 区间（r_KL≥0）
     
     Args:
         r_kl_matrix: [num_groups, group_size] 原始 r_KL 值（每个 sample 的 KL 聚合值）
-        beta: τ 计算中 range 与 mean 的平衡因子（默认 0.5）
         eps: 防止除零的小量（默认 1e-6）
         fallback_tau: group_size=1 时的 fallback tau 值（默认 3.0）
         
@@ -2047,8 +2041,6 @@ def compute_group_wise_kl_reward(
         r_group = r_kl_matrix[g]
         
         # Group 统计量
-        r_min = r_group.min()
-        r_max = r_group.max()
         r_mean = r_group.mean()
         
         # 自适应 tau
@@ -2056,12 +2048,14 @@ def compute_group_wise_kl_reward(
             # group_size=1 时使用 fallback_tau
             tau = fallback_tau
         else:
-            tau = torch.maximum(r_max - r_min, torch.tensor(eps, device=r_group.device)) + beta * r_mean
+            # 使用组内标准差 + 均值
+            r_std = r_group.std(unbiased=False)  # 使用有偏估计（除以 N）
+            tau = torch.maximum(r_std, torch.tensor(eps, device=r_group.device)) + r_mean
         
         # 防止 tau 为 0 或负数
         tau = torch.clamp(tau, min=eps)
         
-        # 归一化: R_cog = 1 / (1 + exp(r_KL / τ)) = sigmoid(-r_KL / τ)
+        # 归一化: R_cog = sigmoid(-r_KL / τ)
         r_cog_01[g] = torch.sigmoid(-r_group / tau)
     
     # 记录归一化后的统计信息
@@ -2080,6 +2074,7 @@ def compute_group_wise_kl_reward(
     return r_cog_01
 
 
+
 def compute_kl_reward_from_logprobs(
     actor_log_probs: torch.Tensor,
     student_log_probs: torch.Tensor,
@@ -2087,11 +2082,19 @@ def compute_kl_reward_from_logprobs(
     alpha_kl: float = 0.01,
 ) -> torch.Tensor:
     """
-    计算逐 token KL，然后聚合成每个 sample 的 r_KL
+    计算逐 token KL（Actor || Student），然后聚合成每个 sample 的 r_KL
+    
+    KL 方向: D_KL(actor || student)，即衡量 student 逼近 actor 的程度
+    - 当 student 能很好预测 actor 的 CoT 时，KL 小（reward 高）
+    - 当 student 难以预测时，KL 大（reward 低）
+    
+    使用 k3 估计器: k3 = (r - 1) - log(r)，其中 r = π_actor / π_student
+    - 无偏、方差小、始终非负
     
     公式:
-    - kl_t = max(0, log π_actor(cot_t) - log π_student(cot_t))
-    - r_KL = avg(kl_t) + α_kl · max(kl_t)
+    - log_r = log π_actor - log π_student
+    - k3_t = exp(log_r) - 1 - log_r
+    - r_KL = avg(k3_t) + α_kl · max(k3_t)
     
     Args:
         actor_log_probs: [batch_size, response_length] Actor 的 log probs
@@ -2102,11 +2105,14 @@ def compute_kl_reward_from_logprobs(
     Returns:
         r_kl: [batch_size] 每个 sample 的 KL reward 聚合值
     """
-    # 逐 token KL: max(0, log π_actor - log π_student)
-    kl_per_token = torch.maximum(
-        torch.zeros_like(actor_log_probs),
-        actor_log_probs - student_log_probs
-    )
+    # 计算 log ratio: log π_actor - log π_student = log(r)
+    # 方向: D_KL(actor || student)
+    log_r = actor_log_probs - student_log_probs
+    
+    # k3 估计器: k3 = (r - 1) - log(r) = exp(log_r) - 1 - log_r
+    # 无偏、方差小、始终非负
+    r = torch.exp(log_r)
+    kl_per_token = r - 1.0 - log_r
     
     # 应用 mask
     kl_per_token = kl_per_token * response_mask
