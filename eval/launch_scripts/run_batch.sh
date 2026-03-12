@@ -2,7 +2,7 @@
 # run_batch.sh - 等待训练进程结束后，依次评测多个 checkpoint
 # 启动方式: nohup bash launch_scripts/run_batch.sh > vllm_logs/batch_main.log 2>&1 &
 
-# export CUDA_VISIBLE_DEVICES="0"
+export CUDA_VISIBLE_DEVICES="0,1"
 export no_proxy=localhost,127.0.0.1
 export HF_HOME=/data/hf_home
 export MODELSCOPE_CACHE=/data/modelscope
@@ -72,7 +72,7 @@ kill_stray_ray() {
 # ============================================================
 # Step 1: 等待训练进程结束 (修改这里为实际的训练脚本 PID)
 # ============================================================
-TRAIN_PID=3298868  # run_exps.sh 的 PID
+TRAIN_PID=58482  # run_exps.sh 的 PID
 
 log "等待训练进程 PID $TRAIN_PID 结束..."
 while kill -0 "$TRAIN_PID" 2>/dev/null; do
@@ -91,19 +91,22 @@ wait_for_gpu_memory
 declare -a JOBS=(
 #     "/data/modelscope_cache/models/Qwen/Qwen2.5-7B-Instruct"    "eval_configs/eval_all_sft.yaml"
 #     "/data/modelscope_cache/models/Qwen/Qwen2.5-3B-Instruct"    "eval_configs/eval_all_sft.yaml"
-    "/data/cdad/checkpoints/vallina_sft/qwen2.5_3b_instruct_full_sft_30k"    "eval_configs/eval_all_sft.yaml"
+    # "/data/cdad/checkpoints/vallina_sft/qwen2.5_3b_instruct_full_sft_30k"    "eval_configs/eval_all_sft.yaml"
     # "/data/cdad/checkpoints/vallina_sft/qwen2.5_7b_instruct_full_sft_30k"    "eval_configs/eval_all_sft.yaml"
 
     # "/data/cdad/checkpoints/vallina_sft/qwen2.5_7b_instruct_lora_sft_30k/merged"    "eval_configs/eval_math.yaml"
     # "/data/modelscope_cache/models/Qwen/Qwen2.5-7B-Instruct"    "eval_configs/eval_math.yaml"
     # "/data/modelscope_cache/models/Qwen/Qwen2.5-1.5B-Instruct"    "eval_configs/eval_all_sft.yaml"
     # "/data/cdad/checkpoints/vallina_sft/qwen2.5_1.5b_instruct_vallina_sft_50k"    "eval_configs/eval_all_sft.yaml"
-
-
+    # "/data/cdad/checkpoints/vallina_sft/llama3_8b_instruct_vallina_full_sft_30k"    "eval_configs/eval_all_sft.yaml"
+    "/fs/fast/u20240075/luoyashuo/cdad/checkpoints/vallina_sft/llama3_3b_instruct_vallina_full_sft_30k"    "eval_configs/eval_all_sft.yaml"
+    "/fs/fast/u20240075/luoyashuo/cdad/checkpoints/vallina_sft/llama3_1b_instruct_vallina_full_sft_30k"    "eval_configs/eval_all_sft.yaml"
+    "/fs/fast/u20240075/luoyashuo/modelscope_cache/models/LLM-Research/Llama-3.2-1B-Instruct"    "eval_configs/eval_all_sft.yaml"
+    "/fs/fast/u20240075/luoyashuo/modelscope_cache/models/LLM-Research/Llama-3.2-3B-Instruct"    "eval_configs/eval_all_sft.yaml"
     
 )
 
-NUM_RUNS=1
+NUM_RUNS=3
 
 # 断点续传配置（二选一，同时设置时 RESUME_DIRS 优先）：
 #   RESUME=1               每个模型自动检测最新 version_* 目录续跑

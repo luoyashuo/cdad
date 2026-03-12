@@ -15,7 +15,7 @@ API_KEY: sk-9ae88192c0e54080831b8a7408d2da8d
 # vLLM配置（离线模式，直接加载模型，无需HTTP服务）
 vllm:
   tp: 1              # tensor parallel size（每个DP分片占几张GPU）
-  dp: 8              # data parallel size（几个LLM实例，dp>1时用Ray）
+  dp: 2              # data parallel size（几个LLM实例，dp>1时用Ray）
   gpu_memory_utilization: 0.9
   max_model_len: 16384
   enforce_eager: false # 对于RUC的机器需要关闭
