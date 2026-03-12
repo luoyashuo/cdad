@@ -1616,6 +1616,17 @@ class RayPPOTrainer:
                                     # 5. Rebuild total reward: new R_cog + preserved penalties
                                     new_total = r_cog_01_flat + penalty_portion
 
+                                    # 5.1 Re-apply zero-reward penalties: the penalty system sets
+                                    # total_rewards=0 for penalized samples, but the formula
+                                    # penalty_portion = old_total(=0) - old_r_cog breaks this
+                                    # (it produces penalty_portion = -old_r_cog instead of capturing
+                                    # the actual penalty). Fix: force new_total=0 for penalized samples.
+                                    if "penalized_flags" in batch.non_tensor_batch:
+                                        pf = batch.non_tensor_batch["penalized_flags"]
+                                        for i in range(new_total.shape[0]):
+                                            if int(pf[i]):
+                                                new_total[i] = 0.0
+
                                     # 6. Assign to last valid token (consistent with non-KL path)
                                     seq_lengths = response_mask.sum(dim=1).long() - 1
                                     seq_lengths = seq_lengths.clamp(min=0, max=response_mask.shape[1] - 1)
