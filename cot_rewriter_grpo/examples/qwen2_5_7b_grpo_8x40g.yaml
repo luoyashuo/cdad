@@ -12,7 +12,7 @@ trainer:
   experiment_name: qwen2_5_7b_grpo_8x40g
   total_epochs: 1000
   total_training_steps: 500
-  save_freq: 10
+  save_freq: 5
   test_freq: 10
   val_before_train: false
   device: cuda
@@ -231,7 +231,7 @@ custom_reward_function:
     tier_reward: 0.002                  # 每阶梯奖励值
     # ==================== FSF Penalty 配置 ====================
     # FSF 现在作为 penalty：rewrite_fsf > 0 (存在失败步骤) → reward = 0
-    use_logic_reward: false             # 是否启用 FSF penalty
+    use_logic_reward: true             # 是否启用 FSF penalty
     fsf_model_path: /data/hf_home/models/Yaseal-qwen3_4b_fsf_grm
     fsf_tensor_parallel_size: 1
     fsf_temperature: 0.3
@@ -251,7 +251,7 @@ custom_reward_function:
     lambda_useful: 1.0                # useful 奖励权重 λ_useful
     # ==================== Correct Judge 配置 (正确性检测) ====================
     # 判断错误时 reward = 0
-    use_correct_judge: false
+    use_correct_judge: true
     correct_judge_model_path: /data/modelscope_cache/models/Qwen/Qwen3-4B
     correct_judge_tensor_parallel_size: 1
     correct_judge_gpu_memory_utilization: 0.50   # 40GB GPU，降低避免 OOM

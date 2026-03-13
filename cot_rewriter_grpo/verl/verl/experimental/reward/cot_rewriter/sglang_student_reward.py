@@ -181,12 +181,8 @@ class SGLangWorkerActor:
         # Using enable_memory_saver=True to support memory release/resume mechanism
         # This avoids port conflicts from cleanup/recreate cycles
         #
-        # IMPORTANT: Each worker uses a different base_port to avoid port conflicts
-        # during parallel initialization. SGLang uses port + random.randint(100, 1000)
-        # for inter-process communication, so we use non-overlapping port ranges:
-        # - Worker 0: 30000 + random[100, 1000]  -> [30100, 31000)
-        # - Worker 1: 31000 + random[100, 1000]  -> [31100, 32000)
-        # - Worker N: (30000 + N*1000) + random[100, 1000) -> [30000+N*1000+100, 30000+N*1000+1000)
+        # Each worker uses a different base_port (assigned from non-overlapping 2000-port ranges)
+        # to avoid port conflicts during parallel initialization.
         self.engine = sgl.Engine(
             model_path=self._model_path,
             tp_size=self._tensor_parallel_size,
@@ -738,18 +734,26 @@ class SGLangStudentRewardClient:
             gpu_groups.append(group)
 
         # Create Ray actors, one per GPU group
-        # Each worker gets a unique base_port to avoid port conflicts during parallel initialization
-        # SGLang uses port + random.randint(100, 1000) for inter-process communication,
-        # so we use non-overlapping port ranges with 1000-port spacing:
-        # - Worker 0: 30000 + random[100, 1000)  -> [30100, 31000)
-        # - Worker 1: 31000 + random[100, 1000)  -> [31100, 32000)
-        # - Worker N: (30000 + N*1000) + random[100, 1000)
-        base_port_start = 30000
-        port_spacing = 1000  # Large enough to avoid overlap with random[100, 1000)
-        max_port_attempts = 100  # Max attempts to find an available port
+        # Port allocation strategy:
+        # - Each worker needs ~1000 ports: [base_port, base_port + 1000)
+        #   - base_port: SGLang Engine port
+        #   - base_port + 500: MASTER_PORT for torch.distributed
+        #   - base_port + random[100, 1000): SGLang internal communication
+        # - port_spacing = 1500 gives each worker a non-overlapping 1500-port range
+        #   with 500 ports of headroom for fallback search within its own range
+        # - Worker N's exclusive range: [base_port_start + N*1500, base_port_start + (N+1)*1500)
+        #   Worker N can try base_port from range_start to range_start + 499
+        #   (each base_port occupies [base_port, base_port + 1000))
+        # - Port ranges across services (8 workers max):
+        #   Student: [10000, 22000), FSF: [22000, 34000), CorrectJudge: [34000, 46000)
+        base_port_start = 10000
+        port_spacing = 1500  # Each worker gets a 1500-port range (needs ~1000, leaving 500 for fallback)
+        sglang_port_range = 1000  # SGLang uses [base_port, base_port + 1000)
 
         def is_port_available(port: int) -> bool:
             """Check if a port is available for binding."""
+            if port < 1 or port > 65535:
+                return False
             import socket
             try:
                 with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -759,30 +763,49 @@ class SGLangStudentRewardClient:
             except OSError:
                 return False
 
-        # Find available ports for all workers
+        def is_port_range_available(base_port: int) -> bool:
+            """Check if the full port range [base_port, base_port + 1000) is available.
+
+            Each worker uses:
+            - base_port: SGLang Engine port
+            - base_port + 500: MASTER_PORT for torch.distributed
+            - base_port + [100, 1000): SGLang internal communication ports
+
+            We check a representative set of ports in this range to detect conflicts.
+            """
+            if not is_port_available(base_port):
+                return False
+            if not is_port_available(base_port + 500):
+                return False
+            # Sample-check the SGLang internal range [base_port+100, base_port+1000)
+            for offset in range(100, 1000, 50):
+                if not is_port_available(base_port + offset):
+                    return False
+            return True
+
+        # Find available ports for all workers, each strictly within its own range
         assigned_ports = []
         for group_idx in range(len(gpu_groups)):
-            preferred_port = base_port_start + group_idx * port_spacing
-            port = preferred_port
-            attempts = 0
+            range_start = base_port_start + group_idx * port_spacing
+            range_end = range_start + port_spacing  # Exclusive upper bound of this worker's range
+            # base_port can be [range_start, range_end - sglang_port_range)
+            # so that [base_port, base_port + sglang_port_range) stays within the range
+            max_base_port = range_end - sglang_port_range
 
-            # Try to find an available port, starting from preferred_port
-            while not is_port_available(port) and attempts < max_port_attempts:
-                attempts += 1
-                # Try next port with port_spacing
-                port = base_port_start + (group_idx + attempts * len(gpu_groups)) * port_spacing
+            port = None
+            for candidate in range(range_start, max_base_port):
+                if is_port_range_available(candidate):
+                    port = candidate
+                    break
 
-            if not is_port_available(port):
-                # Fallback: try any port in a wider range
-                for fallback_attempt in range(max_port_attempts):
-                    port = base_port_start + group_idx * port_spacing + fallback_attempt * 100
-                    if is_port_available(port):
-                        break
-                else:
-                    raise RuntimeError(f"Cannot find available port for worker {group_idx} after {max_port_attempts} attempts")
+            if port is None:
+                raise RuntimeError(
+                    f"Cannot find available port range for worker {group_idx} "
+                    f"in range [{range_start}, {max_base_port})"
+                )
 
             assigned_ports.append(port)
-            logger.info(f"[SGLangStudentReward] Worker {group_idx}: using port {port} (preferred: {preferred_port})")
+            logger.info(f"[SGLangStudentReward] Worker {group_idx}: using port {port} (range: [{range_start}, {range_end}))")
 
         for group_idx, gpu_group in enumerate(gpu_groups):
             # gpu_group contains logical device indices (e.g., [0, 1]).
@@ -820,11 +843,8 @@ class SGLangStudentRewardClient:
             self.workers.append(worker)
             logger.info(f"[SGLangStudentReward] Created worker {group_idx} on physical GPUs {physical_gpu_ids} with base_port={base_port}")
 
-        # IMPORTANT: Initialize workers IN PARALLEL using unique ports
-        # Each worker has a different base_port, so their random port ranges don't overlap:
-        # - Worker 0 uses ports in [30100, 31000)
-        # - Worker 1 uses ports in [31100, 32000)
-        # - etc.
+        # Initialize workers IN PARALLEL - each worker has a non-overlapping 2000-port range
+        # so parallel initialization cannot cause port conflicts between workers.
         logger.info(f"[SGLangStudentReward] Initializing {len(self.workers)} workers IN PARALLEL with unique ports...")
         logger.info(f"[SGLangStudentReward] Each worker will verify Engine readiness by testing logprob generation...")
         

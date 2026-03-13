@@ -455,11 +455,15 @@ class SGLangCorrectJudgeClient:
             group = self.gpu_ids[i : i + self.tensor_parallel_size]
             gpu_groups.append(group)
 
-        # Assign unique base ports (start from 50000 to avoid conflict with FSF)
-        base_port_start = 50000
-        port_spacing = 1000
+        # Port ranges across services (8 workers max):
+        #   Student: [10000, 22000), FSF: [22000, 34000), CorrectJudge: [34000, 46000)
+        base_port_start = 34000
+        port_spacing = 1500
+        sglang_port_range = 1000
 
         def is_port_available(port: int) -> bool:
+            if port < 1 or port > 65535:
+                return False
             import socket
             try:
                 with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -469,19 +473,34 @@ class SGLangCorrectJudgeClient:
             except OSError:
                 return False
 
+        def is_port_range_available(base_port: int) -> bool:
+            """Check that the full port range [base_port, base_port + 1000) is available."""
+            if not is_port_available(base_port):
+                return False
+            if not is_port_available(base_port + 500):
+                return False
+            for offset in range(100, 1000, 50):
+                if not is_port_available(base_port + offset):
+                    return False
+            return True
+
         assigned_ports = []
         for group_idx in range(len(gpu_groups)):
-            preferred_port = base_port_start + group_idx * port_spacing
-            port = preferred_port
-            attempts = 0
-            max_attempts = 100
+            range_start = base_port_start + group_idx * port_spacing
+            range_end = range_start + port_spacing
+            max_base_port = range_end - sglang_port_range
 
-            while not is_port_available(port) and attempts < max_attempts:
-                attempts += 1
-                port = base_port_start + (group_idx + attempts * len(gpu_groups)) * port_spacing
+            port = None
+            for candidate in range(range_start, max_base_port):
+                if is_port_range_available(candidate):
+                    port = candidate
+                    break
 
-            if not is_port_available(port):
-                raise RuntimeError(f"Cannot find available port for worker {group_idx}")
+            if port is None:
+                raise RuntimeError(
+                    f"Cannot find available port range for CorrectJudge worker {group_idx} "
+                    f"in range [{range_start}, {max_base_port})"
+                )
 
             assigned_ports.append(port)
 
