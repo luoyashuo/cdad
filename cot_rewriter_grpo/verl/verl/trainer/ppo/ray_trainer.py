@@ -1744,7 +1744,7 @@ class RayPPOTrainer:
                                         f"[KL-v2] Applied group-wise KL reward normalization: "
                                         f"r_kl_cot_mean={r_kl_raw.mean().item():.4f} → "
                                         f"r_kl_cot_01_mean={r_kl_cot_01.mean().item():.4f}, "
-                                        f"r_kl_answer_mean={r_kl_answer_raw.mean().item():.4f if r_kl_answer_raw is not None else 'N/A'}, "
+                                        f"r_kl_answer_mean={r_kl_answer_raw.mean().item():.4f}, "
                                         f"r_cog_01_mean={r_cog_01_flat.mean().item():.4f}, "
                                         f"penalty_portion_mean={penalty_portion.mean().item():.4f}, "
                                         f"new_total_mean={new_total.mean().item():.4f}"
