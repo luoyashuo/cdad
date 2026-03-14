@@ -1,0 +1,17 @@
+# CoT Rewrite Inference Pipeline - Minimal Configuration
+# Only required fields; all other values use defaults.
+
+experiment_name: "my_exp"
+output_root: "/data/output/cot_rewrite"
+
+model:
+  checkpoint_path: "/data/cdad/checkpoints/global_step_40"
+
+rollout:
+  input_data: "/data/hf_home/datasets/train.jsonl"
+
+correct_judge:
+  model_path: "/data/luoys/modelscope_cache/models/Qwen/Qwen3-4B"
+
+fsf_judge:
+  model_path: "/data/luoys/modelscope_cache/models/Qwen/Qwen3-4B"
