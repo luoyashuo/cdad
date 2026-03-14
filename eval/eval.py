@@ -281,7 +281,6 @@ class VLLMOfflineEngine:
         """
         import ray as _ray
 
-        chunk = self._worker_chunk_size
         pending: List[tuple] = []   # (prompt, sp, client_future)
         inflight: dict = {}         # ray_ref -> (worker_idx, [client_future, ...])
 
@@ -294,6 +293,8 @@ class VLLMOfflineEngine:
             if not free:
                 return
             sp_dict = self._sampling_params_to_dict(pending[0][1])
+            # 每次读取最新值，支持按 benchmark 动态调整 chunk_size
+            chunk = self._worker_chunk_size
             # 均分给空闲 Worker，单次上限 chunk，避免把所有任务堆给一个 Worker
             per_worker = min(chunk, max(1, len(pending) // len(free)))
             for w_idx in free:
