@@ -178,13 +178,12 @@ for (( i=0; i<${#JOBS[@]}; i+=2 )); do
     sed "s|^model_path:.*|model_path: ${MODEL_PATH}|" "$BASE_CONFIG" > "$TMP_CONFIG"
 
     # 断点续传时追加日志（保留上次日志），首次运行时新建日志
-    if [ -n "$THIS_RESUME_FLAG" ]; then
-        LOG_REDIRECT=">>"
-    else
-        LOG_REDIRECT=">"
-    fi
     # shellcheck disable=SC2086
-    eval python eval.py "$TMP_CONFIG" "$NUM_RUNS" $THIS_RESUME_FLAG $LOG_REDIRECT "$LOG_FILE" 2>&1
+    if [ -n "$THIS_RESUME_FLAG" ]; then
+        python -u eval.py "$TMP_CONFIG" "$NUM_RUNS" $THIS_RESUME_FLAG >> "$LOG_FILE" 2>&1
+    else
+        python -u eval.py "$TMP_CONFIG" "$NUM_RUNS" > "$LOG_FILE" 2>&1
+    fi
     EXIT_CODE=$?
 
     if [ $EXIT_CODE -eq 0 ]; then

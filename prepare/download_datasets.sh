@@ -47,7 +47,7 @@ nohup huggingface-cli download \
 
 export HF_ENDPOINT=https://hf-mirror.com
 export HF_HOME=/data/hf_home
-base_model_dir=/data/hf_home/datasets
+base_model_dir=/fs/fast/u20240075
 dataset_name=hails/agieval-math
 mkdir -p "$(dirname "${base_model_dir}/${dataset_name}")"
 nohup huggingface-cli download \

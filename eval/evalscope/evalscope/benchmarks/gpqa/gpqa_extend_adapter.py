@@ -12,7 +12,11 @@ from evalscope.utils.multi_choices import MultipleChoiceTemplate
 
 logger = get_logger()
 
-LOCAL_CSV_PATH = '/data/modelscope_cache/datasets/gpqa_extended.csv'
+# 使用环境变量 MODELSCOPE_CACHE，默认为 /data/modelscope_cache
+MODELSCOPE_CACHE = os.environ.get('MODELSCOPE_CACHE', '/data/modelscope_cache')
+# dataset_name = modelscope/gpqa, local_dir = ${MODELSCOPE_CACHE}/datasets/${dataset_name}
+DATASET_NAME = 'modelscope/gpqa'
+LOCAL_CSV_PATH = os.path.join(MODELSCOPE_CACHE, 'datasets', DATASET_NAME, 'gpqa_extended.csv')
 
 
 @register_benchmark(
@@ -27,6 +31,7 @@ LOCAL_CSV_PATH = '/data/modelscope_cache/datasets/gpqa_extended.csv'
         train_split=None,
         eval_split='train',
         prompt_template=MultipleChoiceTemplate.SINGLE_ANSWER_COT,
+        default_subset='gpqa',
     )
 )
 class GPQAExtendAdapter(MultiChoiceAdapter):

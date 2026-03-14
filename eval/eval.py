@@ -614,7 +614,12 @@ class BenchmarkEvaluator:
         # 供连续调度器（_batch_loop_dp）分配给所有 Worker，无需手动配置
         vllm_cfg = self.config.get('vllm', {})
         _dp = vllm_cfg.get('dp', 1)
-        _chunk = vllm_cfg.get('worker_chunk_size', 512)
+        _global_chunk = vllm_cfg.get('worker_chunk_size', 512)
+        # 允许每个 benchmark 覆盖 worker_chunk_size（大数据集用大 chunk 提高吞吐）
+        _chunk = benchmark_config.get('worker_chunk_size', _global_chunk)
+        if self.vllm_engine is not None and self.vllm_engine.dp > 1:
+            self.vllm_engine._worker_chunk_size = _chunk
+            logger.info(f"[{benchmark_name}] worker_chunk_size={_chunk}")
         # dp=1 用适中并发；dp>1 至少能填满所有 Worker 的 2 轮 chunk
         eval_batch_size = _chunk if _dp == 1 else max(2048, _dp * _chunk * 2)
         task_config.eval_batch_size = eval_batch_size
