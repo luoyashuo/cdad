@@ -9,10 +9,10 @@ defaults:
 # ========== 基础训练配置 ==========
 trainer:
   project_name: cot_rewriter_grpo_kl
-  experiment_name: qwen2_5_7b_grpo_8x40g
+  experiment_name: qwen2_5_7b_grpo_8x40g_v2
   total_epochs: 1000
   total_training_steps: 500
-  save_freq: 5
+  save_freq: 10
   test_freq: 10
   val_before_train: false
   device: cuda
@@ -100,7 +100,7 @@ actor_rollout_ref:
   # Rollout (推理) 配置
   rollout:
     name: vllm
-    tensor_model_parallel_size: 4    # TP=4: 7B 模型 8x40G 下分4卡推理
+    tensor_model_parallel_size: 2    # TP=2: 7B 模型 8x40G 下分2卡推理
     gpu_memory_utilization: 0.6    # 降低 KV cache 为 reward 模型留空间
     dtype: bfloat16
     load_format: auto
@@ -200,6 +200,8 @@ custom_reward_function:
     # 认知奖励模式
     reward_mode: kl
     ppl_delta_temperature: 1.0       # sigmoid 温度，控制曲线陡峭度 (越小越陡)
+    w_kl_cot: 0.75
+    w_kl_answer: 0.25
     # 以下参数为其他 mode 使用，ppl_delta_norm_sigmoid 模式下不生效
     cot_effect_epsilon: 0.01          # cot_effect_delta_sigmoid 模式：避免除零的小常数
     cot_effect_temperature: 1.0       # cot_effect_delta_sigmoid 模式：sigmoid 温度
@@ -231,7 +233,7 @@ custom_reward_function:
     tier_reward: 0.002                  # 每阶梯奖励值
     # ==================== FSF Penalty 配置 ====================
     # FSF 现在作为 penalty：rewrite_fsf > 0 (存在失败步骤) → reward = 0
-    use_logic_reward: true             # 是否启用 FSF penalty
+    use_logic_reward: false             # 是否启用 FSF penalty
     fsf_model_path: /data/hf_home/models/Yaseal-qwen3_4b_fsf_grm
     fsf_tensor_parallel_size: 1
     fsf_temperature: 0.3

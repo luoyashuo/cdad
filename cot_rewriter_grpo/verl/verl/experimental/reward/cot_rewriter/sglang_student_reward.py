@@ -1583,6 +1583,125 @@ class SGLangStudentRewardClient:
 
         return student_log_probs
 
+    def compute_kl_answer_divergence_batch(
+        self,
+        questions: List[str],
+        rewrite_cots: List[str],
+        original_cots: List[str],
+        answers: List[str],
+        alpha_kl: float = 0.01,
+    ) -> List[float]:
+        """
+        Compute per-sample KL divergence on answer tokens:
+        D_KL(student(answer|q,rewrite_cot) || student(answer|q,original_cot))
+
+        Uses k3 estimator: k3_t = exp(log_r_t) - 1 - log_r_t
+        where log_r_t = log P(a_t|...,rewrite_cot) - log Q(a_t|...,original_cot)
+
+        Returns:
+            List of per-sample raw KL divergence values (non-negative).
+        """
+        import time
+
+        self.initialize()
+        self.resume_memory()
+
+        batch_size = len(questions)
+        start_time = time.time()
+
+        # Phase 1: Build prompts for both rewrite and original conditions
+        rewrite_prompts = []
+        rewrite_ans_starts = []
+        original_prompts = []
+        original_ans_starts = []
+
+        for i in range(batch_size):
+            rw_prompt, rw_ans_start = self._build_prompt(questions[i], rewrite_cots[i], answers[i])
+            rewrite_prompts.append(rw_prompt)
+            rewrite_ans_starts.append(rw_ans_start)
+
+            orig_prompt, orig_ans_start = self._build_prompt(questions[i], original_cots[i], answers[i])
+            original_prompts.append(orig_prompt)
+            original_ans_starts.append(orig_ans_start)
+
+        prep_time = time.time() - start_time
+
+        # Phase 2: Distribute to workers in parallel
+        inference_start = time.time()
+
+        # Submit rewrite prompts
+        rw_chunks = self._split_into_chunks(rewrite_prompts, self.num_actors)
+        rw_ans_chunks = self._split_into_chunks(rewrite_ans_starts, self.num_actors)
+        rw_futures = []
+        for w_idx, (p_chunk, a_chunk) in enumerate(zip(rw_chunks, rw_ans_chunks)):
+            if p_chunk:
+                future = self.workers[w_idx].compute_logprobs.remote(p_chunk, a_chunk)
+                rw_futures.append((w_idx, len(p_chunk), future))
+
+        # Submit original prompts
+        orig_chunks = self._split_into_chunks(original_prompts, self.num_actors)
+        orig_ans_chunks = self._split_into_chunks(original_ans_starts, self.num_actors)
+        orig_futures = []
+        for w_idx, (p_chunk, a_chunk) in enumerate(zip(orig_chunks, orig_ans_chunks)):
+            if p_chunk:
+                future = self.workers[w_idx].compute_logprobs.remote(p_chunk, a_chunk)
+                orig_futures.append((w_idx, len(p_chunk), future))
+
+        # Gather rewrite results
+        rw_results = [None] * batch_size
+        for w_idx, chunk_size, future in rw_futures:
+            chunk_results = ray.get(future)
+            start_idx = sum(len(rw_chunks[i]) for i in range(w_idx))
+            for i, result in enumerate(chunk_results):
+                rw_results[start_idx + i] = result
+
+        # Gather original results
+        orig_results = [None] * batch_size
+        for w_idx, chunk_size, future in orig_futures:
+            chunk_results = ray.get(future)
+            start_idx = sum(len(orig_chunks[i]) for i in range(w_idx))
+            for i, result in enumerate(chunk_results):
+                orig_results[start_idx + i] = result
+
+        inference_time = time.time() - inference_start
+
+        # Phase 3: Compute KL divergence per sample using k3 estimator
+        import torch
+        kl_values = []
+        for i in range(batch_size):
+            rw_lps = rw_results[i]["token_log_probs"] if rw_results[i] else []
+            orig_lps = orig_results[i]["token_log_probs"] if orig_results[i] else []
+
+            # Align to same length (use min length)
+            n = min(len(rw_lps), len(orig_lps))
+            if n == 0:
+                kl_values.append(0.0)
+                continue
+
+            rw_t = torch.tensor(rw_lps[:n])
+            orig_t = torch.tensor(orig_lps[:n])
+
+            # k3 estimator: D_KL(P || Q) where P=rewrite, Q=original
+            log_r = rw_t - orig_t
+            log_r_clamped = torch.clamp(log_r, min=-20.0, max=20.0)
+            r = torch.exp(log_r_clamped)
+            k3 = r - 1.0 - log_r_clamped
+            k3 = torch.clamp(k3, min=-10.0, max=10.0)
+
+            avg_kl = k3.mean()
+            min_kl = k3.min()
+            kl_val = (avg_kl + alpha_kl * min_kl).item()
+            kl_values.append(kl_val)
+
+        total_time = time.time() - start_time
+        logger.info(
+            f"[KL-Answer] Computed answer KL divergence for {batch_size} samples in {total_time:.2f}s "
+            f"(prep={prep_time:.2f}s, inference={inference_time:.2f}s), "
+            f"mean={sum(kl_values)/len(kl_values):.4f}"
+        )
+
+        return kl_values
+
     def release_memory(self):
         """
         释放所有 worker 的 KV Cache，保留权重。

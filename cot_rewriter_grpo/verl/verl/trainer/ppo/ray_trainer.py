@@ -1581,7 +1581,7 @@ class RayPPOTrainer:
                                     response_mask=response_mask,
                                     alpha_kl=alpha_kl,
                                 )
-                                
+
                                 # Reshape to [num_groups, group_size]
                                 batch_size = r_kl_raw.shape[0]
                                 num_groups = batch_size // group_size
@@ -1592,16 +1592,55 @@ class RayPPOTrainer:
                                     )
                                 else:
                                     r_kl_grouped = r_kl_raw.view(num_groups, group_size)
-                                    
-                                    # Apply group-wise adaptive normalization
+
+                                    # Apply group-wise adaptive normalization for r_kl_cot
                                     # tau = max(r_std, eps) + r_mean
-                                    r_cog_01 = compute_group_wise_kl_reward(
+                                    r_kl_cot_01 = compute_group_wise_kl_reward(
                                         r_kl_matrix=r_kl_grouped,
                                         eps=kl_eps,
-                                    )
-                                    
-                                    # Flatten back to [batch_size]
-                                    r_cog_01_flat = r_cog_01.view(-1)
+                                    ).view(-1)  # [batch_size]
+
+                                    # === r_kl_answer: D_KL(student(answer|q,rewrite_cot) || student(answer|q,original_cot)) ===
+                                    kl_answer_values_list = None
+                                    if reward_extra_infos_dict and "kl_answer_values" in reward_extra_infos_dict:
+                                        kl_answer_values_list = reward_extra_infos_dict.get("kl_answer_values")
+                                    elif "kl_answer_values" in batch.non_tensor_batch:
+                                        kl_answer_values_list = batch.non_tensor_batch["kl_answer_values"]
+
+                                    # Get weights from config (default: 3/4 for cot, 1/4 for answer)
+                                    w_kl_cot = reward_kwargs.get("w_kl_cot", 0.75)
+                                    w_kl_answer = reward_kwargs.get("w_kl_answer", 0.25)
+
+                                    if kl_answer_values_list is not None and len(kl_answer_values_list) == batch_size:
+                                        # Convert to tensor and normalize with same group-wise method
+                                        r_kl_answer_raw = torch.tensor(
+                                            [float(v) for v in kl_answer_values_list],
+                                            dtype=r_kl_cot_01.dtype,
+                                            device=r_kl_cot_01.device,
+                                        )
+                                        r_kl_answer_grouped = r_kl_answer_raw.view(num_groups, group_size)
+                                        r_kl_answer_01 = compute_group_wise_kl_reward(
+                                            r_kl_matrix=r_kl_answer_grouped,
+                                            eps=kl_eps,
+                                        ).view(-1)  # [batch_size]
+
+                                        # Combined reward: weighted sum
+                                        r_cog_01_flat = w_kl_cot * r_kl_cot_01 + w_kl_answer * r_kl_answer_01
+
+                                        # Store raw kl_answer values in non_tensor_batch for rollout/val logging
+                                        r_kl_answer_raw_list = r_kl_answer_raw.detach().cpu().tolist()
+                                        batch.non_tensor_batch["kl_answer_values"] = np.array(
+                                            r_kl_answer_raw_list, dtype=object
+                                        )
+                                    else:
+                                        # Fallback: no answer KL available, use only cot KL
+                                        r_cog_01_flat = r_kl_cot_01
+                                        r_kl_answer_raw = None
+                                        r_kl_answer_01 = None
+                                        training_logger.warning(
+                                            "[KL-v2] kl_answer_values not found or size mismatch. "
+                                            "Using only r_kl_cot for reward."
+                                        )
 
                                     # --- Fix: Preserve penalties and assign to last valid token ---
                                     # 1. Extract old total reward from token_level_scores
@@ -1675,18 +1714,37 @@ class RayPPOTrainer:
                                     metrics["reward/total/min"] = float(np.min(new_total_list))
 
                                     # Log KL reward metrics (grouped under reward/ for SwanLab)
+                                    metrics["reward/r_kl_cot/min"] = r_kl_raw.min().item()
+                                    metrics["reward/r_kl_cot/max"] = r_kl_raw.max().item()
+                                    metrics["reward/r_kl_cot/mean"] = r_kl_raw.mean().item()
+                                    metrics["reward/r_kl_cot_01/min"] = r_kl_cot_01.min().item()
+                                    metrics["reward/r_kl_cot_01/max"] = r_kl_cot_01.max().item()
+                                    metrics["reward/r_kl_cot_01/mean"] = r_kl_cot_01.mean().item()
+                                    # Keep old metric names for backward compat
                                     metrics["reward/r_kl/min"] = r_kl_raw.min().item()
                                     metrics["reward/r_kl/max"] = r_kl_raw.max().item()
                                     metrics["reward/r_kl/mean"] = r_kl_raw.mean().item()
                                     metrics["reward/r_cog_01/min"] = r_cog_01_flat.min().item()
                                     metrics["reward/r_cog_01/max"] = r_cog_01_flat.max().item()
                                     metrics["reward/r_cog_01/mean"] = r_cog_01_flat.mean().item()
+
+                                    # Log r_kl_answer metrics
+                                    if r_kl_answer_raw is not None:
+                                        metrics["reward/r_kl_answer/min"] = r_kl_answer_raw.min().item()
+                                        metrics["reward/r_kl_answer/max"] = r_kl_answer_raw.max().item()
+                                        metrics["reward/r_kl_answer/mean"] = r_kl_answer_raw.mean().item()
+                                        metrics["reward/r_kl_answer_01/min"] = r_kl_answer_01.min().item()
+                                        metrics["reward/r_kl_answer_01/max"] = r_kl_answer_01.max().item()
+                                        metrics["reward/r_kl_answer_01/mean"] = r_kl_answer_01.mean().item()
+
                                     metrics["reward/penalty_portion/mean"] = penalty_portion.mean().item()
                                     metrics["reward/new_total/mean"] = new_total.mean().item()
 
                                     training_logger.info(
                                         f"[KL-v2] Applied group-wise KL reward normalization: "
-                                        f"r_kl_mean={r_kl_raw.mean().item():.4f} → "
+                                        f"r_kl_cot_mean={r_kl_raw.mean().item():.4f} → "
+                                        f"r_kl_cot_01_mean={r_kl_cot_01.mean().item():.4f}, "
+                                        f"r_kl_answer_mean={r_kl_answer_raw.mean().item():.4f if r_kl_answer_raw is not None else 'N/A'}, "
                                         f"r_cog_01_mean={r_cog_01_flat.mean().item():.4f}, "
                                         f"penalty_portion_mean={penalty_portion.mean().item():.4f}, "
                                         f"new_total_mean={new_total.mean().item():.4f}"
@@ -1777,6 +1835,8 @@ class RayPPOTrainer:
                                 "rewrite_dot_outputs",
                                 # Saved prompts for debugging (student_model and fsf_judge requests)
                                 "saved_prompts",
+                                # KL answer divergence values (raw, before normalization)
+                                "kl_answer_values",
                             ]
                             for field in reward_fields:
                                 if field in batch.non_tensor_batch and field not in reward_extra_infos_dict:
@@ -2358,6 +2418,8 @@ class RayDAPOTrainer(RayPPOTrainer):
                                 "rewrite_dot_outputs",
                                 # Saved prompts for debugging (student_model and fsf_judge requests)
                                 "saved_prompts",
+                                # KL answer divergence values (raw, before normalization)
+                                "kl_answer_values",
                             ]
                             for field in reward_fields:
                                 if field in batch.non_tensor_batch:

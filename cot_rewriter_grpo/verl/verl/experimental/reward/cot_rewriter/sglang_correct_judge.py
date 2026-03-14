@@ -161,7 +161,11 @@ class SGLangCorrectJudgeActor:
 
         Determines if the reasoning process leads to the given solution.
         """
-        JUDGE_PROMPT = """Determine if the [Reasoning Process] leads to the conclusion in the [Solution].
+        JUDGE_PROMPT = """Evaluate the relationship between the [Reasoning Process] and the [Solution]. 
+
+## Evaluation Criteria
+1. Conclusion Consistency: Does the reasoning process derive the exact same final result as the [Solution]?
+2. Semantic Coherence: Is there a natural, logically sound, and coherent semantic transition between the [Reasoning Process] and the [Solution]? They must not feel disconnected or logically contradictory.
 
 ## Question
 {question}
@@ -172,8 +176,10 @@ class SGLangCorrectJudgeActor:
 ## Solution
 {solution}
 
-## Output
-Output <judge>Yes</judge> if the reasoning results in the given solution; otherwise, <judge>No</judge>."""
+## Output Format
+First, state your conclusion. Output <judge>Yes</judge> if BOTH criteria are completely satisfied. Output <judge>No</judge> if ANY criterion fails.
+Then, output your analysis.
+"""
 
         # Handle <rewrite_reasoning> tags if present
         if '<rewrite_reasoning>' in rewrite_cot:

@@ -707,6 +707,32 @@ class CombinedRewardComputer:
                     "KL reward will not be available."
                 )
 
+        # === KL mode: compute answer KL divergence ===
+        # D_KL(student(answer|q,rewrite_cot) || student(answer|q,original_cot))
+        kl_answer_values = None
+        if self.reward_mode == "kl" and response_length is not None:
+            if hasattr(self.student_client, 'compute_kl_answer_divergence_batch'):
+                logger.info(
+                    f"[KL-Answer] Computing answer KL divergence "
+                    f"(batch_size={batch_size})..."
+                )
+                kl_answer_values = self.student_client.compute_kl_answer_divergence_batch(
+                    questions=questions,
+                    rewrite_cots=rewrite_cots,
+                    original_cots=original_cots,
+                    answers=answers,
+                    alpha_kl=self.alpha_kl if hasattr(self, 'alpha_kl') else 0.01,
+                )
+                logger.info(
+                    f"[KL-Answer] Answer KL divergence computed: "
+                    f"mean={sum(kl_answer_values)/len(kl_answer_values):.4f}"
+                )
+            else:
+                logger.warning(
+                    "[KL-Answer] Student client does not support compute_kl_answer_divergence_batch. "
+                    "KL answer reward will not be available."
+                )
+
         # Compute logic reward (if enabled)
         # FSF is computed on-demand with proper memory management
         # Memory management: student is cleaned up before FSF computation
@@ -914,6 +940,11 @@ class CombinedRewardComputer:
         correct_judge_parse_failed_count = 0  # Count of samples with parse failures
 
         if self.use_correct_judge:
+            # Cleanup student client to free GPU memory (if not already cleaned up by FSF)
+            if not self.use_logic_reward and hasattr(self.student_client, 'cleanup'):
+                logger.info("[CORRECT_JUDGE] Cleaning up student client before loading Correct Judge model...")
+                self.student_client.cleanup()
+
             # Create Correct Judge Client on-demand
             from verl.experimental.reward.cot_rewriter.sglang_correct_judge import SGLangCorrectJudgeClient
 
@@ -1265,6 +1296,7 @@ class CombinedRewardComputer:
             "train_mask": train_mask,  # Training mask: True=participate in GRPO, False=filtered out (when correct_judge_filter_no_samples=True)
             # === KL mode: student log probs tensor ===
             "kl_student_log_probs": kl_student_log_probs,  # torch.Tensor [batch_size, response_length] or None
+            "kl_answer_values": kl_answer_values,  # List[float] per-sample KL divergence on answer tokens or None
             # === TOP-LEVEL KEYS for compute_cot_rewriter_reward to access ===
             "too_short_penalties": too_short_penalties,  # Penalty coefficients (0-0.5)
             "too_long_penalties": too_long_penalties,  # Penalty coefficients (0-0.5)
@@ -1908,6 +1940,8 @@ def compute_cot_rewriter_reward(
             "train_mask": result.get("train_mask", [True] * batch_size),  # Training mask for GRPO (True=participate, False=filtered)
             # KL mode: student log probs tensor (torch.Tensor or None)
             "student_log_probs": result.get("kl_student_log_probs", None),
+            # KL mode: per-sample answer KL divergence (List[float] or None)
+            "kl_answer_values": result.get("kl_answer_values", None),
         },
     }
 

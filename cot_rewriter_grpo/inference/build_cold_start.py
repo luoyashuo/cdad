@@ -47,14 +47,16 @@ OUTPUT_DIR = "/data/luoys/data/cdad/cold_start/llama3_3b_instruct_top2k"
 
 # System prompt
 SYSTEM_PROMPT = """\
-You are an expert in math and code. The 'Original Reasoning Process' is a verified and valid derivation. Using it as a reference, rewrite the reasoning with a better logical structure and a more clear delivery.
+You are an expert in math and code. The 'Original Reasoning Process' provides a raw derivation that leads to a correct solution. Your task is to extract the correct path and present it clearly.
 
 Follow these guidelines:
-1. **Logical Optimization**: Keep logic direct and coherent; eliminate redundancy without losing necessary complexity.
-2. **Step-by-Step Delivery**: Present the reasoning in a clear, sequential, step-by-step manner.
+1. **Refine and Bridge**: Retain the core logic, including essential self-reflections and verification steps. Supplement logical leaps and clarify complex steps to ensure a smooth, coherent flow.
+2. **Filter Invalid Paths**: Remove derivation branches within the 'Original Reasoning' that do not lead to the final answer (e.g., failed attempts, incorrect directions, or dead ends). Keep only the effective reasoning path.
 3. **Avoid Literal Repetition**: Rephrase the content in your own words rather than simply duplicating the text of the original process.
 
-Directly output the rewritten reasoning strictly enclosed within <rewrite_reasoning> </rewrite_reasoning> tags. Output nothing else."""
+**Output Rules:**
+- Directly output the rewritten reasoning process.
+- Do NOT mention that you are rewriting another reasoning process."""
 
 
 def build_user_prompt(question: str, original_thought: str) -> str:
