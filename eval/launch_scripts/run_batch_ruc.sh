@@ -63,10 +63,11 @@ declare -a JOBS=(
     # "/fs/fast/u20240075/luoyashuo/modelscope_cache/models/Qwen/Qwen2.5-1.5B-Instruct"    "eval_configs/eval_all_sft.yaml"
     # "/fs/fast/u20240075/luoyashuo/cdad/checkpoints/vallina_sft/qwen2.5_1.5b_instruct_vallina_sft_50k"    "eval_configs/eval_all_sft.yaml"
     # "/fs/fast/u20240075/luoyashuo/cdad/checkpoints/vallina_sft/llama3_8b_instruct_vallina_full_sft_30k"    "eval_configs/eval_all_sft.yaml"
-    "/fs/fast/u20240075/luoyashuo/cdad/checkpoints/vallina_sft/llama3_3b_instruct_vallina_full_sft_30k"    "eval_configs/eval_all_sft_ruc.yaml"
-    "/fs/fast/u20240075/luoyashuo/cdad/checkpoints/vallina_sft/llama3_1b_instruct_vallina_full_sft_30k"    "eval_configs/eval_all_sft_ruc.yaml"
-    "/fs/fast/u20240075/luoyashuo/modelscope_cache/models/LLM-Research/Llama-3.2-1B-Instruct"    "eval_configs/eval_all_sft_ruc.yaml"
-    "/fs/fast/u20240075/luoyashuo/modelscope_cache/models/LLM-Research/Llama-3.2-3B-Instruct"    "eval_configs/eval_all_sft_ruc.yaml"
+    # "/fs/fast/u20240075/luoyashuo/cdad/checkpoints/vallina_sft/llama3_3b_instruct_vallina_full_sft_30k"    "eval_configs/eval_all_sft_ruc.yaml"
+    # "/fs/fast/u20240075/luoyashuo/cdad/checkpoints/vallina_sft/llama3_1b_instruct_vallina_full_sft_30k"    "eval_configs/eval_all_sft_ruc.yaml"
+    # "/fs/fast/u20240075/luoyashuo/modelscope_cache/models/LLM-Research/Llama-3.2-1B-Instruct"    "eval_configs/eval_all_sft_ruc.yaml"
+    # "/fs/fast/u20240075/luoyashuo/modelscope_cache/models/LLM-Research/Llama-3.2-3B-Instruct"    "eval_configs/eval_all_sft_ruc.yaml"
+    "/fs/fast/u20240075/luoyashuo/modelscope_cache/models/Qwen/Qwen2.5-7B-Instruct"     "eval_configs/eval_all_sft_ruc.yaml"
     
 )
 
@@ -82,12 +83,13 @@ NUM_RUNS=3
 #       ""                                  # 3B 模型全新跑
 #       "/fs/fast/u20240075/luoyashuo/.../vallina_sft/evalscope/version_20260310_001550"
 #   )
-RESUME=1
+RESUME=0
 RESUME_DIRS=(
-    "/fs/fast/u20240075/luoyashuo/cdad/checkpoints/vallina_sft/llama3_3b_instruct_vallina_full_sft_30k/evalscope/version_20260313_110435"
-    "/fs/fast/u20240075/luoyashuo/cdad/checkpoints/vallina_sft/llama3_1b_instruct_vallina_full_sft_30k/evalscope/version_20260314_002459"
-    "/fs/fast/u20240075/luoyashuo/modelscope_cache/models/LLM-Research/Llama-3.2-1B-Instruct/evalscope/version_20260313_011436"
-    "/fs/fast/u20240075/luoyashuo/modelscope_cache/models/LLM-Research/Llama-3.2-3B-Instruct/evalscope/version_20260313_011456"
+    # "/fs/fast/u20240075/luoyashuo/cdad/checkpoints/vallina_sft/llama3_3b_instruct_vallina_full_sft_30k/evalscope/version_20260313_110435"
+    # "/fs/fast/u20240075/luoyashuo/cdad/checkpoints/vallina_sft/llama3_1b_instruct_vallina_full_sft_30k/evalscope/version_20260314_002459"
+    # "/fs/fast/u20240075/luoyashuo/modelscope_cache/models/LLM-Research/Llama-3.2-1B-Instruct/evalscope/version_20260313_011436"
+    # "/fs/fast/u20240075/luoyashuo/modelscope_cache/models/LLM-Research/Llama-3.2-3B-Instruct/evalscope/version_20260313_011456"
+    "/fs/fast/u20240075/luoyashuo/modelscope_cache/models/Qwen/Qwen2.5-7B-Instruct/evalscope/version_20260316_102625/"
 )
 
 # ============================================================
