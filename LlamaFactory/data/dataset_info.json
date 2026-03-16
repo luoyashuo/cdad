@@ -1570,7 +1570,46 @@
     }
   },
   "deepmath_plain_30k_val": {
-    "file_name": "/fs/fast/u20240075/hf_home/datasets/Yaseal/CDAD_EXP/deepmath_plain_30k/val.jsonl",
+    "file_name": "/data/hf_home/datasets/Yaseal/CDAD_EXP/deepmath_plain_30k/val.jsonl",
+    "formatting": "sharegpt",
+    "columns": {
+      "messages": "conversations"
+    },
+    "tags": {
+      "role_tag": "role",
+      "content_tag": "content",
+      "user_tag": "user",
+      "assistant_tag": "assistant"
+    }
+  },
+  "deepmath_plain_30k_train_dual_15k": {
+    "file_name": "/data/hf_home/datasets/Yaseal/CDAD_EXP/cot_rewrite/qwen2_5_7b_grpo_8x40g/final/dual_15k.jsonl",
+    "formatting": "sharegpt",
+    "columns": {
+      "messages": "conversations"
+    },
+    "tags": {
+      "role_tag": "role",
+      "content_tag": "content",
+      "user_tag": "user",
+      "assistant_tag": "assistant"
+    }
+  },
+  "deepmath_plain_30k_train_dual_30k": {
+    "file_name": "/data/hf_home/datasets/Yaseal/CDAD_EXP/cot_rewrite/qwen2_5_7b_grpo_8x40g/final/dual_30k.jsonl",
+    "formatting": "sharegpt",
+    "columns": {
+      "messages": "conversations"
+    },
+    "tags": {
+      "role_tag": "role",
+      "content_tag": "content",
+      "user_tag": "user",
+      "assistant_tag": "assistant"
+    }
+  },
+  "deepmath_plain_30k_train_single_30k": {
+    "file_name": "/data/hf_home/datasets/Yaseal/CDAD_EXP/cot_rewrite/qwen2_5_7b_grpo_8x40g/final/single_30k.jsonl",
     "formatting": "sharegpt",
     "columns": {
       "messages": "conversations"

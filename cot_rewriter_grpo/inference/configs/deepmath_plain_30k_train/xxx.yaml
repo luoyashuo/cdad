@@ -1,0 +1,6 @@
+帮我创建3个config，位于
+/home/luoys/cdad/cot_rewriter_grpo/inference/configs/deepmath_plain_30k_train下
+分别是
+- deepmath_plain_30k_train_single_30k.yaml
+- deepmath_plain_30k_train_dual_30k.yaml
+- deepmath_plain_30k_train_dual_15k.yaml

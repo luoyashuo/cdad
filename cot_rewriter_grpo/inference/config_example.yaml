@@ -75,4 +75,4 @@ dataset_build:
   selection_strategy: "random"
 
   # Output filename (relative to {output_root}/{experiment_name}/final/)
-  output_filename: "random.jsonl"
+  output_filename: "random_nofsf_correct.jsonl"

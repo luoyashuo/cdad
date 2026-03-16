@@ -7,9 +7,9 @@ from tqdm import tqdm
 from multiprocessing import Pool
 import os
 
-DATASET_PATH = "/data/hf_home/datasets/Yaseal/CDAD_EXP/deepmath_plain_50k/train.jsonl"
+DATASET_PATH = "/data/hf_home/datasets/Yaseal/CDAD_EXP/cot_rewrite/qwen2_5_7b_grpo_8x40g/final/dual_30k.jsonl"
 TOKENIZER_PATH = "/data/modelscope_cache/models/Qwen/Qwen2.5-1.5B-Instruct"
-OUTPUT_DIR = "/data/hf_home/datasets/Yaseal/CDAD_EXP/deepmath_plain_50k"
+OUTPUT_DIR = "/data/hf_home/datasets/Yaseal/CDAD_EXP/cot_rewrite/qwen2_5_7b_grpo_8x40g/final"
 NUM_WORKERS = 32
 CHUNK_SIZE = 500  # lines per worker chunk
 

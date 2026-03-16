@@ -9,7 +9,7 @@ finetuning_type: lora
 lora_rank: 64
 lora_alpha: 128
 lora_target: all
-lora_dropout: 0
+lora_dropout: 0.05
 
 ### dataset
 dataset: deepmath_plain_30k_train
@@ -41,7 +41,6 @@ warmup_ratio: 0.1
 bf16: true
 flash_attn: fa2
 ddp_timeout: 180000000
-resume_from_checkpoint: /data/cdad/checkpoints/vallina_sft/qwen2.5_7b_instruct_lora_sft_30k/checkpoint-644
 max_grad_norm: 1.0
 
 ### eval
