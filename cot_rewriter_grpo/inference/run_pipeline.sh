@@ -30,3 +30,4 @@ export VLLM_ATTENTION_BACKEND="${VLLM_ATTENTION_BACKEND:-FLASH_ATTN}"
 export PYTORCH_NVML_BASED_CUDA_CHECK=1
 
 exec python -m inference.pipeline "$@"
+# nohup bash inference/run_pipeline.sh --config inference/config_example.yaml > inference/logs/roll.log 2>&1 &

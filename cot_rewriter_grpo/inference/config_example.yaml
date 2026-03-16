@@ -2,14 +2,14 @@
 # Copy this file and edit the paths/parameters for your experiment.
 
 # Basic configuration
-experiment_name: "cot_rewrite_exp1"
-output_root: "/data/output/cot_rewrite"
+experiment_name: "qwen2_5_7b_grpo_8x40g"
+output_root: "/data/hf_home/datasets/Yaseal/CDAD_EXP/cot_rewrite"
 resume: true   # Auto-resume from last checkpoint on restart
 seed: 42
 
 # Model configuration
 model:
-  checkpoint_path: "/data/cdad/checkpoints/global_step_40"
+  checkpoint_path: "/data/cdad/checkpoints/cot_rewriter/cot_rewriter_grpo/qwen2_5_7b_grpo_8x40g/global_step_70"
   # Format detection: auto / hf / lora / fsdp / megatron
   # auto: detects based on directory structure
   format: "auto"
@@ -19,14 +19,14 @@ model:
 
 # Rollout configuration (Step 2)
 rollout:
-  input_data: "/data/hf_home/datasets/train.jsonl"  # ShareGPT format JSONL
-  num_rollouts: 4          # Number of rewrites per sample
-  batch_size: 32           # vLLM generation batch size per worker
+  input_data: "/data/hf_home/datasets/Yaseal/CDAD_EXP/deepmath_plain_30k/train.jsonl"  # ShareGPT format JSONL
+  num_rollouts: 5          # Number of rewrites per sample
+  batch_size: 96           # Rollouts per mini-batch (= samples × num_rollouts); controls GPU concurrency and tqdm granularity
 
   generation:
     temperature: 0.7
     top_p: 0.9
-    max_new_tokens: 4096
+    max_new_tokens: 8192
 
   parallel:
     # gpu_ids: auto-detected if not specified
@@ -35,11 +35,11 @@ rollout:
 
 # Correct Judge configuration (Step 3)
 correct_judge:
-  model_path: "/data/luoys/modelscope_cache/models/Qwen/Qwen3-4B"
+  model_path: "/data/modelscope_cache/models/Qwen/Qwen3-4B"
   enabled: true
-  batch_size: 8            # Micro-batch size per worker
+  batch_size: 96           # Total items per step (same semantics as rollout; per-worker = batch_size / num_gpus)
   tensor_parallel_size: 1
-  mem_fraction_static: 0.4
+  mem_fraction_static: 0.9
   dtype: "float16"
   max_model_len: 8192
   # gpu_ids: auto-detected if not specified
@@ -47,22 +47,22 @@ correct_judge:
 
   generation:
     temperature: 0.0       # Deterministic for judgment
-    max_new_tokens: 50     # Short output: <judge>Yes/No</judge>
+    max_new_tokens: 10     # Short output: <judge>Yes/No</judge>
 
 # FSF Judge configuration (Step 4)
 fsf_judge:
-  model_path: "/data/luoys/modelscope_cache/models/Qwen/Qwen3-4B"
+  model_path: "/data/hf_home/models/Yaseal-qwen3_4b_fsf_grm"
   enabled: true
-  batch_size: 4            # Micro-batch size per worker
+  batch_size: 256           # Total items per step (same semantics as rollout; per-worker = batch_size / num_gpus)
   tensor_parallel_size: 1
-  mem_fraction_static: 0.4
+  mem_fraction_static: 0.9
   dtype: "float16"
   max_model_len: 8192
   # gpu_ids: auto-detected if not specified
   # gpu_ids: [0, 1, 2, 3]
 
   generation:
-    temperature: 0.6
+    temperature: 0.3
     max_new_tokens: 8000
 
 # Dataset build configuration (Step 5)
@@ -72,7 +72,7 @@ dataset_build:
     correct_only: true      # Only keep rewrites where is_correct=True
 
   # Selection strategy: random / max_fsf / priority_correct
-  selection_strategy: "priority_correct"
+  selection_strategy: "random"
 
   # Output filename (relative to {output_root}/{experiment_name}/final/)
-  output_filename: "train_sharegpt.jsonl"
+  output_filename: "random.jsonl"

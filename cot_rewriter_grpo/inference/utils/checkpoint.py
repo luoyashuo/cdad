@@ -98,6 +98,17 @@ class CheckpointManager:
         prog["current_step"] = step
         self.save(state)
 
+    def get_step_param(self, step: str, key: str, default=None):
+        state = self._ensure_state()
+        sp = state["progress"]["step_progress"].get(step, {})
+        return sp.get(key, default)
+
+    def set_step_param(self, step: str, key: str, value) -> None:
+        state = self._ensure_state()
+        state["progress"]["step_progress"].setdefault(step, {})
+        state["progress"]["step_progress"][step][key] = value
+        self.save(state)
+
     def init_state(self, config_summary: Dict[str, Any], total_samples: int) -> None:
         state = self._ensure_state()
         state.setdefault("config", config_summary)
