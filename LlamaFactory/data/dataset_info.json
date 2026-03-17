@@ -1557,7 +1557,7 @@
     }
   },
   "deepmath_plain_30k_train": {
-    "file_name": "/fs/fast/u20240075/hf_home/datasets/Yaseal/CDAD_EXP/deepmath_plain_30k/train.jsonl",
+    "file_name": "/data/hf_home/datasets/Yaseal/CDAD_EXP/deepmath_plain_30k/train.jsonl",
     "formatting": "sharegpt",
     "columns": {
       "messages": "conversations"

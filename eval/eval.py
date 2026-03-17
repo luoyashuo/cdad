@@ -114,6 +114,24 @@ def _extract_model_name(model_path: str) -> str:
     return path_parts[-1]
 
 
+def _resolve_lora(model_path: str):
+    """检测 model_path 是否为 LoRA adapter 目录（含 adapter_config.json）。
+
+    Returns:
+        (base_model_path, adapter_path, max_lora_rank)  — LoRA 情况
+        (model_path, None, None)                        — 普通模型
+    """
+    import json
+    adapter_cfg_file = Path(model_path) / "adapter_config.json"
+    if not adapter_cfg_file.exists():
+        return model_path, None, None
+    cfg = json.loads(adapter_cfg_file.read_text())
+    base_model = cfg["base_model_name_or_path"]
+    max_lora_rank = cfg.get("r", 64)
+    logger.info(f"[LoRA] 检测到 adapter: {model_path}, base model: {base_model}, rank={max_lora_rank}")
+    return base_model, model_path, max_lora_rank
+
+
 # ============================================================
 # 离线 vLLM 引擎（替代 VLLMServiceManager）
 # ============================================================
@@ -124,7 +142,9 @@ class VLLMWorker:
     def __init__(self, model_path: str, tp: int,
                  gpu_memory_utilization: float,
                  max_model_len: Optional[int],
-                 enforce_eager: bool):
+                 enforce_eager: bool,
+                 lora_path: Optional[str] = None,
+                 max_lora_rank: int = 64):
         from vllm import LLM as _LLM
         kwargs = dict(
             model=model_path,
@@ -135,12 +155,22 @@ class VLLMWorker:
         )
         if max_model_len:
             kwargs['max_model_len'] = max_model_len
+        if lora_path:
+            kwargs['enable_lora'] = True
+            kwargs['max_lora_rank'] = max_lora_rank
         self.llm = _LLM(**kwargs)
+        if lora_path:
+            from vllm.lora.request import LoRARequest
+            self._lora_request = LoRARequest("adapter", 1, lora_path)
+        else:
+            self._lora_request = None
 
     def generate(self, prompts: List[str],
                  sampling_params_dict: dict) -> List[dict]:
         from vllm import SamplingParams as _SP
-        outputs = self.llm.generate(prompts, _SP(**sampling_params_dict), use_tqdm=False)
+        outputs = self.llm.generate(
+            prompts, _SP(**sampling_params_dict),
+            lora_request=self._lora_request, use_tqdm=False)
         return [
             {'text': o.outputs[0].text,
              'finish_reason': o.outputs[0].finish_reason}
@@ -167,14 +197,19 @@ class VLLMOfflineEngine:
         # dp>1 时每次给每个 Worker 的 prompt 数，控制负载均衡粒度
         self._worker_chunk_size = worker_chunk_size
 
+        # LoRA 检测：若 model_path 是 adapter 目录，则分离 base model 与 adapter
+        actual_model, lora_path, max_lora_rank = _resolve_lora(model_path)
+        self._lora_request = None
+
         logger.info(f"初始化 VLLMOfflineEngine: model={self.model_name}, "
                     f"tp={tp}, dp={dp}, 总GPU={tp * dp}"
-                    + (f", chunk_size={worker_chunk_size}" if dp > 1 else ""))
+                    + (f", chunk_size={worker_chunk_size}" if dp > 1 else "")
+                    + (f", lora={lora_path}" if lora_path else ""))
 
         if dp == 1:
             # ---------- 单进程模式 ----------
             kwargs = dict(
-                model=model_path,
+                model=actual_model,
                 tensor_parallel_size=tp,
                 gpu_memory_utilization=gpu_memory_utilization,
                 enforce_eager=enforce_eager,
@@ -182,8 +217,14 @@ class VLLMOfflineEngine:
             )
             if max_model_len:
                 kwargs['max_model_len'] = max_model_len
+            if lora_path:
+                kwargs['enable_lora'] = True
+                kwargs['max_lora_rank'] = max_lora_rank
             self.llm = LLM(**kwargs)
             self.tokenizer = self.llm.get_tokenizer()
+            if lora_path:
+                from vllm.lora.request import LoRARequest
+                self._lora_request = LoRARequest("adapter", 1, lora_path)
             self._workers = None
             logger.info("单进程离线模式初始化完成")
         else:
@@ -194,12 +235,13 @@ class VLLMOfflineEngine:
             # 主进程只加载 tokenizer（几 MB），不占 GPU
             from transformers import AutoTokenizer
             self.tokenizer = AutoTokenizer.from_pretrained(
-                model_path, trust_remote_code=True)
+                lora_path or actual_model, trust_remote_code=True)
 
             Worker = ray.remote(num_gpus=tp)(VLLMWorker)
             self._workers = [
-                Worker.remote(model_path, tp, gpu_memory_utilization,
-                              max_model_len, enforce_eager)
+                Worker.remote(actual_model, tp, gpu_memory_utilization,
+                              max_model_len, enforce_eager,
+                              lora_path, max_lora_rank or 64)
                 for _ in range(dp)
             ]
             self.llm = None
@@ -260,7 +302,8 @@ class VLLMOfflineEngine:
             futures = [x[2] for x in batch]
             logger.info(f"Batcher(dp=1): {len(prompts)} 个请求，推理中...")
             try:
-                outputs = self.llm.generate(prompts, sp, use_tqdm=False)
+                outputs = self.llm.generate(
+                    prompts, sp, lora_request=self._lora_request, use_tqdm=False)
                 results = [{'text': o.outputs[0].text,
                             'finish_reason': o.outputs[0].finish_reason}
                            for o in outputs]
@@ -295,13 +338,19 @@ class VLLMOfflineEngine:
             sp_dict = self._sampling_params_to_dict(pending[0][1])
             # 每次读取最新值，支持按 benchmark 动态调整 chunk_size
             chunk = self._worker_chunk_size
-            # 均分给空闲 Worker，单次上限 chunk，避免把所有任务堆给一个 Worker
-            per_worker = min(chunk, max(1, len(pending) // len(free)))
-            for w_idx in free:
+            n_free = len(free)
+            # 均衡分配：先算本轮要分发的总量（上限 chunk×worker 数），
+            # 再用 ceiling 均分给各 Worker（前 extra 个各多 1 个），
+            # 避免 floor 除法导致 pending 不足时出现 1,6,6,6 而非 4,5,5,5 的不均衡。
+            total_dispatch = min(len(pending), chunk * n_free)
+            base = total_dispatch // n_free
+            extra = total_dispatch % n_free  # 前 extra 个 Worker 各多分配 1 个
+            for idx, w_idx in enumerate(free):
                 if not pending:
                     break
-                take = pending[:per_worker]
-                del pending[:per_worker]
+                this_size = base + (1 if idx < extra else 0)
+                take = pending[:this_size]
+                del pending[:this_size]
                 ref = self._workers[w_idx].generate.remote(
                     [x[0] for x in take], sp_dict)
                 inflight[ref] = (w_idx, [x[2] for x in take])

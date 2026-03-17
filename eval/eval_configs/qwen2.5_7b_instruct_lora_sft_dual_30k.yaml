@@ -1,0 +1,103 @@
+# EvalScope 评测配置文件 - 测试所有子集版本
+# 模型路径
+# model_path: /fs/fast/u2080075/luoyashuo/checkpoints/cold_start/qwen2.5_1.5b_meta_math_40k
+model_path: /data/cdad/checkpoints/rewrite_cot/qwen2.5_7b_instruct_lora_sft_dual_30k
+# 硅基流动
+# API_KEY: sk-xidkzkywwvpdhmhpbvxvhwndfksfjgsccfsydurhrvnicyxm
+# BASE_URL: https://api.siliconflow.cn/v1/chat/completions
+# 火山
+# API_KEY: b57d6d28-9ab6-4678-905c-6025d4d431cf
+# BASE_URL: https://ark.cn-beijing.volces.com/api/coding/v3
+# 千问
+BASE_URL: https://dashscope.aliyuncs.com/compatible-mode/v1
+API_KEY: sk-9ae88192c0e54080831b8a7408d2da8d
+
+# vLLM配置（离线模式，直接加载模型，无需HTTP服务）
+vllm:
+  tp: 1              # tensor parallel size（3B模型单卡即可）
+  dp: 8              # data parallel size（两张卡并行，吞吐翻倍）
+  gpu_memory_utilization: 0.9
+  max_model_len: 16384
+  enforce_eager: false # 对于RUC的机器需要关闭
+  worker_chunk_size: 128  # dp>1时每个Worker每轮的prompt数（越大越能利用vLLM continuous batching）
+
+# 沙箱配置 - 临时文件存储路径 (避免打爆主机存储)
+sandbox:
+  work_dir: /data/tmp/evalscope_sandbox
+
+# 评测配置 - 不指定子集，测试所有默认子集
+benchmarks:
+  # MATH
+  # AIME25:
+  #   dataset_name: "aime25"
+  #   repeats: 8
+  #   temperature: 0.6
+  #   max_tokens: 14000
+  #   few_shot_num: 0
+  #   use_sandbox: false
+  #   worker_chunk_size: 15
+    
+  # AIME24:
+  #   dataset_name: "aime24"
+  #   repeats: 8
+  #   temperature: 0.6
+  #   max_tokens: 14000
+  #   few_shot_num: 0
+  #   use_sandbox: false
+  #   worker_chunk_size: 15
+
+  MATH500:
+    dataset_name: "math_500"
+    repeats: 1
+    temperature: 0.8
+    max_tokens: 12000
+    few_shot_num: 0
+    worker_chunk_size: 20
+
+  # AMC:
+  #   dataset_name: "amc"
+  #   subset: "amc23"  # AMC 必须指定年份作为子集
+  #   repeats: 1
+  #   temperature: 0.6
+  #   max_tokens: 12000
+  #   few_shot_num: 0
+  #   worker_chunk_size: 4
+
+  # AGIEvalMath:
+  #   dataset_name: "agieval_math"
+  #   repeats: 1
+  #   temperature: 1.0
+  #   max_tokens: 12000
+  #   few_shot_num: 0
+  #   worker_chunk_size: 20
+  GSM8K:
+    dataset_name: "gsm8k"
+    repeats: 1
+    temperature: 0.3
+    max_tokens: 12000
+    few_shot_num: 0
+    worker_chunk_size: 20
+  # General
+  # GPQA:
+  #   dataset_name: "gpqa_extend"
+  #   repeats: 1
+  #   temperature: 0.6
+  #   max_tokens: 12000
+  #   few_shot_num: 0
+  #   use_sandbox: false
+
+  # MMLUProNoMath:
+  #   dataset_name: "mmlu_pro_no_math"
+  #   repeats: 1
+  #   temperature: 1.0
+  #   max_tokens: 12000
+  #   few_shot_num: 0
+  #   worker_chunk_size: 256
+
+  # ARC:
+  #   dataset_name: "arc"
+  #   repeats: 1
+  #   temperature: 1.0
+  #   max_tokens: 12000
+  #   few_shot_num: 0
+  #   worker_chunk_size: 128

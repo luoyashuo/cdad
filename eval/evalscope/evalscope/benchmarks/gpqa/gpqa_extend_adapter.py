@@ -37,8 +37,8 @@ LOCAL_CSV_PATH = os.path.join(MODELSCOPE_CACHE, 'datasets', DATASET_NAME, 'gpqa_
 class GPQAExtendAdapter(MultiChoiceAdapter):
 
     def load(self):
+        from evalscope.api.dataset import DatasetDict
         if os.path.exists(LOCAL_CSV_PATH):
-            from evalscope.api.dataset import DatasetDict, LocalDataLoader
             loader = LocalDataLoader(
                 data_id_or_path=LOCAL_CSV_PATH,
                 split=self.eval_split,
@@ -51,9 +51,25 @@ class GPQAExtendAdapter(MultiChoiceAdapter):
                 shuffle_choices=self.shuffle_choices,
             )
             dataset = loader.load()
-            return DatasetDict({self.default_subset: dataset}), None
         else:
-            return self.load_from_remote()
+            # modelscope/gpqa has no subsets, load directly without subset_name
+            from evalscope.api.dataset.loader import RemoteDataLoader
+            loader = RemoteDataLoader(
+                data_id_or_path=self.dataset_id,
+                split=self.eval_split,
+                subset=None,
+                sample_fields=self.record_to_sample,
+                filter_func=self.sample_filter,
+                limit=self.limit,
+                repeats=self.repeats,
+                shuffle=self.shuffle,
+                shuffle_choices=self.shuffle_choices,
+                data_source=self.dataset_hub,
+                force_redownload=self.force_redownload,
+                dataset_dir=self.dataset_dir,
+            )
+            dataset = loader.load()
+        return DatasetDict({self.default_subset: dataset}), None
 
     def record_to_sample(self, record: Dict[str, Any]) -> Sample:
         processed_data = self._process_input(record)
