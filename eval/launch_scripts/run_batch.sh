@@ -85,6 +85,62 @@ log "训练进程已结束"
 wait_for_gpu_memory
 
 # ============================================================
+# LoRA merge 工具函数
+# 若 model_path 下有 adapter_config.json 且没有 config.json，则自动 merge
+# ============================================================
+maybe_merge_lora() {
+    local model_path="$1"
+
+    if [ ! -f "${model_path}/adapter_config.json" ]; then
+        return 0   # 非 LoRA 格式，直接跳过
+    fi
+
+    if [ -f "${model_path}/config.json" ]; then
+        log "  检测到 LoRA 格式，但已存在 config.json，跳过 merge"
+        return 0
+    fi
+
+    log "  检测到未 merge 的 LoRA，开始合并权重到 ${model_path} ..."
+
+    LORA_MERGE_PATH="$model_path" python - <<'PYEOF'
+import os, json, sys
+import torch
+from transformers import AutoModelForCausalLM, AutoTokenizer
+from peft import PeftModel
+
+model_path = os.environ["LORA_MERGE_PATH"]
+
+with open(os.path.join(model_path, "adapter_config.json")) as f:
+    adapter_config = json.load(f)
+
+base_model_path = adapter_config["base_model_name_or_path"]
+print(f"  基础模型: {base_model_path}", flush=True)
+print(f"  合并目标: {model_path}", flush=True)
+
+tokenizer = AutoTokenizer.from_pretrained(base_model_path, trust_remote_code=True)
+model = AutoModelForCausalLM.from_pretrained(
+    base_model_path,
+    torch_dtype=torch.float16,
+    device_map="cpu",
+    trust_remote_code=True,
+)
+model = PeftModel.from_pretrained(model, model_path)
+model = model.merge_and_unload()
+model.save_pretrained(model_path)
+tokenizer.save_pretrained(model_path)
+print("  merge 完成", flush=True)
+PYEOF
+
+    local exit_code=$?
+    if [ $exit_code -ne 0 ]; then
+        log "  [错误] LoRA merge 失败（退出码: $exit_code），终止当前任务"
+        return 1
+    fi
+    log "  LoRA merge 完成，合并权重已保存到 $model_path"
+    return 0
+}
+
+# ============================================================
 # Step 2: 定义待评测的 checkpoint 列表及对应配置文件
 # 格式: 每两个相邻元素为一组 (model_path, base_config)
 # ============================================================
@@ -96,6 +152,12 @@ declare -a JOBS=(
 
 NUM_RUNS=3
 
+# 合并推理模式（推荐开启，NUM_RUNS>1 时有效）：
+#   将每个 benchmark 的 NUM_RUNS 次推理合并为一次大 batch，GPU 利用率更高；
+#   评分时再自动切分为 NUM_RUNS 组，分别统计结果。
+#   设为 1 启用，0 禁用。
+MERGED_RUNS=0
+
 # 断点续传配置（二选一，同时设置时 RESUME_DIRS 优先）：
 #   RESUME=1               每个模型自动检测最新 version_* 目录续跑
 #   RESUME_DIRS=(...)      按顺序为每个模型指定精确的版本目录（空字符串 "" 表示该模型全新跑）
@@ -106,7 +168,7 @@ NUM_RUNS=3
 #       ""                                  # 3B 模型全新跑
 #       "/data/.../vallina_sft/evalscope/version_20260310_001550"
 #   )
-RESUME=0
+RESUME=1
 RESUME_DIRS=(
     # "/data/cdad/checkpoints/vallina_sft/qwen2.5_3b_instruct_full_sft_30k/evalscope/version_20260311_125756"
 )
@@ -162,15 +224,22 @@ for (( i=0; i<${#JOBS[@]}; i+=2 )); do
         log "  断点续传 : 自动检测"
     fi
 
+    # 若是未 merge 的 LoRA，先自动 merge
+    maybe_merge_lora "$MODEL_PATH" || { FAILED=$((FAILED + 1)); continue; }
+
     # 生成临时配置文件，将 model_path 替换为当前模型路径
     sed "s|^model_path:.*|model_path: ${MODEL_PATH}|" "$BASE_CONFIG" > "$TMP_CONFIG"
+
+    # 构造 --merged-runs 标志
+    MERGED_FLAG=""
+    [ "${MERGED_RUNS:-0}" -eq 1 ] && [ "$NUM_RUNS" -gt 1 ] && MERGED_FLAG="--merged-runs"
 
     # 断点续传时追加日志（保留上次日志），首次运行时新建日志
     # shellcheck disable=SC2086
     if [ -n "$THIS_RESUME_FLAG" ]; then
-        python -u eval.py "$TMP_CONFIG" "$NUM_RUNS" $THIS_RESUME_FLAG >> "$LOG_FILE" 2>&1
+        python -u eval.py "$TMP_CONFIG" "$NUM_RUNS" $THIS_RESUME_FLAG $MERGED_FLAG >> "$LOG_FILE" 2>&1
     else
-        python -u eval.py "$TMP_CONFIG" "$NUM_RUNS" > "$LOG_FILE" 2>&1
+        python -u eval.py "$TMP_CONFIG" "$NUM_RUNS" $MERGED_FLAG > "$LOG_FILE" 2>&1
     fi
     EXIT_CODE=$?
 

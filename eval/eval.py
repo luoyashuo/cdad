@@ -166,16 +166,70 @@ class VLLMWorker:
             self._lora_request = None
 
     def generate(self, prompts: List[str],
-                 sampling_params_dict: dict) -> List[dict]:
+                 sampling_params_dict: dict) -> dict:
+        """批量推理，自动去重相同 prompt 并用 n 参数共享 KV cache。
+
+        当一个 batch 中有重复 prompt 时（如 AIME 30题 × 8 repeats），
+        去重后用 SamplingParams(n=repeat_count) 生成多个 completion，
+        vLLM 会共享 prompt 的 KV cache（copy-on-write），大幅节省显存，
+        允许更高的并发 batch size。
+        """
         from vllm import SamplingParams as _SP
-        outputs = self.llm.generate(
-            prompts, _SP(**sampling_params_dict),
-            lora_request=self._lora_request, use_tqdm=False)
-        return [
-            {'text': o.outputs[0].text,
-             'finish_reason': o.outputs[0].finish_reason}
-            for o in outputs
-        ]
+
+        # --- 去重：检测 batch 内重复 prompt ---
+        seen = {}          # prompt_text -> index in unique_prompts
+        unique_prompts = []
+        n_per_unique = []  # 每个 unique prompt 的重复次数
+        for p in prompts:
+            if p not in seen:
+                seen[p] = len(unique_prompts)
+                unique_prompts.append(p)
+                n_per_unique.append(0)
+            n_per_unique[seen[p]] += 1
+
+        max_n = max(n_per_unique) if n_per_unique else 1
+        dedup_ratio = len(prompts) / max(len(unique_prompts), 1)
+
+        if max_n > 1:
+            # 有重复 prompt：用 n 参数批量 rollout
+            sp_dict = dict(sampling_params_dict)
+            sp_dict['n'] = max_n
+            outputs = self.llm.generate(
+                unique_prompts, _SP(**sp_dict),
+                lora_request=self._lora_request, use_tqdm=False)
+
+            # 按原始顺序映射结果
+            occurrence = {}  # prompt_text -> 下一个要取的 output index
+            for p in unique_prompts:
+                occurrence[p] = 0
+
+            results = []
+            total_tokens = 0
+            for p in prompts:
+                uid = seen[p]
+                j = occurrence[p]
+                occurrence[p] += 1
+                out = outputs[uid].outputs[j]
+                results.append({
+                    'text': out.text,
+                    'finish_reason': out.finish_reason,
+                })
+                total_tokens += len(out.token_ids)
+        else:
+            # 无重复：常规生成
+            outputs = self.llm.generate(
+                prompts, _SP(**sampling_params_dict),
+                lora_request=self._lora_request, use_tqdm=False)
+            total_tokens = sum(len(o.outputs[0].token_ids) for o in outputs)
+            results = [{'text': o.outputs[0].text,
+                         'finish_reason': o.outputs[0].finish_reason}
+                        for o in outputs]
+
+        return {
+            'results': results,
+            'total_tokens': total_tokens,
+            'dedup_ratio': round(dedup_ratio, 1),
+        }
 
 
 class VLLMOfflineEngine:
@@ -247,6 +301,15 @@ class VLLMOfflineEngine:
             self.llm = None
             logger.info(f"Ray DP 模式初始化完成，{dp} 个 Worker")
 
+        # ---------- TPS 统计 ----------
+        self._tps_interval = 30          # 每隔 N 秒打印一次 TPS
+        self._tps_tokens = 0             # 当前窗口累计生成 token 数
+        self._tps_samples = 0            # 当前窗口累计完成样本数
+        self._tps_total_tokens = 0       # 全局累计 token 数
+        self._tps_total_samples = 0      # 全局累计样本数
+        self._tps_window_start = time.time()
+        self._tps_global_start = time.time()
+
         # ---------- 请求批处理（线程安全） ----------
         # evalscope 用 ThreadPoolExecutor 逐条调 generate()，
         # 但 vLLM LLM.generate() 不是线程安全的。
@@ -274,6 +337,36 @@ class VLLMOfflineEngine:
             self._batch_event.set()
         return future.result()
 
+    def _tps_update(self, num_tokens: int, num_samples: int):
+        """累计 token/样本数，达到时间间隔时打印 TPS。"""
+        self._tps_tokens += num_tokens
+        self._tps_samples += num_samples
+        self._tps_total_tokens += num_tokens
+        self._tps_total_samples += num_samples
+        now = time.time()
+        window_elapsed = now - self._tps_window_start
+        if window_elapsed >= self._tps_interval:
+            window_tps = self._tps_tokens / window_elapsed if window_elapsed > 0 else 0
+            global_elapsed = now - self._tps_global_start
+            global_tps = self._tps_total_tokens / global_elapsed if global_elapsed > 0 else 0
+            logger.info(
+                f"[TPS] 最近 {window_elapsed:.0f}s: {self._tps_tokens} tokens, "
+                f"{self._tps_samples} samples, {window_tps:.1f} tok/s | "
+                f"全局: {self._tps_total_tokens} tokens, "
+                f"{self._tps_total_samples} samples, {global_tps:.1f} tok/s")
+            self._tps_tokens = 0
+            self._tps_samples = 0
+            self._tps_window_start = now
+
+    def _tps_reset(self):
+        """重置 TPS 统计（新 benchmark 开始时调用）。"""
+        self._tps_tokens = 0
+        self._tps_samples = 0
+        self._tps_total_tokens = 0
+        self._tps_total_samples = 0
+        self._tps_window_start = time.time()
+        self._tps_global_start = time.time()
+
     def _batch_loop(self):
         """后台调度线程入口：根据 dp 选择调度策略。"""
         if self.dp == 1:
@@ -282,7 +375,11 @@ class VLLMOfflineEngine:
             self._batch_loop_dp()
 
     def _batch_loop_single(self):
-        """dp=1：收集请求后整体批量推理（vLLM 内部做 continuous batching）。"""
+        """dp=1：收集请求后整体批量推理（vLLM 内部做 continuous batching）。
+        自动去重相同 prompt 并用 n 参数共享 KV cache。
+        支持 per-request SamplingParams：按 sp_key 分组后分别推理。"""
+        from collections import defaultdict
+
         while self._batch_running:
             self._batch_event.wait(timeout=1.0)
             if not self._batch_running:
@@ -297,22 +394,71 @@ class VLLMOfflineEngine:
                 self._batch_queue.clear()
                 self._batch_event.clear()
 
-            prompts = [x[0] for x in batch]
-            sp = batch[0][1]
-            futures = [x[2] for x in batch]
-            logger.info(f"Batcher(dp=1): {len(prompts)} 个请求，推理中...")
-            try:
-                outputs = self.llm.generate(
-                    prompts, sp, lora_request=self._lora_request, use_tqdm=False)
-                results = [{'text': o.outputs[0].text,
-                            'finish_reason': o.outputs[0].finish_reason}
-                           for o in outputs]
-                for fut, res in zip(futures, results):
-                    fut.set_result(res)
-            except Exception as e:
-                for fut in futures:
-                    if not fut.done():
-                        fut.set_exception(e)
+            # --- 按 sp_key 分组 ---
+            sp_groups = defaultdict(list)  # sp_key -> [(prompt, sp, future), ...]
+            for item in batch:
+                key = self._sp_key(item[1])
+                sp_groups[key].append(item)
+
+            # --- 每组独立推理（去重 + n 参数）---
+            for sp_key, group in sp_groups.items():
+                prompts = [x[0] for x in group]
+                sp = group[0][1]
+                futures = [x[2] for x in group]
+
+                # --- 去重 + n 参数优化 ---
+                seen = {}
+                unique_prompts = []
+                n_per_unique = []
+                for p in prompts:
+                    if p not in seen:
+                        seen[p] = len(unique_prompts)
+                        unique_prompts.append(p)
+                        n_per_unique.append(0)
+                    n_per_unique[seen[p]] += 1
+
+                max_n = max(n_per_unique) if n_per_unique else 1
+
+                logger.info(f"Batcher(dp=1): group={sp_key[:2]}... {len(prompts)} 个请求"
+                            f"（{len(unique_prompts)} unique, n={max_n}），推理中...")
+                try:
+                    if max_n > 1:
+                        sp_dict = self._sampling_params_to_dict(sp)
+                        sp_dict['n'] = max_n
+                        new_sp = SamplingParams(**sp_dict)
+                        outputs = self.llm.generate(
+                            unique_prompts, new_sp,
+                            lora_request=self._lora_request, use_tqdm=False)
+
+                        occurrence = {p: 0 for p in unique_prompts}
+                        total_tokens = 0
+                        for prompt_text, fut in zip(prompts, futures):
+                            uid = seen[prompt_text]
+                            j = occurrence[prompt_text]
+                            occurrence[prompt_text] += 1
+                            out = outputs[uid].outputs[j]
+                            total_tokens += len(out.token_ids)
+                            fut.set_result({
+                                'text': out.text,
+                                'finish_reason': out.finish_reason,
+                            })
+                        self._tps_update(total_tokens, len(prompts))
+                    else:
+                        outputs = self.llm.generate(
+                            prompts, sp,
+                            lora_request=self._lora_request, use_tqdm=False)
+                        total_tokens = sum(
+                            len(o.outputs[0].token_ids) for o in outputs)
+                        self._tps_update(total_tokens, len(outputs))
+                        for fut, o in zip(futures, outputs):
+                            fut.set_result({
+                                'text': o.outputs[0].text,
+                                'finish_reason': o.outputs[0].finish_reason,
+                            })
+                except Exception as e:
+                    for fut in futures:
+                        if not fut.done():
+                            fut.set_exception(e)
 
     def _batch_loop_dp(self):
         """dp>1：连续调度，Worker 完成后立即接收新任务，保证满负荷运行。
@@ -321,41 +467,68 @@ class VLLMOfflineEngine:
         - 每次只给每个 Worker _worker_chunk_size 个 prompt（而非平均分割全量）
         - 用 ray.wait(num_returns=1) 检测最先完成的 Worker，立刻分配新任务
         - 绝不等待所有 Worker 同步完成，消除慢 Worker 拖慢快 Worker 的问题
+        - 支持 per-request SamplingParams：按 sp_key 分组后分发
         """
         import ray as _ray
+        from collections import defaultdict
 
         pending: List[tuple] = []   # (prompt, sp, client_future)
         inflight: dict = {}         # ray_ref -> (worker_idx, [client_future, ...])
 
         def _dispatch():
-            """将 pending 中的 prompt 均匀分配给所有空闲 Worker（每个最多 chunk 个）。"""
+            """将 pending 中的 prompt 均匀分配给所有空闲 Worker（每个最多 chunk 个）。
+            分发前先按 sp_key 分组，再按 prompt 内容排序，让相同 prompt 落在同一个 Worker 中，
+            Worker 内部会自动去重并用 n 参数共享 KV cache。"""
             if not pending:
                 return
             busy = {v[0] for v in inflight.values()}
             free = [i for i in range(self.dp) if i not in busy]
             if not free:
                 return
-            sp_dict = self._sampling_params_to_dict(pending[0][1])
             # 每次读取最新值，支持按 benchmark 动态调整 chunk_size
             chunk = self._worker_chunk_size
             n_free = len(free)
-            # 均衡分配：先算本轮要分发的总量（上限 chunk×worker 数），
-            # 再用 ceiling 均分给各 Worker（前 extra 个各多 1 个），
-            # 避免 floor 除法导致 pending 不足时出现 1,6,6,6 而非 4,5,5,5 的不均衡。
-            total_dispatch = min(len(pending), chunk * n_free)
-            base = total_dispatch // n_free
-            extra = total_dispatch % n_free  # 前 extra 个 Worker 各多分配 1 个
-            for idx, w_idx in enumerate(free):
-                if not pending:
-                    break
-                this_size = base + (1 if idx < extra else 0)
-                take = pending[:this_size]
-                del pending[:this_size]
-                ref = self._workers[w_idx].generate.remote(
-                    [x[0] for x in take], sp_dict)
-                inflight[ref] = (w_idx, [x[2] for x in take])
-                logger.info(f"Dispatcher: Worker-{w_idx} <- {len(take)} prompts "
-                            f"(pending={len(pending)}, inflight={len(inflight)})")
+
+            # --- 按 sp_key 分组 ---
+            sp_groups = defaultdict(list)
+            for item in pending:
+                key = self._sp_key(item[1])
+                sp_groups[key].append(item)
+
+            # 清空 pending，重新按组填充
+            pending.clear()
+
+            # 对每组分别处理：排序后均匀分配
+            for sp_key, group in sp_groups.items():
+                # 按 prompt 内容排序，让重复 prompt 相邻 → 分到同一 Worker → 最大化去重
+                group.sort(key=lambda x: x[0])
+
+                sp_dict = self._sampling_params_to_dict(group[0][1])
+
+                # 均衡分配：先算本轮要分发的总量（上限 chunk×worker 数），
+                # 再用 ceiling 均分给各 Worker（前 extra 个各多 1 个）
+                total_dispatch = min(len(group), chunk * n_free)
+                base = total_dispatch // n_free
+                extra = total_dispatch % n_free
+
+                allocated = 0
+                for idx, w_idx in enumerate(free):
+                    if allocated >= len(group):
+                        break
+                    this_size = base + (1 if idx < extra else 0)
+                    if this_size <= 0:
+                        continue
+                    take = group[allocated:allocated + this_size]
+                    allocated += this_size
+                    ref = self._workers[w_idx].generate.remote(
+                        [x[0] for x in take], sp_dict)
+                    inflight[ref] = (w_idx, [x[2] for x in take])
+                    logger.info(f"Dispatcher: Worker-{w_idx} <- {len(take)} prompts "
+                                f"(sp={sp_key[:2]}..., pending={len(pending)}, inflight={len(inflight)})")
+
+                # 未分配完的放回 pending
+                if allocated < len(group):
+                    pending.extend(group[allocated:])
 
         while True:
             # 1. 等待：优先用 ray.wait 阻塞（检测 Worker 完成），无 inflight 时等新请求
@@ -374,21 +547,33 @@ class VLLMOfflineEngine:
                 self._batch_event.clear()
 
             # 2b. 若此时没有 inflight 任务（新 benchmark 刚开始），
-            # 短暂等待让 evalscope ThreadPool 把同批请求都提交进来，
-            # 避免第一个 item 立即被独占分发给一个 Worker 导致严重不均衡。
+            # 等待直到 pending 数量稳定（不再增长），确保所有 prompt 到齐后再分发，
+            # 这对 n 参数去重至关重要：prompt 越齐去重比越高 → batch 越大 → GPU 利用率越高。
             if not inflight and pending:
-                time.sleep(0.05)
-                with self._batch_lock:
-                    if self._batch_queue:
-                        pending.extend(self._batch_queue)
-                        self._batch_queue.clear()
-                    self._batch_event.clear()
+                prev_count = 0
+                while len(pending) != prev_count:
+                    prev_count = len(pending)
+                    time.sleep(0.15)
+                    with self._batch_lock:
+                        if self._batch_queue:
+                            pending.extend(self._batch_queue)
+                            self._batch_queue.clear()
+                        self._batch_event.clear()
+                logger.info(f"Dispatcher: 首次分发，收集到 {len(pending)} 个 prompt")
 
             # 3. 处理已完成的 Worker → 解决其 Future，立刻触发 _dispatch
             for ref in done:
                 w_idx, cfuts = inflight.pop(ref)
                 try:
-                    results = _ray.get(ref)
+                    ret = _ray.get(ref)
+                    results = ret['results']
+                    dedup_ratio = ret.get('dedup_ratio', 1.0)
+                    self._tps_update(ret['total_tokens'], len(results))
+                    if dedup_ratio > 1.0:
+                        logger.info(
+                            f"Worker-{w_idx} 完成: {len(results)} samples, "
+                            f"dedup {dedup_ratio}x, "
+                            f"{ret['total_tokens']} tokens")
                     for fut, res in zip(cfuts, results):
                         if not fut.done():
                             fut.set_result(res)
@@ -445,6 +630,11 @@ class VLLMOfflineEngine:
             if val is not None:
                 d[field] = val
         return d
+
+    @staticmethod
+    def _sp_key(sp: SamplingParams) -> tuple:
+        """生成 SamplingParams 的 key，用于按参数分组 batch。"""
+        return (sp.temperature, sp.top_p, sp.top_k, sp.max_tokens, sp.repetition_penalty)
 
 
 # ============================================================
@@ -520,7 +710,11 @@ class BenchmarkEvaluator:
     def __init__(self, config_file: str, run_id: int = None,
                  version: str = None,
                  vllm_engine: Optional[VLLMOfflineEngine] = None,
-                 completed_benchmarks: Optional[set] = None):
+                 completed_benchmarks: Optional[set] = None,
+                 repeats_override: Optional[dict] = None,
+                 force_use_cache_dirs: Optional[dict] = None,
+                 benchmark_filter: Optional[set] = None,
+                 output_dir_override: Optional[str] = None):
         self.config_file = config_file
         self.config = self._load_config()
         self.vllm_engine = vllm_engine
@@ -529,8 +723,16 @@ class BenchmarkEvaluator:
         self.version = version or datetime.now().strftime("version_%Y%m%d_%H%M%S")
         # 断点续传：已完成的 benchmark 列表（跳过推理，直接加载已有结果）
         self.completed_benchmarks = completed_benchmarks or set()
+        # 合并推理扩展选项
+        self._repeats_override = repeats_override or {}       # {bench: repeats} 覆盖 yaml 中的 repeats
+        self._force_use_cache_dirs = force_use_cache_dirs or {}  # {bench: dir} 强制 use_cache 路径
+        self._benchmark_filter = benchmark_filter             # None=全部；set=只跑这些
+        self._pred_ts_dirs: dict = {}                         # {bench: Path} 推理后记录最新预测目录
 
-        if run_id is not None:
+        if output_dir_override is not None:
+            self.output_dir = Path(output_dir_override)
+            self.run_id = run_id
+        elif run_id is not None:
             self.output_dir = self.base_dir / "evalscope" / self.version / f"run_{run_id}"
             self.run_id = run_id
         else:
@@ -646,7 +848,8 @@ class BenchmarkEvaluator:
         task_config.datasets = [benchmark_config['dataset_name']]
         if 'limit' in benchmark_config:
             task_config.limit = benchmark_config['limit']
-        task_config.repeats = benchmark_config.get('repeats', 1)
+        task_config.repeats = self._repeats_override.get(
+            benchmark_name, benchmark_config.get('repeats', 1))
 
         dataset_args = {
             'dataset_name': benchmark_config.get('subset', None),
@@ -678,9 +881,11 @@ class BenchmarkEvaluator:
         _global_chunk = vllm_cfg.get('worker_chunk_size', 512)
         # 允许每个 benchmark 覆盖 worker_chunk_size（大数据集用大 chunk 提高吞吐）
         _chunk = benchmark_config.get('worker_chunk_size', _global_chunk)
-        if self.vllm_engine is not None and self.vllm_engine.dp > 1:
-            self.vllm_engine._worker_chunk_size = _chunk
-            logger.info(f"[{benchmark_name}] worker_chunk_size={_chunk}")
+        if self.vllm_engine is not None:
+            self.vllm_engine._tps_reset()
+            if self.vllm_engine.dp > 1:
+                self.vllm_engine._worker_chunk_size = _chunk
+                logger.info(f"[{benchmark_name}] worker_chunk_size={_chunk}")
         # dp=1 用适中并发；dp>1 至少能填满所有 Worker 的 2 轮 chunk
         eval_batch_size = _chunk if _dp == 1 else max(2048, _dp * _chunk * 2)
         task_config.eval_batch_size = eval_batch_size
@@ -698,6 +903,10 @@ class BenchmarkEvaluator:
             logger.info(
                 f"[prediction续传] {benchmark_name}: 检测到 {existing} 条已有 predictions，"
                 f"续跑剩余部分（目录: {partial_pred_dir}）")
+        # 合并推理分割模式：强制指定 use_cache 路径（优先级最高，覆盖上面的自动检测）
+        if benchmark_name in self._force_use_cache_dirs:
+            task_config.use_cache = self._force_use_cache_dirs[benchmark_name]
+            logger.info(f"[{benchmark_name}] 强制 use_cache → {task_config.use_cache}")
 
         # Sandbox 配置
         if 'use_sandbox' in benchmark_config:
@@ -782,9 +991,11 @@ class BenchmarkEvaluator:
             manage_engine = True
 
         try:
-            # 检查有效 benchmarks
+            # 检查有效 benchmarks（benchmark_filter 非空时只跑指定的）
             valid_benchmarks = []
             for benchmark_name in self.config['benchmarks'].keys():
+                if self._benchmark_filter is not None and benchmark_name not in self._benchmark_filter:
+                    continue
                 try:
                     self._create_task_config(benchmark_name)
                     valid_benchmarks.append(benchmark_name)
@@ -800,8 +1011,9 @@ class BenchmarkEvaluator:
             total = len(valid_benchmarks)
 
             for idx, benchmark_name in enumerate(valid_benchmarks):
-                repeats = self.config['benchmarks'][benchmark_name].get(
-                    'repeats', 1)
+                repeats = self._repeats_override.get(
+                    benchmark_name,
+                    self.config['benchmarks'][benchmark_name].get('repeats', 1))
                 logger.info(f"\n{'='*50}")
 
                 # 断点续传：跳过已完成的 benchmark
@@ -828,6 +1040,14 @@ class BenchmarkEvaluator:
                 logger.info(f"开始评测 {benchmark_name}...")
                 result = run_task_with_progress(task_config, benchmark_name)
                 self.results[benchmark_name] = result
+                # 记录本次推理产生的最新预测目录（供合并推理模式分割用）
+                bm_dir = self.output_dir / benchmark_name
+                if bm_dir.is_dir():
+                    for ts_dir in sorted(bm_dir.iterdir(),
+                                         key=lambda d: d.name, reverse=True):
+                        if ts_dir.is_dir() and (ts_dir / 'predictions').is_dir():
+                            self._pred_ts_dirs[benchmark_name] = ts_dir
+                            break
                 # 立即保存，确保中断后可续跑
                 self._save_benchmark_result(benchmark_name, result)
                 logger.info(
@@ -911,6 +1131,65 @@ class BenchmarkEvaluator:
 
 
 # ============================================================
+# 合并推理辅助函数
+# ============================================================
+
+def _split_merged_predictions(
+        merged_ts_dir: Path,
+        run_idx: int,
+        orig_repeats: int,
+        num_runs: int,
+        out_dir: Path) -> bool:
+    """将合并推理（repeats = orig_repeats × num_runs）的预测 JSONL 按 run 分割。
+
+    Block 排列规律：entries [q×K_total .. q×K_total + K_total - 1] 是问题 q 的全部重复。
+    run j 在每个问题块中占位 [j×K_orig .. (j+1)×K_orig - 1]。
+
+    分割条件：(index % K_total) // K_orig == run_idx
+    新 index  = (index // K_total) * K_orig + (index % K_orig)
+    """
+    K_total = orig_repeats * num_runs
+    K_orig = orig_repeats
+    j = run_idx
+    found_any = False
+
+    pred_root = merged_ts_dir / 'predictions'
+    if not pred_root.is_dir():
+        logger.warning(f"[split] 未找到预测目录: {pred_root}")
+        return False
+
+    for jsonl_file in pred_root.rglob('*.jsonl'):
+        entries = []
+        with open(jsonl_file, encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    entries.append(json.loads(line))
+
+        split_entries = []
+        for e in entries:
+            idx = e['index']
+            if (idx % K_total) // K_orig == j:
+                e_copy = dict(e)
+                e_copy['index'] = (idx // K_total) * K_orig + (idx % K_orig)
+                split_entries.append(e_copy)
+
+        if not split_entries:
+            continue
+
+        rel = jsonl_file.relative_to(pred_root)
+        out_file = out_dir / 'predictions' / rel
+        out_file.parent.mkdir(parents=True, exist_ok=True)
+        with open(out_file, 'w', encoding='utf-8') as f:
+            for e in split_entries:
+                f.write(json.dumps(e, ensure_ascii=False) + '\n')
+        logger.info(f"  [split] run_{j+1}/{num_runs}: {len(split_entries)} 条 → {out_file.name}")
+        found_any = True
+
+    return found_any
+
+
+# ============================================================
 # MultiRunEvaluator（改用 engine）
 # ============================================================
 
@@ -920,10 +1199,12 @@ class MultiRunEvaluator:
     _PROGRESS_FILE = "progress.json"
 
     def __init__(self, config_file: str, num_runs: int = 1,
-                 resume: bool = False, resume_dir: Optional[str] = None):
+                 resume: bool = False, resume_dir: Optional[str] = None,
+                 merge_inference: bool = False):
         self.config_file = config_file
         self.num_runs = num_runs
         self.resume = resume or (resume_dir is not None)
+        self.merge_inference = merge_inference and num_runs > 1
 
         with open(config_file, 'r', encoding='utf-8') as f:
             self.config = yaml.safe_load(f)
@@ -1036,6 +1317,9 @@ class MultiRunEvaluator:
     # ---- 主流程 ----
 
     def run_all(self):
+        if self.merge_inference:
+            return self._run_all_merged()
+
         logger.info(f"\n{'='*70}")
         logger.info(f"开始多次运行评测 - 共 {self.num_runs} 次")
         logger.info(f"总输出目录: {self.output_dir}")
@@ -1118,6 +1402,107 @@ class MultiRunEvaluator:
         finally:
             if engine is not None:
                 engine.shutdown()
+
+    # ---- 合并推理模式 ----
+
+    def _run_all_merged(self):
+        """GPU 高效模式：每个 benchmark 一次性推理 num_runs×repeats 份样本，再分组评分。
+
+        流程：
+          1. 共用一个 vLLM 引擎
+          2. 对每个 benchmark，将 repeats 乘以 num_runs，一次推理完成
+          3. 按 run 切分预测 JSONL（_split_merged_predictions）
+          4. 对每份切片调用 evalscope 评分（use_cache + 空推理），得到 per-run 结果
+          5. 汇总写入 multi_run_summary
+        """
+        logger.info(f"\n{'='*70}")
+        logger.info(f"[merged-runs] 合并推理模式：{self.num_runs} 次 run 合并为一次推理")
+        logger.info(f"总输出目录: {self.output_dir}")
+        logger.info(f"{'='*70}\n")
+
+        self._save_progress()
+
+        vllm_cfg = self.config.get('vllm', {})
+        engine = VLLMOfflineEngine(
+            model_path=self.config['model_path'],
+            tp=vllm_cfg.get('tp', 1),
+            dp=vllm_cfg.get('dp', 1),
+            gpu_memory_utilization=vllm_cfg.get('gpu_memory_utilization', 0.9),
+            max_model_len=vllm_cfg.get('max_model_len', None),
+            enforce_eager=vllm_cfg.get('enforce_eager', True),
+            worker_chunk_size=vllm_cfg.get('worker_chunk_size', 512),
+        )
+
+        all_benchmarks = list(self.config.get('benchmarks', {}).keys())
+        # per_run_results[run_id (1-based)] = {bench: result}
+        per_run_results: dict = {j: {} for j in range(1, self.num_runs + 1)}
+        merged_output_dir = self.output_dir / 'merged_inference'
+
+        try:
+            for bench_name in all_benchmarks:
+                orig_repeats = self.config['benchmarks'][bench_name].get('repeats', 1)
+                merged_repeats = orig_repeats * self.num_runs
+
+                logger.info(f"\n{'#'*60}")
+                logger.info(f"[merged-runs] {bench_name}: "
+                            f"repeats {orig_repeats}×{self.num_runs} = {merged_repeats}，一次推理")
+
+                # Step 1：合并推理
+                merged_eval = BenchmarkEvaluator(
+                    config_file=self.config_file,
+                    run_id=None,
+                    version=self.version,
+                    vllm_engine=engine,
+                    benchmark_filter={bench_name},
+                    repeats_override={bench_name: merged_repeats},
+                    output_dir_override=str(merged_output_dir),
+                )
+                merged_eval.run_evaluation()
+
+                merged_ts_dir = merged_eval._pred_ts_dirs.get(bench_name)
+                if merged_ts_dir is None:
+                    logger.warning(f"[merged-runs] 未找到 {bench_name} 预测目录，跳过分割")
+                    continue
+
+                # Step 2 & 3：对每个 run 切分预测 → 评分
+                for j in range(self.num_runs):
+                    run_id = j + 1
+                    split_pred_dir = (self.output_dir / f'run_{run_id}'
+                                      / bench_name / 'split_preds')
+                    logger.info(f"[merged-runs] 切分 run_{run_id}/{self.num_runs} …")
+                    success = _split_merged_predictions(
+                        merged_ts_dir, j, orig_repeats, self.num_runs, split_pred_dir)
+                    if not success:
+                        logger.warning(f"[merged-runs] run_{run_id} {bench_name}: 切分失败，跳过")
+                        continue
+
+                    # 评分（全量 use_cache → evalscope 跳过推理，直接打分）
+                    score_eval = BenchmarkEvaluator(
+                        config_file=self.config_file,
+                        run_id=run_id,
+                        version=self.version,
+                        vllm_engine=engine,   # 传入引擎防止重复创建；实际推理量=0
+                        benchmark_filter={bench_name},
+                        force_use_cache_dirs={bench_name: str(split_pred_dir)},
+                    )
+                    score_eval.run_evaluation()
+
+                    if bench_name in score_eval.results:
+                        per_run_results[run_id][bench_name] = score_eval.results[bench_name]
+                        score_eval._save_benchmark_result(
+                            bench_name, score_eval.results[bench_name])
+                        logger.info(f"[merged-runs] run_{run_id} {bench_name}: 评分完成")
+
+        finally:
+            engine.shutdown()
+
+        self.all_results = [
+            {'run_id': j,
+             'results': per_run_results[j],
+             'output_dir': self.output_dir / f'run_{j}'}
+            for j in range(1, self.num_runs + 1)
+        ]
+        self._summarize_results()
 
     def _summarize_results(self):
         logger.info(f"\n{'='*70}")
@@ -1248,6 +1633,9 @@ def main():
     parser.add_argument('--resume-dir', metavar='DIR',
                         help="断点续传：直接指定上次的版本目录路径\n"
                              "例: --resume-dir /data/.../evalscope/version_20260310_043148")
+    parser.add_argument('--merged-runs', action='store_true',
+                        help="合并推理模式（num_runs>1 时有效）：每个 benchmark 一次性推理\n"
+                             "num_runs×repeats 份样本，再按 run 分组统计，提升 GPU 利用率")
     args = parser.parse_args()
 
     if args.num_runs < 1:
@@ -1259,11 +1647,12 @@ def main():
         sys.exit(1)
 
     is_resume = args.resume or bool(args.resume_dir)
+    merge_hint = "，合并推理模式" if args.merged_runs and args.num_runs > 1 else ""
     resume_hint = (f"，断点续传模式（指定目录: {args.resume_dir}）" if args.resume_dir
                    else "，断点续传模式（自动检测）" if args.resume else "")
     logger.info(
         f"开始运行评测，配置文件: {args.config_file}, "
-        f"运行次数: {args.num_runs}{resume_hint}")
+        f"运行次数: {args.num_runs}{merge_hint}{resume_hint}")
 
     # num_runs=1 且无 resume 时走单次路径；其他情况均走 MultiRunEvaluator
     if args.num_runs == 1 and not is_resume:
@@ -1273,7 +1662,8 @@ def main():
     else:
         multi_evaluator = MultiRunEvaluator(
             args.config_file, num_runs=args.num_runs,
-            resume=args.resume, resume_dir=args.resume_dir)
+            resume=args.resume, resume_dir=args.resume_dir,
+            merge_inference=args.merged_runs)
         multi_evaluator.run_all()
 
     logger.info("评测完成")

@@ -1,0 +1,52 @@
+# Eval V2 测试配置文件
+# 使用小数据量快速验证功能
+
+model_path: /data/modelscope_cache/models/Qwen/Qwen2.5-7B-Instruct
+
+# 评测 API 配置（用于 LLM judge，如果不需要可留空）
+BASE_URL: https://dashscope.aliyuncs.com/compatible-mode/v1
+API_KEY: sk-9ae88192c0e54080831b8a7408d2da8d
+
+# vLLM配置
+vllm:
+  tp: 1              # tensor parallel size
+  dp: 8              # data parallel size（测试时建议用1，生产环境可调大）
+  gpu_memory_utilization: 0.95
+  max_model_len: 32768
+  enforce_eager: true
+  
+  # eval_v2.py 特有参数
+  eval_batch_size: 2048     # 推理并发数（ThreadPoolExecutor 的 max_workers）
+  worker_chunk_size: 256    # dp>1 时控制 Worker 分发粒度（dp=1 时作用不大）
+  tps_interval: 10          # TPS 打印间隔（秒），建议 10-30 秒
+
+# 沙箱配置
+sandbox:
+  work_dir: /tmp/evalscope_sandbox
+
+# 评测配置 - 只选2个小benchmark用于测试
+# 注意：eval_v2.py 不需要 per-benchmark worker_chunk_size，
+# 因为所有 prompts 是全局混合后统一调度的
+benchmarks:
+  # 测试1: AIME25 - 30题，repeat=3（验证重复评分逻辑）
+  AIME25:
+    dataset_name: "aime25"
+    repeats: 6
+    temperature: 0.6
+    max_tokens: 4096      # 测试时用较小的值加速
+    few_shot_num: 0
+    use_sandbox: false
+
+  # 测试2: MATH500 - 500题，repeat=2
+  MATH500:
+    dataset_name: "math_500"
+    repeats: 3
+    temperature: 0.6
+    max_tokens: 4096
+    few_shot_num: 0
+  GSM8K:
+    dataset_name: "gsm8k"
+    repeats: 4
+    temperature: 0.8
+    max_tokens: 2048
+    few_shot_num: 0
