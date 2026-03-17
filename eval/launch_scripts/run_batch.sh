@@ -72,7 +72,7 @@ kill_stray_ray() {
 # ============================================================
 # Step 1: 等待训练进程结束 (修改这里为实际的训练脚本 PID)
 # ============================================================
-TRAIN_PID=2146655  # run_exps.sh 的 PID
+TRAIN_PID=2914860  # run_exps.sh 的 PID
 
 log "等待训练进程 PID $TRAIN_PID 结束..."
 while kill -0 "$TRAIN_PID" 2>/dev/null; do
@@ -90,9 +90,8 @@ wait_for_gpu_memory
 # ============================================================
 declare -a JOBS=(
     "/data/cdad/checkpoints/rewrite_cot/qwen2.5_7b_instruct_lora_sft_dual_30k"    "eval_configs/eval_all_sft_v2.yaml"
-    # "/data/cdad/checkpoints/vallina_sft/qwen2.5_7b_instruct_lora_sft_30k"          "eval_configs/eval_all_sft.yaml"
-    # "/data/cdad/checkpoints/rewrite_cot/qwen2.5_7b_instruct_lora_sft_dual_15k"     "eval_configs/eval_all_sft_v2.yaml"
-    # "/data/cdad/checkpoints/rewrite_cot/deepmath_plain_30k_train_single_30k"       "eval_configs/eval_all_sft_v2.yaml"
+    "/data/cdad/checkpoints/vallina_sft/qwen2.5_7b_instruct_lora_sft_30k"          "eval_configs/eval_all_baseline.yaml"
+    "/data/cdad/checkpoints/rewrite_cot/qwen2.5_7b_instruct_lora_sft_mix_15k"       "eval_configs/eval_all_sft_v2.yaml"
 )
 
 NUM_RUNS=3
@@ -107,7 +106,7 @@ NUM_RUNS=3
 #       ""                                  # 3B 模型全新跑
 #       "/data/.../vallina_sft/evalscope/version_20260310_001550"
 #   )
-RESUME=1
+RESUME=0
 RESUME_DIRS=(
     # "/data/cdad/checkpoints/vallina_sft/qwen2.5_3b_instruct_full_sft_30k/evalscope/version_20260311_125756"
 )

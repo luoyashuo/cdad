@@ -201,6 +201,7 @@ def build_dataset(
     seed: int = 42,
     build_mode: str = "single",
     question_limit: Optional[int] = None,
+    mix_rewrite_ratio: float = 0.5,
 ) -> Dict[str, int]:
     """
     Build ShareGPT dataset from a list of records.
@@ -208,9 +209,14 @@ def build_dataset(
     Args:
         build_mode: "single" – one sample per question using rewrite_cot (original behavior).
                     "dual"   – two samples per question: original_cot and rewrite_cot.
+                    "mix"    – one sample per question, randomly choosing rewrite_cot or
+                               original_cot per question based on mix_rewrite_ratio.
+                               Only questions with a valid rewrite (after filtering) are included.
         question_limit: if set, randomly sample this many questions before building.
+        mix_rewrite_ratio: (mix mode only) fraction of questions that use rewrite_cot; the
+                           rest use original_cot. Default 0.5.
 
-    Returns stats dict: total, selected, skipped, output_samples.
+    Returns stats dict: total, selected, skipped, output_samples, mix_rewrite, mix_original.
     """
     random.seed(seed)
 
@@ -223,6 +229,8 @@ def build_dataset(
     selected = 0
     skipped = 0
     output_samples = 0
+    mix_rewrite = 0
+    mix_original = 0
 
     with open(output_file, "w") as fout:
         for record in records:
@@ -258,6 +266,19 @@ def build_dataset(
                     ensure_ascii=False,
                 ) + "\n")
                 output_samples += 1
+            elif build_mode == "mix":
+                # Randomly pick rewrite or original for this question
+                if random.random() < mix_rewrite_ratio:
+                    cot = rewrite_cot
+                    mix_rewrite += 1
+                else:
+                    cot = record.get("original_cot", "")
+                    mix_original += 1
+                fout.write(json.dumps(
+                    _make_sharegpt_sample(question, cot, solution),
+                    ensure_ascii=False,
+                ) + "\n")
+                output_samples += 1
             else:
                 fout.write(json.dumps(
                     _make_sharegpt_sample(question, rewrite_cot, solution),
@@ -267,7 +288,14 @@ def build_dataset(
 
             selected += 1
 
-    return {"total": total, "selected": selected, "skipped": skipped, "output_samples": output_samples}
+    return {
+        "total": total,
+        "selected": selected,
+        "skipped": skipped,
+        "output_samples": output_samples,
+        "mix_rewrite": mix_rewrite,
+        "mix_original": mix_original,
+    }
 
 
 def register_to_llamafactory(
@@ -389,9 +417,11 @@ def main():
     build_mode = db_cfg.get("build_mode", "single")
     question_limit = db_cfg.get("question_limit", None)
 
-    if build_mode not in ("single", "dual"):
-        print(f"ERROR: Unknown build_mode '{build_mode}'. Use 'single' or 'dual'.", file=sys.stderr)
+    if build_mode not in ("single", "dual", "mix"):
+        print(f"ERROR: Unknown build_mode '{build_mode}'. Use 'single', 'dual', or 'mix'.", file=sys.stderr)
         sys.exit(1)
+
+    mix_rewrite_ratio = float(db_cfg.get("mix_rewrite_ratio", 0.5))
 
     # Determine input/output paths
     if args.input_file:
@@ -429,6 +459,8 @@ def main():
     print(f"  Question limit: {question_limit if question_limit is not None else 'all'}")
     print(f"  Filters:        correct_only={filter_correct_only}, fsf_positive={filter_fsf_positive}, fsf_zero={filter_fsf_zero}")
     print(f"  Strategy:       {strategy}")
+    if build_mode == "mix":
+        print(f"  Mix ratio:      rewrite={mix_rewrite_ratio:.2f}, original={1-mix_rewrite_ratio:.2f}")
 
     stats = build_dataset(
         records=records,
@@ -440,6 +472,7 @@ def main():
         seed=config.get("seed", 42),
         build_mode=build_mode,
         question_limit=question_limit,
+        mix_rewrite_ratio=mix_rewrite_ratio,
     )
 
     print(f"\nDone:")
@@ -447,6 +480,9 @@ def main():
     print(f"  Selected:         {stats['selected']}")
     print(f"  Skipped:          {stats['skipped']}")
     print(f"  Output samples:   {stats['output_samples']}")
+    if build_mode == "mix":
+        print(f"  Mix rewrite:      {stats['mix_rewrite']}")
+        print(f"  Mix original:     {stats['mix_original']}")
     print(f"  Output file:      {output_file}")
 
     # LlamaFactory registration

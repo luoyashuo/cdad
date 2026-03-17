@@ -34,9 +34,8 @@ declare -a CONFIGS=(
     # "examples/vallina_sft/llama3_1b_instruct_vallina_full_sft_30k.yaml"
     # "examples/rewrite_cot/qwen2.5_7b_instruct_full_sft_dual_30k.yaml"
     # "examples/rewrite_cot/qwen2.5_7b_instruct_lora_sft_dual_30k.yaml"
-    "examples/vallina_sft/qwen2.5_7b_instruct_lora_sft_30k.yaml"
-    "examples/rewrite_cot/qwen2.5_7b_instruct_lora_sft_dual_15k.yaml"
-    "examples/rewrite_cot/deepmath_plain_30k_train_single_30k.yaml"
+    # "examples/vallina_sft/qwen2.5_7b_instruct_lora_sft_30k.yaml"
+    "examples/rewrite_cot/qwen2.5_7b_instruct_lora_sft_mix_15k.yaml"
 
 
 )
@@ -52,9 +51,8 @@ declare -a NAMES=(
     # "llama3_1b_instruct_vallina_full_sft_30k"
     # "qwen2.5_7b_instruct_full_sft_dual_30k"
     # "qwen2.5_7b_instruct_lora_sft_dual_30k"
-    "qwen2.5_7b_instruct_lora_sft_30k"
-    "qwen2.5_7b_instruct_lora_sft_dual_15k"
-    "deepmath_plain_30k_train_single_30k"
+    # "qwen2.5_7b_instruct_lora_sft_30k"
+    "qwen2.5_7b_instruct_lora_sft_mix_15k"
 )
 
 echo "=== 开始串行训练任务 ==="

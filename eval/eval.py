@@ -373,6 +373,17 @@ class VLLMOfflineEngine:
                     self._batch_queue.clear()
                 self._batch_event.clear()
 
+            # 2b. 若此时没有 inflight 任务（新 benchmark 刚开始），
+            # 短暂等待让 evalscope ThreadPool 把同批请求都提交进来，
+            # 避免第一个 item 立即被独占分发给一个 Worker 导致严重不均衡。
+            if not inflight and pending:
+                time.sleep(0.05)
+                with self._batch_lock:
+                    if self._batch_queue:
+                        pending.extend(self._batch_queue)
+                        self._batch_queue.clear()
+                    self._batch_event.clear()
+
             # 3. 处理已完成的 Worker → 解决其 Future，立刻触发 _dispatch
             for ref in done:
                 w_idx, cfuts = inflight.pop(ref)

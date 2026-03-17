@@ -32,7 +32,7 @@ benchmarks:
     dataset_name: "aime25"
     repeats: 8
     temperature: 0.6
-    max_tokens: 14000
+    max_tokens: 16000
     few_shot_num: 0
     use_sandbox: false
     
@@ -40,7 +40,7 @@ benchmarks:
     dataset_name: "aime24"
     repeats: 8
     temperature: 0.6
-    max_tokens: 14000
+    max_tokens: 16000
     few_shot_num: 0
     use_sandbox: false
 
@@ -48,7 +48,7 @@ benchmarks:
     dataset_name: "math_500"
     repeats: 1
     temperature: 1.0
-    max_tokens: 12000
+    max_tokens: 16000
     few_shot_num: 0
 
   AMC:
@@ -56,7 +56,7 @@ benchmarks:
     subset: "amc23"  # AMC 必须指定年份作为子集
     repeats: 1
     temperature: 1.0
-    max_tokens: 12000
+    max_tokens: 16000
     few_shot_num: 0
 
 
@@ -64,21 +64,21 @@ benchmarks:
     dataset_name: "agieval_math"
     repeats: 1
     temperature: 1.0
-    max_tokens: 12000
+    max_tokens: 16000
     few_shot_num: 0
 
   GSM8K:
     dataset_name: "gsm8k"
     repeats: 1
     temperature: 1.0
-    max_tokens: 12000
+    max_tokens: 16000
     few_shot_num: 0
   # General
   GPQA:
     dataset_name: "gpqa_extend"
     repeats: 1
     temperature: 1.0
-    max_tokens: 12000
+    max_tokens: 16000
     few_shot_num: 0
     use_sandbox: false
 
@@ -86,7 +86,7 @@ benchmarks:
     dataset_name: "mmlu_pro_no_math"
     repeats: 1
     temperature: 1.0
-    max_tokens: 12000
+    max_tokens: 16000
     few_shot_num: 0
     worker_chunk_size: 256
 
@@ -94,6 +94,6 @@ benchmarks:
     dataset_name: "arc"
     repeats: 1
     temperature: 1.0
-    max_tokens: 12000
+    max_tokens: 16000
     few_shot_num: 0
     worker_chunk_size: 128

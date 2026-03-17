@@ -1620,5 +1620,18 @@
       "user_tag": "user",
       "assistant_tag": "assistant"
     }
+  },
+  "deepmath_plain_30k_train_mix_30k": {
+    "file_name": "/data/hf_home/datasets/Yaseal/CDAD_EXP/cot_rewrite/qwen2_5_7b_grpo_8x40g/final/mix_30k.jsonl",
+    "formatting": "sharegpt",
+    "columns": {
+      "messages": "conversations"
+    },
+    "tags": {
+      "role_tag": "role",
+      "content_tag": "content",
+      "user_tag": "user",
+      "assistant_tag": "assistant"
+    }
   }
 }
