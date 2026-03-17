@@ -1,0 +1,107 @@
+# EvalScope V2 评测配置文件 - SFT 模型评测
+# 适用于 eval_v2.py（跨 Benchmark 流式推理）
+#
+# 特点：
+# - 所有 prompts 混合后统一调度，无需 per-benchmark worker_chunk_size
+# - 通过 eval_batch_size 控制推理并发数
+# - temperature=0.6（SFT 模型推荐）
+
+model_path: /data/cdad/checkpoints/rewrite_cot/qwen2.5_7b_instruct_lora_sft_dual_30k
+
+# 评测 API 配置（用于 LLM judge）
+BASE_URL: https://dashscope.aliyuncs.com/compatible-mode/v1
+API_KEY: sk-9ae88192c0e54080831b8a7408d2da8d
+
+# vLLM 配置（离线模式）
+vllm:
+  tp: 1                    # tensor parallel size
+  dp: 8                    # data parallel size（多卡并行）
+  gpu_memory_utilization: 0.95
+  max_model_len: 32768
+  enforce_eager: false     # RUC 机器需要关闭
+  
+  # eval_v2.py 特有参数：
+  # - eval_batch_size: ThreadPoolExecutor 并发提交数（推荐 4096）
+  # - worker_chunk_size: dp>1 时控制 Worker 分发粒度（推荐 256）
+  # - tps_interval: TPS 打印间隔（秒），设为 0 可禁用
+  eval_batch_size: 4096
+  worker_chunk_size: 256
+  tps_interval: 30
+
+# 沙箱配置
+sandbox:
+  work_dir: /data/tmp/evalscope_sandbox
+
+# 评测配置
+# 注意：eval_v2.py 不需要 per-benchmark worker_chunk_size，
+# 因为所有 prompts 是全局混合后统一调度的
+benchmarks:
+  # ==================== MATH Benchmarks ====================
+  AIME25:
+    dataset_name: "aime25"
+    repeats: 64
+    temperature: 0.6
+    max_tokens: 28000
+    few_shot_num: 0
+    use_sandbox: false
+
+  AIME24:
+    dataset_name: "aime24"
+    repeats: 64
+    temperature: 0.6
+    max_tokens: 28000
+    few_shot_num: 0
+    use_sandbox: false
+
+  MATH500:
+    dataset_name: "math_500"
+    repeats: 8
+    temperature: 0.6
+    max_tokens: 28000
+    few_shot_num: 0
+
+  AMC:
+    dataset_name: "amc"
+    subset: "amc23"
+    repeats: 64
+    temperature: 0.6
+    max_tokens: 28000
+    few_shot_num: 0
+
+  AGIEvalMath:
+    dataset_name: "agieval_math"
+    repeats: 4
+    temperature: 0.8
+    max_tokens: 28000
+    few_shot_num: 0
+
+  GSM8K:
+    dataset_name: "gsm8k"
+    repeats: 4
+    temperature: 0.8
+    max_tokens: 28000
+    few_shot_num: 0
+
+  # ==================== General Benchmarks ====================
+  GPQA:
+    dataset_name: "gpqa_extend"
+    repeats: 8
+    temperature: 0.6
+    max_tokens: 28000
+    few_shot_num: 0
+    use_sandbox: false
+
+  MMLUProNoMath:
+    dataset_name: "mmlu_pro_no_math"
+    repeats: 4
+    temperature: 1.0
+    max_tokens: 28000
+    few_shot_num: 0
+
+  ARC:
+    dataset_name: "arc"
+    repeats: 4
+    temperature: 1.0
+    max_tokens: 28000
+    few_shot_num: 0
+    data_source: huggingface

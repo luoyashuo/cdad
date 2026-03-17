@@ -184,6 +184,16 @@ class CrossBenchmarkEvaluator:
         task_config.model = self.model_name  # 避免 "No model is provided" 警告
         task_config.eval_backend = EvalBackend.NATIVE
         
+        # 支持指定数据源 (huggingface/modelscope)
+        if 'data_source' in bench_cfg:
+            from evalscope.constants import HubType
+            hub_type = bench_cfg['data_source']
+            if hub_type == 'huggingface':
+                task_config.dataset_hub = HubType.HUGGINGFACE
+            elif hub_type == 'modelscope':
+                task_config.dataset_hub = HubType.MODELSCOPE
+            logger.info(f"[{bench_name}] 使用数据源: {task_config.dataset_hub}")
+        
         # 数据集
         task_config.datasets = [bench_cfg['dataset_name']]
         if 'limit' in bench_cfg:
@@ -196,6 +206,9 @@ class CrossBenchmarkEvaluator:
         }
         if 'extra_params' in bench_cfg:
             dataset_args['extra_params'] = bench_cfg['extra_params']
+        # 支持指定数据源 (huggingface/modelscope)
+        if 'data_source' in bench_cfg:
+            dataset_args['data_source'] = bench_cfg['data_source']
         task_config.dataset_args = {bench_cfg['dataset_name']: dataset_args}
         
         # 生成参数

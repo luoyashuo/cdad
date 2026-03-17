@@ -104,3 +104,4 @@ benchmarks:
     temperature: 1.0
     max_tokens: 28000
     few_shot_num: 0
+    data_source: huggingface

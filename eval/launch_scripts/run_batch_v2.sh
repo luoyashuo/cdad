@@ -165,7 +165,7 @@ declare -a JOBS=(
 #       ""                                  # model2 全新跑
 #       "/data/.../model3/evalscope/version_20260318_005432"
 #   )
-RESUME=1
+RESUME=0
 RESUME_DIRS=()
 
 # ============================================================
