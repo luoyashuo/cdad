@@ -353,6 +353,7 @@ class VLLMOfflineEngine:
         self._tps_total_samples = 0      # 全局累计样本数
         self._tps_window_start = time.time()
         self._tps_global_start = time.time()
+        self._tps_callback = None        # Optional[Callable[[float, float], None]]
 
         # ---------- 请求批处理（线程安全） ----------
         # evalscope 用 ThreadPoolExecutor 逐条调 generate()，
@@ -404,6 +405,11 @@ class VLLMOfflineEngine:
                 f"{self._tps_samples} samples, {window_tps:.1f} tok/s | "
                 f"全局: {self._tps_total_tokens} tokens, "
                 f"{self._tps_total_samples} samples, {global_tps:.1f} tok/s")
+            if self._tps_callback is not None:
+                try:
+                    self._tps_callback(window_tps, global_tps)
+                except Exception:
+                    pass
             self._tps_tokens = 0
             self._tps_samples = 0
             self._tps_window_start = now

@@ -617,10 +617,26 @@ class CrossBenchmarkEvaluator:
         """
         total = len(all_prompts)
         logger.info(f"开始全局推理: {total} prompts")
-        
-        # 初始化进度显示
-        self._progress = ProgressDisplay(self.bench_states, total)
-        
+
+        # 初始化 StatusPrinter，接管 logger 的 StreamHandler
+        self._progress = StatusPrinter(self.bench_states)
+        _hijacked: List[logging.Handler] = []
+        _status_handler: Optional[_StatusLogHandler] = None
+        root_log = logging.getLogger()
+        for h in list(root_log.handlers):
+            if isinstance(h, logging.StreamHandler) and not isinstance(h, logging.FileHandler):
+                orig_fmt = h.formatter
+                root_log.removeHandler(h)
+                _hijacked.append(h)
+        if _hijacked:
+            _status_handler = _StatusLogHandler(self._progress, _hijacked[0].formatter)
+            _status_handler.setLevel(logging.DEBUG)
+            root_log.addHandler(_status_handler)
+
+        # 注册 TPS callback（引擎每次触发 TPS 打印时同步更新状态块）
+        if self.engine:
+            self.engine._tps_callback = self._progress.record_tps
+
         # 提交所有 prompts
         vllm_cfg = self.config.get('vllm', {})
         eval_batch_size = vllm_cfg.get('eval_batch_size', 512)
@@ -649,6 +665,17 @@ class CrossBenchmarkEvaluator:
                     # 标记失败但继续
                     self._on_result(item, {'text': '', 'finish_reason': 'error'})
         
+        # 恢复 logger handlers，清理 TPS callback
+        if self.engine:
+            self.engine._tps_callback = None
+        if _status_handler:
+            root_log.removeHandler(_status_handler)
+        for h in _hijacked:
+            root_log.addHandler(h)
+        if self._progress:
+            self._progress.close()
+            self._progress = None
+
         logger.info("全局推理完成")
 
     def _get_jsonl_writer(self, bench: BenchState, subset_name: str):
@@ -709,10 +736,6 @@ class CrossBenchmarkEvaluator:
                 f.flush()
             except Exception as e:
                 logger.warning(f"[{item.bench_name}] 流式写入失败: {e}")
-
-            # 更新进度
-            if self._progress:
-                self._progress.update(item.bench_name)
 
             # 检查是否完成
             if bench.completed >= bench.total_prompts:
@@ -1089,21 +1112,22 @@ class CrossBenchmarkEvaluator:
     def _wait_for_scoring(self):
         """等待所有 benchmark 的评分完成"""
         pending = set(self.bench_states.keys())
-        
-        with tqdm(total=len(pending), desc="等待评分完成") as pbar:
-            while pending:
-                done = set()
-                for name in pending:
-                    bench = self.bench_states[name]
-                    if bench.status in ("done", "failed"):
-                        done.add(name)
-                
-                for name in done:
-                    pending.remove(name)
-                    pbar.update(1)
-                
-                if pending:
-                    time.sleep(1)
+        last_log = time.time()
+        while pending:
+            done = set()
+            for name in list(pending):
+                if self.bench_states[name].status in ("done", "failed"):
+                    done.add(name)
+            for name in done:
+                pending.remove(name)
+                bench = self.bench_states[name]
+                logger.info(f"[{name}] 评分{'完成' if bench.status == 'done' else '失败'}")
+            if pending and time.time() - last_log >= 30:
+                names = ', '.join(pending)
+                logger.info(f"等待评分完成: {names}")
+                last_log = time.time()
+            if pending:
+                time.sleep(1)
 
     def _save_config(self):
         """保存配置文件副本"""
@@ -1117,48 +1141,159 @@ class CrossBenchmarkEvaluator:
 # 进度显示
 # ============================================================
 
-class ProgressDisplay:
-    """多 benchmark 实时进度条"""
-    
-    def __init__(self, bench_states: Dict[str, BenchState], total_prompts: int):
-        self.total_prompts = total_prompts
-        self.completed_prompts = 0
-        
-        # 总进度条
-        self.total_bar = tqdm(
-            total=total_prompts,
-            desc="总进度",
-            position=0,
-            leave=True,
-            bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]'
-        )
-        
-        # 每个 benchmark 的进度条
-        self.bench_bars = {}
-        active_benches = {k: v for k, v in bench_states.items() if v.status != "failed"}
-        
-        for i, (name, bench) in enumerate(active_benches.items(), 1):
-            self.bench_bars[name] = tqdm(
-                total=bench.total_prompts,
-                desc=f"{name:15s}",
-                position=i,
-                leave=True,
-                bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt}'
-            )
-    
-    def update(self, bench_name: str, delta: int = 1):
-        """更新进度"""
-        self.completed_prompts += delta
-        self.total_bar.update(delta)
-        
-        if bench_name in self.bench_bars:
-            self.bench_bars[bench_name].update(delta)
-    
+class StatusPrinter:
+    """
+    通过 ANSI 转义码在 tail -f 时实现"状态块固定在底部"效果。
+
+    文件末尾始终保持固定高度的状态块。每当有日志消息或状态更新时：
+      1. 上移 N 行 + 清除到屏幕末尾（擦除旧状态块）
+      2. 写入新内容（日志行 / 空）
+      3. 重绘状态块
+
+    状态块布局（共 _block_height 行）：
+      ──────────────────────────────────────────────────────────
+       总进度 [████████░░]  2304/ 8640  26.7%  bench 2/9  ⏱ 00:12:34
+      ──────────────────────────────────────────────────────────
+       AIME25          [████████████████████]  1280/ 1280 100.0% ✓
+       AIME24          [████████████████████]   960/  960 100.0% ✓
+       AMC             [██████░░░░░░░░░░░░░░]   368/  736  50.0% →
+       ...
+      ──────────────────────────────────────────────────────────
+       TPS:  1234.5 tok/s (10:41:05)  →   987.3 tok/s (10:41:35)  →  1102.8 tok/s (10:42:05)
+      ──────────────────────────────────────────────────────────
+    """
+
+    BAR_W        = 20    # 进度条宽度（字符数）
+    LINE_W       = 80    # 行宽上限，避免终端折行导致光标偏移
+    MAX_TPS_HIST = 3     # 保留最近 N 次 TPS 记录
+    REDRAW_SEC   = 15    # 后台定期刷新间隔（秒）
+
+    def __init__(self, bench_states: Dict[str, 'BenchState']):
+        self._bench_states  = bench_states
+        self._lock          = threading.Lock()
+        self._tps_history: List[Tuple[float, str]] = []  # (window_tps, time_str)
+        self._start_time    = time.time()
+        self._initialized   = False
+
+        # 固定行数：分隔线×4 + 总进度×1 + bench×N + TPS×1
+        self._block_height  = 4 + 1 + len(bench_states) + 1
+
+        # 启动后台定期刷新线程
+        self._stop = threading.Event()
+        self._bg   = threading.Thread(target=self._bg_loop, daemon=True, name="StatusPrinter")
+        self._bg.start()
+
+    # ── 外部接口 ─────────────────────────────────────────────
+
+    def write_log(self, msg: str):
+        """日志消息路由入口，由 _StatusLogHandler 调用。"""
+        with self._lock:
+            self._render(msg)
+
+    def record_tps(self, window_tps: float, _global_tps: float):
+        """记录一次 TPS 读数并触发重绘。由 VLLMOfflineEngine._tps_callback 调用。"""
+        ts = datetime.now().strftime("%H:%M:%S")
+        with self._lock:
+            self._tps_history.append((window_tps, ts))
+            if len(self._tps_history) > self.MAX_TPS_HIST:
+                self._tps_history.pop(0)
+            self._render(None)
+
     def close(self):
-        """关闭所有进度条"""
-        self.total_bar.close()
-        for bar in self.bench_bars.values():
-            bar.close()
+        """停止后台线程；最后做一次重绘，让状态块留在最终位置。"""
+        self._stop.set()
+        with self._lock:
+            self._render(None)
+
+    # ── 内部实现 ─────────────────────────────────────────────
+
+    def _render(self, log_line: Optional[str]):
+        """擦除旧状态块 → 写日志行（若有）→ 重绘状态块。必须在 _lock 内调用。"""
+        out = sys.stderr
+        if self._initialized:
+            out.write(f'\033[{self._block_height}A\033[J')
+        if log_line is not None:
+            out.write(log_line + '\n')
+        for line in self._build_block():
+            out.write(line + '\n')
+        out.flush()
+        self._initialized = True
+
+    def _bg_loop(self):
+        while not self._stop.wait(self.REDRAW_SEC):
+            with self._lock:
+                self._render(None)
+
+    def _build_block(self) -> List[str]:
+        """构建当前状态块，返回恰好 _block_height 行的列表。"""
+        W   = self.LINE_W
+        sep = '─' * W
+
+        # ── 总进度 ──────────────────────────────────────────
+        total = sum(b.total_prompts for b in self._bench_states.values()
+                    if b.status != "failed")
+        done  = sum(b.completed     for b in self._bench_states.values()
+                    if b.status != "failed")
+        pct   = done / total * 100 if total > 0 else 0.0
+        bw    = self.BAR_W
+        bar   = '█' * int(bw * done / total) + '░' * (bw - int(bw * done / total)) \
+                if total > 0 else '░' * bw
+        elap  = time.time() - self._start_time
+        etime = f"{int(elap//3600):02d}:{int(elap%3600//60):02d}:{int(elap%60):02d}"
+        n_done   = sum(1 for b in self._bench_states.values() if b.status == "done")
+        n_total  = len(self._bench_states)
+        total_line = (
+            f" 总进度 [{bar}] {done:6d}/{total:<6d} {pct:5.1f}%"
+            f"  bench {n_done}/{n_total}  ⏱ {etime}"
+        )
+
+        # ── per-bench ────────────────────────────────────────
+        bench_lines = []
+        for name, bench in self._bench_states.items():
+            bd = bench.completed
+            bt = max(bench.total_prompts, 1)
+            pb = bd / bt
+            bbar = '█' * int(bw * pb) + '░' * (bw - int(bw * pb))
+            st = bench.status
+            if   st == "done":    icon, c = "✓", "\033[32m"
+            elif st == "scoring": icon, c = "⏳", "\033[33m"
+            elif st == "failed":  icon, c = "✗", "\033[31m"
+            elif st == "pending": icon, c = " ", "\033[90m"
+            else:                 icon, c = "→", ""
+            rst  = "\033[0m"
+            nm   = name[:16].ljust(16)
+            bench_lines.append(
+                f" {c}{nm}{rst} [{bbar}] {bd:5d}/{bt:5d} {pb*100:5.1f}% {icon}"
+            )
+
+        # ── TPS ──────────────────────────────────────────────
+        if self._tps_history:
+            parts = [f"\033[36m{wt:>8.1f}\033[0m tok/s ({ts})"
+                     for wt, ts in self._tps_history]
+            tps_line = " TPS: " + "  →  ".join(parts)
+        else:
+            tps_line = " TPS: 等待数据..."
+
+        return [sep, total_line, sep] + bench_lines + [sep, tps_line, sep]
+
+
+class _StatusLogHandler(logging.Handler):
+    """将 logger 所有 StreamHandler 的输出路由到 StatusPrinter，保证状态块始终在底部。"""
+
+    def __init__(self, printer: StatusPrinter, orig_formatter: Optional[logging.Formatter] = None):
+        super().__init__()
+        self._printer   = printer
+        self._formatter = orig_formatter or logging.Formatter(
+            '%(asctime)s - %(name)s - %(levelname)s: %(message)s',
+            datefmt='%Y-%m-%d %H:%M:%S',
+        )
+
+    def emit(self, record: logging.LogRecord):
+        try:
+            msg = self._formatter.format(record)
+            self._printer.write_log(msg)
+        except Exception:
+            self.handleError(record)
 
 
 # ============================================================
