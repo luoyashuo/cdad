@@ -22,7 +22,6 @@ vllm:
   
   # eval_v2.py 特有参数
   eval_batch_size: 4096
-  worker_chunk_size: 256
   tps_interval: 30
 
 # 沙箱配置
@@ -58,7 +57,7 @@ benchmarks:
   AMC:
     dataset_name: "amc"
     subset: "amc23"
-    repeats: 64
+    repeats: 16
     temperature: 1.0
     max_tokens: 16000
     few_shot_num: 0

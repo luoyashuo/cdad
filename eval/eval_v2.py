@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any, Set
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from tqdm import tqdm
+import random
 import yaml
 
 # 添加 evalscope 路径
@@ -84,6 +85,8 @@ class BenchState:
     results: Dict[str, Dict[int, dict]] = field(default_factory=dict)
     status: str = "pending"       # pending / inferring / scoring / done / failed
     lock: threading.Lock = field(default_factory=threading.Lock)
+    # 流式持久化：每个 subset 的 JSONL 文件句柄
+    _jsonl_files: Dict[str, Any] = field(default_factory=dict)
     # 评分结果
     per_repeat_scores: List[float] = field(default_factory=list)
     stats: Dict[str, float] = field(default_factory=dict)
@@ -120,6 +123,18 @@ class CrossBenchmarkEvaluator:
         elif resume_dir:
             self.output_dir = Path(resume_dir)
             self.version = self.output_dir.name
+        elif resume:
+            # 自动检测最新 version_* 目录续跑
+            evalscope_dir = Path(self.model_path) / "evalscope"
+            latest = self._find_latest_version(evalscope_dir)
+            if latest:
+                self.output_dir = latest
+                self.version = latest.name
+                logger.info(f"自动检测到最新版本目录: {latest}")
+            else:
+                self.version = datetime.now().strftime("version_%Y%m%d_%H%M%S")
+                self.output_dir = evalscope_dir / self.version
+                logger.info(f"未检测到已有版本，全新运行: {self.version}")
         else:
             self.version = datetime.now().strftime("version_%Y%m%d_%H%M%S")
             self.output_dir = Path(self.model_path) / "evalscope" / self.version
@@ -133,10 +148,8 @@ class CrossBenchmarkEvaluator:
         self.bench_states: Dict[str, BenchState] = {}
         
         # Resume 支持
-        self.resume = resume
+        self.resume = resume or (resume_dir is not None)
         self.completed_benchmarks: Set[str] = set()
-        if resume or resume_dir:
-            self._scan_completed_benchmarks()
         
         # vLLM 引擎
         self.engine: Optional[VLLMOfflineEngine] = None
@@ -155,12 +168,188 @@ class CrossBenchmarkEvaluator:
         with open(self.config_file, 'r', encoding='utf-8') as f:
             return yaml.safe_load(f)
 
-    def _scan_completed_benchmarks(self):
-        """扫描已完成的 benchmark"""
-        for p in self.output_dir.glob('*_result.json'):
-            bench_name = p.stem[:-len('_result')]
-            self.completed_benchmarks.add(bench_name)
-        logger.info(f"[Resume] 发现 {len(self.completed_benchmarks)} 个已完成 benchmark: {self.completed_benchmarks}")
+    @staticmethod
+    def _find_latest_version(evalscope_dir: Path) -> Optional[Path]:
+        """返回 evalscope_dir 下按名称排序最新的 version_* 目录，不存在则返回 None"""
+        if not evalscope_dir.exists():
+            return None
+        candidates = sorted(evalscope_dir.glob("version_*"), reverse=True)
+        return candidates[0] if candidates else None
+
+    def _load_existing_predictions(self, bench: BenchState) -> int:
+        """加载已有 predictions，最大化利用已完成数据。
+
+        策略：
+        - 统计每个 subset 中连续完成的 repeat 轮数 complete_repeats
+          （repeat r 完整 ⟺ 该 subset 所有题目都有 q*old_repeats+r 的条目）
+        - effective_repeats = max(complete_repeats, new_repeats)
+          * complete_repeats > new_repeats：直接用全部已完成数据评分，不浪费
+          * complete_repeats < new_repeats：加载已有部分，剩余缺口补推理
+        - 只加载 bench.subsets 中存在的 subset（过滤旧版本多余 subset）
+        - 复用已有评分：仅当 subsets 完全一致且 effective_repeats == old_repeats 时跳过评分
+
+        Returns: 加载的条目数（已填入 bench.results 和 bench.completed）
+        """
+        bench_dir = self.output_dir / bench.bench_name
+        if not bench_dir.exists():
+            return 0
+
+        jsonl_pattern = f"*/predictions/{self.model_name}/{bench.dataset_name}_*.jsonl"
+        jsonl_files = sorted(bench_dir.glob(jsonl_pattern))
+        if not jsonl_files:
+            return 0
+
+        new_repeats = bench.repeats
+        # 每个 subset 的原始题目数（非 repeat 展开），基于当前 dataset
+        num_q_per_subset: Dict[str, int] = {
+            s: len(ds) // new_repeats for s, ds in bench.subsets.items()
+        }
+
+        # 从 _result.json 获取 old_repeats 和旧 subsets 信息
+        result_path = self.output_dir / f"{bench.bench_name}_result.json"
+        old_repeats = None
+        old_result_data = None
+        if result_path.exists():
+            try:
+                with open(result_path) as f:
+                    old_result_data = json.load(f)
+                old_repeats = old_result_data.get('repeats')
+            except Exception:
+                pass
+
+        # 加载所有 JSONL 条目（同一 index 以最后出现的为准）
+        raw_entries: Dict[str, Dict[int, dict]] = {}
+        for jsonl_path in jsonl_files:
+            stem = jsonl_path.stem
+            prefix = f"{bench.dataset_name}_"
+            subset_name = stem[len(prefix):] if stem.startswith(prefix) else stem
+            if subset_name not in raw_entries:
+                raw_entries[subset_name] = {}
+            with open(jsonl_path, 'r', encoding='utf-8') as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        entry = json.loads(line)
+                        raw_entries[subset_name][entry['index']] = entry
+                    except Exception:
+                        continue
+
+        # 只保留 bench.subsets 中存在的 subset
+        if bench.subsets:
+            raw_entries = {k: v for k, v in raw_entries.items() if k in bench.subsets}
+
+        total_raw = sum(len(v) for v in raw_entries.values())
+        if total_raw == 0:
+            return 0
+
+        # 推断 old_repeats（若 result.json 未提供）
+        if old_repeats is None:
+            for subset_name, entries in raw_entries.items():
+                nq = num_q_per_subset.get(subset_name, 1)
+                if entries:
+                    old_repeats = max(1, (max(entries.keys()) + 1 + nq - 1) // nq)
+                    break
+        if old_repeats is None:
+            old_repeats = new_repeats
+
+        # 统计每个 subset 中完整的 repeat 轮数
+        # repeat r 完整 ⟺ 所有题目 q 都有 q*old_repeats+r 的条目
+        def _count_complete(entries: Dict[int, dict], nq: int, nr: int) -> int:
+            return sum(
+                1 for r in range(nr)
+                if all(q * nr + r in entries for q in range(nq))
+            )
+
+        complete_per_subset = []
+        for subset_name in bench.subsets:
+            entries = raw_entries.get(subset_name, {})
+            nq = num_q_per_subset.get(subset_name, 1)
+            cr = _count_complete(entries, nq, old_repeats) if entries else 0
+            complete_per_subset.append(cr)
+
+        complete_repeats = min(complete_per_subset) if complete_per_subset else 0
+        # 最大化利用已完成数据：若 complete_repeats > new_repeats 则全部用上
+        effective_repeats = max(complete_repeats, new_repeats)
+
+        logger.info(f"[{bench.bench_name}] Resume: 发现 {total_raw} 条已有预测, "
+                    f"old_repeats={old_repeats}, complete_repeats={complete_repeats}, "
+                    f"new_repeats={new_repeats} → effective_repeats={effective_repeats}")
+
+        # 构建 sample_id → Sample 映射（以 effective_repeats 为步长）
+        # bench.subsets 中 sample.id 基于 new_repeats；超出 new_repeats 的 repeat 无 Sample 引用（仅缺 metadata，可接受）
+        sample_map: Dict[int, Sample] = {}
+        for subset_name, dataset in bench.subsets.items():
+            for sample in dataset:
+                q = sample.id // new_repeats
+                r = sample.id % new_repeats
+                sample_map[q * effective_repeats + r] = sample
+
+        # 重映射 old sample_ids → new sample_ids（以 effective_repeats 为步长）
+        loaded = 0
+        for subset_name, entries in raw_entries.items():
+            nq = num_q_per_subset.get(subset_name, 1)
+            if subset_name not in bench.results:
+                bench.results[subset_name] = {}
+
+            for old_sid, entry in entries.items():
+                question_id = old_sid // old_repeats
+                old_repeat_idx = old_sid % old_repeats
+
+                if old_repeat_idx >= effective_repeats:
+                    continue
+                if question_id >= nq:
+                    continue
+
+                new_sid = question_id * effective_repeats + old_repeat_idx
+
+                choices = entry.get('model_output', {}).get('choices', [])
+                if choices:
+                    text = choices[0].get('message', {}).get('content', '')
+                    finish_reason = choices[0].get('stop_reason', 'stop')
+                else:
+                    text = ''
+                    finish_reason = 'unknown'
+
+                bench.results[subset_name][new_sid] = {
+                    'text': text,
+                    'finish_reason': finish_reason,
+                    'sample': sample_map.get(new_sid),
+                }
+                loaded += 1
+
+        bench.completed = loaded
+
+        # 若 effective_repeats 不同于 new_repeats，更新 bench 的 repeats 和 total_prompts
+        if effective_repeats != new_repeats:
+            bench.repeats = effective_repeats
+            bench.total_prompts = sum(
+                num_q_per_subset[s] * effective_repeats for s in bench.subsets
+            )
+
+        if loaded >= bench.total_prompts:
+            # 尝试复用已有评分：subsets 完全一致 且 effective_repeats == old_repeats 才跳过
+            if old_result_data is not None and effective_repeats == old_repeats:
+                old_subsets = set(old_result_data.get('subsets', []))
+                cur_subsets = set(bench.subsets.keys())
+                if old_subsets == cur_subsets:
+                    bench.per_repeat_scores = old_result_data.get('per_repeat_scores', [])
+                    bench.stats = {k: old_result_data[k] for k in ['mean', 'std', 'min', 'max']
+                                   if k in old_result_data}
+                    bench.status = "done"
+                    logger.info(f"[{bench.bench_name}] Resume: 完全跳过 "
+                                f"(effective_repeats={effective_repeats}, subsets={cur_subsets})")
+                    return loaded
+            # 预测充足但需重新评分（subsets 或 repeats 有变化）
+            bench.status = "scoring"
+            logger.info(f"[{bench.bench_name}] Resume: 预测充足 ({loaded}/{bench.total_prompts})，"
+                        f"需重新评分")
+        else:
+            logger.info(f"[{bench.bench_name}] Resume: 需补齐 "
+                        f"{bench.total_prompts - loaded}/{bench.total_prompts} 条预测")
+
+        return loaded
 
     def _save_progress(self):
         """保存进度文件"""
@@ -204,6 +393,10 @@ class CrossBenchmarkEvaluator:
             'dataset_name': bench_cfg.get('subset', None),
             'few_shot_num': bench_cfg.get('few_shot_num', 0)
         }
+        # 若指定了 subset，通过 subset_list 限制 evalscope 只加载该 subset
+        # （BenchmarkMeta._update 会 setattr subset_list，避免评分时把其他 subset 算作 0 分）
+        if bench_cfg.get('subset'):
+            dataset_args['subset_list'] = [bench_cfg['subset']]
         if 'extra_params' in bench_cfg:
             dataset_args['extra_params'] = bench_cfg['extra_params']
         # 支持指定数据源 (huggingface/modelscope)
@@ -291,24 +484,28 @@ class CrossBenchmarkEvaluator:
         logger.info("加载所有 benchmark 数据...")
         
         for bench_name, bench_cfg in self.config['benchmarks'].items():
-            # 跳过已完成的
-            if bench_name in self.completed_benchmarks:
-                logger.info(f"[{bench_name}] 已跳过（已完成）")
-                continue
-            
             logger.info(f"[{bench_name}] 加载中...")
-            
+
             try:
                 # 1. 构建 TaskConfig
                 task_config = self._create_task_config(bench_name)
-                
+
                 # 2. 通过 evalscope API 加载 benchmark + dataset
                 benchmark = get_benchmark(bench_cfg['dataset_name'], task_config)
-                dataset_dict = benchmark.load_dataset()
-                
+                dataset_dict = {k: v for k, v in benchmark.load_dataset().items()}
+
+                # 若配置指定了 subset，过滤只保留该 subset
+                requested_subset = bench_cfg.get('subset')
+                if requested_subset:
+                    if requested_subset in dataset_dict:
+                        dataset_dict = {requested_subset: dataset_dict[requested_subset]}
+                    else:
+                        logger.warning(f"[{bench_name}] 指定 subset '{requested_subset}' 不在数据集 "
+                                       f"{list(dataset_dict.keys())} 中，使用全量数据")
+
                 # 3. 记录 BenchState
                 total = sum(len(ds) for ds in dataset_dict.values())
-                self.bench_states[bench_name] = BenchState(
+                bench_state = BenchState(
                     bench_name=bench_name,
                     dataset_name=bench_cfg['dataset_name'],
                     subsets=dataset_dict,
@@ -317,11 +514,20 @@ class CrossBenchmarkEvaluator:
                     repeats=task_config.repeats,
                     total_prompts=total,
                 )
-                
+                self.bench_states[bench_name] = bench_state
+
                 logger.info(f"[{bench_name}] 加载完成: {total} prompts, {task_config.repeats} repeats")
-                
+
+                # 4. Resume：加载已有 predictions，自动处理 repeats 变更
+                if self.resume:
+                    loaded = self._load_existing_predictions(bench_state)
+                    if bench_state.status == "done":
+                        self.completed_benchmarks.add(bench_name)
+
             except Exception as e:
                 logger.error(f"[{bench_name}] 加载失败: {e}")
+                import traceback
+                traceback.print_exc()
                 self.bench_states[bench_name] = BenchState(
                     bench_name=bench_name,
                     dataset_name=bench_cfg.get('dataset_name', 'unknown'),
@@ -348,18 +554,33 @@ class CrossBenchmarkEvaluator:
             msg_dicts, tokenize=False, add_generation_prompt=True)
 
     def _extract_all_prompts(self) -> List[PromptItem]:
-        """从所有 BenchState 提取 PromptItem 列表"""
-        items = []
-        
+        """从所有 BenchState 提取 PromptItem 列表。
+
+        排列策略：按 benchmark 分组（小 benchmark 优先），同一 benchmark 的 prompts
+        连续排列。这样小 benchmark 先完成推理，可以尽早开始评分（CPU 线程），
+        不阻塞后续大 benchmark 的推理。
+
+        benchmark 内部 shuffle 打散 repeat 的局部性，配合 max_dedup_n 限制，
+        确保 Worker 内有足够的 unique prompts 填满 GPU batch。
+        """
+        # 按 benchmark 分组收集
+        bench_items: List[Tuple[int, str, List[PromptItem]]] = []
+
         for bench in self.bench_states.values():
-            if bench.status == "failed":
+            # 跳过已完成（done）、已有足够预测待评分（scoring）、加载失败的
+            if bench.status in ("failed", "done", "scoring"):
                 continue
-            
+
             sp = self._config_to_sampling_params(bench.task_config.generation_config)
-            
+            existing_results = bench.results  # resume 加载的已有结果
+            items = []
+            skipped = 0
             for subset_name, dataset in bench.subsets.items():
                 for sample in dataset:
-                    # sample.input 是 List[ChatMessage]，需要 apply_chat_template
+                    # 跳过 resume 已加载的 sample
+                    if existing_results.get(subset_name, {}).get(sample.id) is not None:
+                        skipped += 1
+                        continue
                     prompt_text = self._messages_to_prompt(sample.input)
                     items.append(PromptItem(
                         bench_name=bench.bench_name,
@@ -370,8 +591,23 @@ class CrossBenchmarkEvaluator:
                         sampling_params=sp,
                         sample=sample,
                     ))
-        
-        return items
+            if skipped > 0:
+                logger.info(f"  {bench.bench_name}: 跳过 {skipped} 已有, 需补齐 {len(items)}")
+            # benchmark 内部 shuffle，打散 repeat 局部性
+            random.shuffle(items)
+            bench_items.append((len(items), bench.bench_name, items))
+
+        # 按 benchmark 大小排序：小的先跑，先完成先评分
+        bench_items.sort(key=lambda x: x[0])
+
+        all_items = []
+        for size, name, items in bench_items:
+            all_items.extend(items)
+            logger.info(f"  {name}: {size} prompts")
+
+        logger.info(f"Prompt 提取完成: {len(all_items)} prompts, "
+                    f"来自 {len(bench_items)} benchmarks, 小 benchmark 优先")
+        return all_items
 
     def _run_global_inference(self, all_prompts: List[PromptItem]):
         """将所有 prompts 提交到 VLLMOfflineEngine，收集结果
@@ -395,7 +631,8 @@ class CrossBenchmarkEvaluator:
                 fut = executor.submit(
                     self.engine.generate_single,
                     item.prompt_text,
-                    item.sampling_params
+                    item.sampling_params,
+                    item.bench_name,  # group_key: 同 benchmark 优先一起分发
                 )
                 futures[fut] = item
             
@@ -414,37 +651,75 @@ class CrossBenchmarkEvaluator:
         
         logger.info("全局推理完成")
 
+    def _get_jsonl_writer(self, bench: BenchState, subset_name: str):
+        """获取或创建 subset 对应的 JSONL 文件句柄（用于流式追加写入）"""
+        if subset_name not in bench._jsonl_files:
+            work_dir = self.output_dir / bench.bench_name / self._timestamp
+            pred_dir = work_dir / "predictions" / self.model_name
+            pred_dir.mkdir(parents=True, exist_ok=True)
+            jsonl_path = pred_dir / f"{bench.dataset_name}_{subset_name}.jsonl"
+            bench._jsonl_files[subset_name] = open(jsonl_path, 'a', encoding='utf-8')
+        return bench._jsonl_files[subset_name]
+
+    def _close_jsonl_writers(self, bench: BenchState):
+        """关闭所有 JSONL 文件句柄"""
+        for f in bench._jsonl_files.values():
+            f.close()
+        bench._jsonl_files.clear()
+
     def _on_result(self, item: PromptItem, result: dict):
-        """收到推理结果，路由到对应 BenchState"""
+        """收到推理结果，路由到对应 BenchState，并立即追加写入 JSONL"""
         bench = self.bench_states.get(item.bench_name)
         if bench is None:
             return
-        
+
         # 调试：检查返回结果是否为空
         if not result.get('text'):
             logger.warning(f"[{item.bench_name}] sample_id={item.sample_id} 返回空结果! finish_reason={result.get('finish_reason')}")
-        
+
         with bench.lock:
             if item.subset_name not in bench.results:
                 bench.results[item.subset_name] = {}
-            
+
             bench.results[item.subset_name][item.sample_id] = {
                 'text': result['text'],
                 'finish_reason': result['finish_reason'],
                 'sample': item.sample,
             }
             bench.completed += 1
-            
+
+            # 流式持久化：立即追加写入 predictions JSONL（崩溃后可恢复）
+            try:
+                f = self._get_jsonl_writer(bench, item.subset_name)
+                sample = item.sample
+                model_result = {
+                    "index": item.sample_id,
+                    "model": self.model_name,
+                    "model_output": {
+                        "model": self.model_name,
+                        "choices": [{
+                            "message": {"role": "assistant", "content": result['text']},
+                            "stop_reason": result['finish_reason'] or "stop",
+                        }],
+                    },
+                    "messages": [{"role": "assistant", "content": result['text']}],
+                    "metadata": getattr(sample, 'metadata', {}),
+                }
+                f.write(json.dumps(model_result, ensure_ascii=False) + '\n')
+                f.flush()
+            except Exception as e:
+                logger.warning(f"[{item.bench_name}] 流式写入失败: {e}")
+
             # 更新进度
             if self._progress:
                 self._progress.update(item.bench_name)
-            
+
             # 检查是否完成
             if bench.completed >= bench.total_prompts:
                 if bench.status != "scoring":
                     bench.status = "scoring"
-                    # 写入 predictions JSONL
-                    self._write_predictions(bench)
+                    # 关闭 JSONL 文件句柄
+                    self._close_jsonl_writers(bench)
                     # 异步触发评分
                     self._scoring_pool.submit(self._score_benchmark, bench)
 
@@ -573,7 +848,7 @@ class CrossBenchmarkEvaluator:
                     
                     # 重映射 index 为无 repeat 的连续 id
                     new_index = sample_id // bench.repeats
-                    sample = res['sample']
+                    sample = res.get('sample')
                     
                     # 统计空结果
                     if not res['text']:
@@ -601,11 +876,11 @@ class CrossBenchmarkEvaluator:
                                 "content": res['text'],
                             }
                         ],
-                        "metadata": getattr(sample, 'metadata', {}),
+                        "metadata": getattr(sample, 'metadata', {}) if sample else {},
                     }
                     f.write(json.dumps(model_result, ensure_ascii=False) + '\n')
                     total_written += 1
-        
+
         logger.info(f"[{bench.bench_name}] repeat_{repeat_idx}: 写入 {total_written} 条 predictions, 其中空结果 {empty_count} 条")
         return repeat_dir
 
@@ -658,6 +933,7 @@ class CrossBenchmarkEvaluator:
         result = {
             'benchmark': bench.bench_name,
             'dataset': bench.dataset_name,
+            'subsets': list(bench.subsets.keys()),
             'repeats': bench.repeats,
             'per_repeat_scores': bench.per_repeat_scores,
             'mean': bench.stats.get('mean', 0),
@@ -734,57 +1010,78 @@ class CrossBenchmarkEvaluator:
         # 1. 加载所有 benchmark
         self._load_all_benchmarks()
         
-        # 过滤掉失败的
-        active_benches = {k: v for k, v in self.bench_states.items() if v.status != "failed"}
-        if not active_benches:
+        # 过滤掉失败的和已完成的
+        active_benches = {k: v for k, v in self.bench_states.items()
+                         if v.status not in ("failed", "done")}
+        # 保留 done 的用于汇总
+        done_benches = {k: v for k, v in self.bench_states.items() if v.status == "done"}
+
+        if not active_benches and not done_benches:
             logger.error("没有有效的 benchmark 可以评估")
             return
-        
-        self.bench_states = active_benches
-        
-        # 2. 初始化 vLLM 引擎
-        vllm_cfg = self.config.get('vllm', {})
-        self.engine = VLLMOfflineEngine(
-            model_path=self.model_path,
-            tp=vllm_cfg.get('tp', 1),
-            dp=vllm_cfg.get('dp', 1),
-            gpu_memory_utilization=vllm_cfg.get('gpu_memory_utilization', 0.9),
-            max_model_len=vllm_cfg.get('max_model_len', None),
-            enforce_eager=vllm_cfg.get('enforce_eager', True),
-            worker_chunk_size=vllm_cfg.get('worker_chunk_size', 512),
-        )
-        
-        # 启动 TPS 统计（可选：通过 tps_interval 配置打印间隔，默认 30 秒）
-        tps_interval = vllm_cfg.get('tps_interval', 30)
-        self.engine._tps_interval = tps_interval
-        self.engine._tps_reset()
-        logger.info(f"TPS 统计已启动，每 {tps_interval} 秒打印一次")
-        
+
+        # 立即触发需要重新评分的 benchmark（repeats 变更或 crash 后已有足够预测）
+        scoring_benches = {k: v for k, v in active_benches.items() if v.status == "scoring"}
+        for bench in scoring_benches.values():
+            logger.info(f"[{bench.bench_name}] 触发重新评分...")
+            self._scoring_pool.submit(self._score_benchmark, bench)
+
+        # 需要推理的 benchmark
+        need_inference = {k: v for k, v in active_benches.items()
+                         if v.status == "pending"}
+
+        # 合并所有参与本轮的 bench（需要推理 + 正在评分 + 已完成）
+        self.bench_states = {**done_benches, **active_benches}
+
         try:
-            # 3. 提取所有 prompts
-            all_prompts = self._extract_all_prompts()
-            logger.info(f"共提取 {len(all_prompts)} 个 prompts")
-            
-            # 4. 全局推理
-            self._run_global_inference(all_prompts)
-            
+            if need_inference:
+                # 2. 初始化 vLLM 引擎（仅在有推理需求时）
+                vllm_cfg = self.config.get('vllm', {})
+                self.engine = VLLMOfflineEngine(
+                    model_path=self.model_path,
+                    tp=vllm_cfg.get('tp', 1),
+                    dp=vllm_cfg.get('dp', 1),
+                    gpu_memory_utilization=vllm_cfg.get('gpu_memory_utilization', 0.9),
+                    max_model_len=vllm_cfg.get('max_model_len', None),
+                    enforce_eager=vllm_cfg.get('enforce_eager', True),
+                    worker_chunk_size=vllm_cfg.get('worker_chunk_size', 0),
+                    max_dedup_n=vllm_cfg.get('max_dedup_n', 8),
+                )
+
+                tps_interval = vllm_cfg.get('tps_interval', 30)
+                self.engine._tps_interval = tps_interval
+                self.engine._tps_reset()
+                logger.info(f"TPS 统计已启动，每 {tps_interval} 秒打印一次")
+
+                # 3. 提取需要推理的 prompts（跳过 resume 已加载的）
+                all_prompts = self._extract_all_prompts()
+                logger.info(f"共提取 {len(all_prompts)} 个 prompts 需要推理")
+
+                if all_prompts:
+                    # 4. 全局推理
+                    self._run_global_inference(all_prompts)
+                else:
+                    logger.info("所有 prompts 均已有预测，跳过推理")
+            else:
+                logger.info("所有 benchmark 均有足够预测，跳过推理引擎初始化")
+
             # 5. 等待所有评分完成
-            logger.info("等待所有评分完成...")
-            self._wait_for_scoring()
-            
+            pending_scoring = {k for k, v in self.bench_states.items()
+                              if v.status not in ("done", "failed")}
+            if pending_scoring:
+                logger.info(f"等待 {len(pending_scoring)} 个 benchmark 评分完成...")
+                self._wait_for_scoring()
+
             # 6. 汇总结果
             self._compile_summary()
-            
+
             # 7. 保存配置
             self._save_config()
-            
+
         finally:
-            # 关闭引擎
             if self.engine:
                 self.engine.shutdown()
                 self.engine = None
-            
-            # 关闭评分线程池
             self._scoring_pool.shutdown(wait=True)
         
         logger.info("\nCrossBenchmarkEvaluator V2 运行完成!")

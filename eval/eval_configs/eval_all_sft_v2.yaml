@@ -22,10 +22,14 @@ vllm:
   
   # eval_v2.py 特有参数：
   # - eval_batch_size: ThreadPoolExecutor 并发提交数（推荐 4096）
-  # - worker_chunk_size: dp>1 时控制 Worker 分发粒度（推荐 256）
+  # - max_dedup_n: n 参数去重上限（0=不限, 8=推荐）。限制 n 可增加 unique prompts 数，
+  #   提高 GPU batch 利用率。如 AIME 30题×64 repeats, n=8 → 每卡 30×8=240 有效序列
+  # - worker_chunk_size: 每次分发给 Worker 的上限（0=不限, 按 benchmark 全量均分）
+  #   设为 0 可让同一 benchmark 一次性打满所有 Worker，优先完成 → 尽早评分
   # - tps_interval: TPS 打印间隔（秒），设为 0 可禁用
   eval_batch_size: 4096
-  worker_chunk_size: 256
+  max_dedup_n: 8
+  worker_chunk_size: 0
   tps_interval: 30
 
 # 沙箱配置
@@ -39,7 +43,7 @@ benchmarks:
   # ==================== MATH Benchmarks ====================
   AIME25:
     dataset_name: "aime25"
-    repeats: 64
+    repeats: 16
     temperature: 0.6
     max_tokens: 28000
     few_shot_num: 0
@@ -47,7 +51,7 @@ benchmarks:
 
   AIME24:
     dataset_name: "aime24"
-    repeats: 64
+    repeats: 16
     temperature: 0.6
     max_tokens: 28000
     few_shot_num: 0
@@ -63,7 +67,7 @@ benchmarks:
   AMC:
     dataset_name: "amc"
     subset: "amc23"
-    repeats: 64
+    repeats: 16
     temperature: 0.6
     max_tokens: 28000
     few_shot_num: 0

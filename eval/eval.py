@@ -166,13 +166,19 @@ class VLLMWorker:
             self._lora_request = None
 
     def generate(self, prompts: List[str],
-                 sampling_params_dict: dict) -> dict:
+                 sampling_params_dict: dict,
+                 max_n: int = 0) -> dict:
         """批量推理，自动去重相同 prompt 并用 n 参数共享 KV cache。
 
         当一个 batch 中有重复 prompt 时（如 AIME 30题 × 8 repeats），
         去重后用 SamplingParams(n=repeat_count) 生成多个 completion，
         vLLM 会共享 prompt 的 KV cache（copy-on-write），大幅节省显存，
         允许更高的并发 batch size。
+
+        Args:
+            max_n: 限制 n 参数的最大值。0 表示不限制。
+                   设置较小的值（如 8）可增加 unique prompts 数量，
+                   提高 GPU batch 利用率，适用于长生成场景。
         """
         from vllm import SamplingParams as _SP
 
@@ -187,29 +193,64 @@ class VLLMWorker:
                 n_per_unique.append(0)
             n_per_unique[seen[p]] += 1
 
-        max_n = max(n_per_unique) if n_per_unique else 1
+        actual_max_n = max(n_per_unique) if n_per_unique else 1
+        # 限制 n 参数上限：n 太大会导致 unique prompts 过少，GPU batch 利用率低
+        if max_n > 0 and actual_max_n > max_n:
+            actual_max_n = max_n
         dedup_ratio = len(prompts) / max(len(unique_prompts), 1)
 
-        if max_n > 1:
+        if actual_max_n > 1:
             # 有重复 prompt：用 n 参数批量 rollout
+            # 但限制 n 不超过 actual_max_n，超出部分作为独立 prompt 处理
             sp_dict = dict(sampling_params_dict)
-            sp_dict['n'] = max_n
+            sp_dict['n'] = actual_max_n
+
+            # 重新组织：每个 unique prompt 最多生成 actual_max_n 个 completion
+            # 超出的重复 prompt 作为额外的独立 prompt 加入
+            expanded_prompts = []
+            expanded_n = []
+            prompt_to_slots = {}  # prompt_text -> [(expanded_idx, slot_start, count), ...]
+            for p in unique_prompts:
+                total_needed = n_per_unique[seen[p]]
+                while total_needed > 0:
+                    this_n = min(total_needed, actual_max_n)
+                    exp_idx = len(expanded_prompts)
+                    if p not in prompt_to_slots:
+                        prompt_to_slots[p] = []
+                    prompt_to_slots[p].append((exp_idx, 0, this_n))
+                    expanded_prompts.append(p)
+                    expanded_n.append(this_n)
+                    total_needed -= this_n
+
+            # 生成：所有 expanded prompts 用相同的 n（取最大值）
+            # 但每个 prompt 可能需要不同数量的 completion
+            # 简化：统一用 actual_max_n，多余的输出忽略
             outputs = self.llm.generate(
-                unique_prompts, _SP(**sp_dict),
+                expanded_prompts, _SP(**sp_dict),
                 lora_request=self._lora_request, use_tqdm=False)
 
             # 按原始顺序映射结果
-            occurrence = {}  # prompt_text -> 下一个要取的 output index
+            occurrence = {}  # prompt_text -> 已取的总 output 数
             for p in unique_prompts:
                 occurrence[p] = 0
 
             results = []
             total_tokens = 0
             for p in prompts:
-                uid = seen[p]
-                j = occurrence[p]
+                global_j = occurrence[p]
                 occurrence[p] += 1
-                out = outputs[uid].outputs[j]
+                # 找到这个 j 对应哪个 expanded prompt 的哪个 slot
+                slots = prompt_to_slots[p]
+                cumulative = 0
+                for exp_idx, slot_start, count in slots:
+                    if global_j < cumulative + count:
+                        local_j = global_j - cumulative
+                        out = outputs[exp_idx].outputs[local_j]
+                        break
+                    cumulative += count
+                else:
+                    # fallback: 不应该发生
+                    out = outputs[prompt_to_slots[p][-1][0]].outputs[0]
                 results.append({
                     'text': out.text,
                     'finish_reason': out.finish_reason,
@@ -243,13 +284,16 @@ class VLLMOfflineEngine:
                  gpu_memory_utilization: float = 0.9,
                  max_model_len: Optional[int] = None,
                  enforce_eager: bool = True,
-                 worker_chunk_size: int = 512):
+                 worker_chunk_size: int = 0,
+                 max_dedup_n: int = 0):
         self.model_path = model_path
         self.tp = tp
         self.dp = dp
         self.model_name = _extract_model_name(model_path)
         # dp>1 时每次给每个 Worker 的 prompt 数，控制负载均衡粒度
         self._worker_chunk_size = worker_chunk_size
+        # n 参数去重上限：0 表示不限制。限制 n 可增加 unique prompts 数，提高 GPU batch 利用率
+        self._max_dedup_n = max_dedup_n
 
         # LoRA 检测：若 model_path 是 adapter 目录，则分离 base model 与 adapter
         actual_model, lora_path, max_lora_rank = _resolve_lora(model_path)
@@ -325,15 +369,21 @@ class VLLMOfflineEngine:
     # ---- 核心推理 ----
 
     def generate_single(self, prompt: str,
-                        sampling_params: SamplingParams) -> dict:
+                        sampling_params: SamplingParams,
+                        group_key: str = "") -> dict:
         """线程安全的单条推理。请求会被自动批处理。
 
         evalscope 的 ThreadPoolExecutor 会并发调用此方法，
         内部通过队列 + 后台线程收集请求，批量提交给 vLLM。
+
+        Args:
+            group_key: 可选分组标识（如 benchmark 名）。_dispatch 会按
+                       (sp_key, group_key) 分组，确保同一 group 的 prompts
+                       优先一起分发，实现 "优先完成同一 benchmark" 的调度目标。
         """
         future = concurrent.futures.Future()
         with self._batch_lock:
-            self._batch_queue.append((prompt, sampling_params, future))
+            self._batch_queue.append((prompt, sampling_params, future, group_key))
             self._batch_event.set()
         return future.result()
 
@@ -418,6 +468,9 @@ class VLLMOfflineEngine:
                     n_per_unique[seen[p]] += 1
 
                 max_n = max(n_per_unique) if n_per_unique else 1
+                # 限制 n 参数最大值，防止 unique prompts 过少导致 GPU batch 太小
+                if self._max_dedup_n > 0 and max_n > self._max_dedup_n:
+                    max_n = self._max_dedup_n
 
                 logger.info(f"Batcher(dp=1): group={sp_key[:2]}... {len(prompts)} 个请求"
                             f"（{len(unique_prompts)} unique, n={max_n}），推理中...")
@@ -425,18 +478,42 @@ class VLLMOfflineEngine:
                     if max_n > 1:
                         sp_dict = self._sampling_params_to_dict(sp)
                         sp_dict['n'] = max_n
+
+                        # 构建 expanded prompts：每个 unique prompt 的重复次数
+                        # 若超过 max_n，拆分为多个独立 prompt 条目
+                        expanded_prompts = []
+                        prompt_to_slots = {}  # prompt -> [(exp_idx, slot_start, count), ...]
+                        for p in unique_prompts:
+                            total_needed = n_per_unique[seen[p]]
+                            prompt_to_slots[p] = []
+                            while total_needed > 0:
+                                this_n = min(total_needed, max_n)
+                                exp_idx = len(expanded_prompts)
+                                prompt_to_slots[p].append((exp_idx, 0, this_n))
+                                expanded_prompts.append(p)
+                                total_needed -= this_n
+
                         new_sp = SamplingParams(**sp_dict)
                         outputs = self.llm.generate(
-                            unique_prompts, new_sp,
+                            expanded_prompts, new_sp,
                             lora_request=self._lora_request, use_tqdm=False)
 
                         occurrence = {p: 0 for p in unique_prompts}
                         total_tokens = 0
                         for prompt_text, fut in zip(prompts, futures):
-                            uid = seen[prompt_text]
-                            j = occurrence[prompt_text]
+                            global_j = occurrence[prompt_text]
                             occurrence[prompt_text] += 1
-                            out = outputs[uid].outputs[j]
+                            # 找到对应的 expanded prompt 和 slot
+                            slots = prompt_to_slots[prompt_text]
+                            cumulative = 0
+                            for exp_idx, slot_start, count in slots:
+                                if global_j < cumulative + count:
+                                    local_j = global_j - cumulative
+                                    out = outputs[exp_idx].outputs[local_j]
+                                    break
+                                cumulative += count
+                            else:
+                                out = outputs[slots[-1][0]].outputs[0]
                             total_tokens += len(out.token_ids)
                             fut.set_result({
                                 'text': out.text,
@@ -472,13 +549,20 @@ class VLLMOfflineEngine:
         import ray as _ray
         from collections import defaultdict
 
-        pending: List[tuple] = []   # (prompt, sp, client_future)
+        pending: List[tuple] = []   # (prompt, sp, client_future, group_key)
         inflight: dict = {}         # ray_ref -> (worker_idx, [client_future, ...])
 
         def _dispatch():
-            """将 pending 中的 prompt 均匀分配给所有空闲 Worker（每个最多 chunk 个）。
-            分发前先按 sp_key 分组，再按 prompt 内容排序，让相同 prompt 落在同一个 Worker 中，
-            Worker 内部会自动去重并用 n 参数共享 KV cache。"""
+            """将 pending 中的 prompts 按 sp_key 分组后 round-robin 分发给空闲 Worker。
+
+            调度策略：
+            - 按 sp_key 分组（同参数的不同 benchmark 合并），最大化每个 Worker 的 batch size
+            - Round-robin 分发：每个 benchmark 的 prompts 均匀散布到所有 Worker，
+              确保 Worker 返回时每个 benchmark 的结果均匀到齐
+            - pending 队列顺序由调用方控制（小 benchmark 在前），保证小 bench 优先完成
+            - chunk=0 时全量分发；chunk>0 限制每轮分发总量（控制结果回传粒度）
+            - Worker 内部自动去重 + n 参数共享 KV cache
+            """
             if not pending:
                 return
             busy = {v[0] for v in inflight.values()}
@@ -487,48 +571,63 @@ class VLLMOfflineEngine:
                 return
             # 每次读取最新值，支持按 benchmark 动态调整 chunk_size
             chunk = self._worker_chunk_size
-            n_free = len(free)
+            # max_n 限制：防止 n 过大导致 batch 里 unique prompts 过少
+            max_n_limit = self._max_dedup_n
 
-            # --- 按 sp_key 分组 ---
+            # --- 按 sp_key 分组（同参数的不同 benchmark 合并到一组）---
+            # 同 sp_key 的 prompts 合并后一起分发，确保 Worker batch 足够大。
+            # pending 的顺序由 _extract_all_prompts 控制（小 benchmark 在前），
+            # round-robin 分发保证每个 benchmark 的 prompts 均匀散布到所有 Worker。
             sp_groups = defaultdict(list)
             for item in pending:
-                key = self._sp_key(item[1])
-                sp_groups[key].append(item)
+                sp_k = self._sp_key(item[1])
+                sp_groups[sp_k].append(item)
 
             # 清空 pending，重新按组填充
             pending.clear()
 
-            # 对每组分别处理：排序后均匀分配
+            # 按 sp_key 依次处理，free Worker 列表跨组共享
             for sp_key, group in sp_groups.items():
-                # 按 prompt 内容排序，让重复 prompt 相邻 → 分到同一 Worker → 最大化去重
-                group.sort(key=lambda x: x[0])
+                if not free:
+                    pending.extend(group)
+                    continue
 
                 sp_dict = self._sampling_params_to_dict(group[0][1])
+                n_free = len(free)
 
-                # 均衡分配：先算本轮要分发的总量（上限 chunk×worker 数），
-                # 再用 ceiling 均分给各 Worker（前 extra 个各多 1 个）
-                total_dispatch = min(len(group), chunk * n_free)
-                base = total_dispatch // n_free
-                extra = total_dispatch % n_free
+                # chunk>0: 限制本轮分发总量（控制结果回传粒度）
+                # chunk=0: 不限制，全量分发
+                if chunk > 0:
+                    dispatch_group = group[:chunk * n_free]
+                else:
+                    dispatch_group = group
 
-                allocated = 0
-                for idx, w_idx in enumerate(free):
-                    if allocated >= len(group):
-                        break
-                    this_size = base + (1 if idx < extra else 0)
-                    if this_size <= 0:
+                # Round-robin 分发：让每个 benchmark 的 prompts 均匀散布到所有 Worker。
+                # 例如 pending=[A0,A1,...,A879,B0,B1,...,B5275]，8 Workers:
+                #   W0 拿 [A0,A8,A16,...,B0,B8,...] → 110 A + 660 B
+                #   W1 拿 [A1,A9,A17,...,B1,B9,...] → 110 A + 660 B
+                # 所有 Worker 返回后，A 和 B 的结果同时到齐。
+                used_workers = []
+                for idx in range(n_free):
+                    take = dispatch_group[idx::n_free]  # stride 取样
+                    if not take:
                         continue
-                    take = group[allocated:allocated + this_size]
-                    allocated += this_size
+                    w_idx = free[idx]
                     ref = self._workers[w_idx].generate.remote(
-                        [x[0] for x in take], sp_dict)
+                        [x[0] for x in take], sp_dict, max_n_limit)
                     inflight[ref] = (w_idx, [x[2] for x in take])
+                    used_workers.append(w_idx)
                     logger.info(f"Dispatcher: Worker-{w_idx} <- {len(take)} prompts "
-                                f"(sp={sp_key[:2]}..., pending={len(pending)}, inflight={len(inflight)})")
+                                f"(sp={str(sp_key)[:40]}..., "
+                                f"pending={len(pending)}, inflight={len(inflight)})")
 
-                # 未分配完的放回 pending
-                if allocated < len(group):
-                    pending.extend(group[allocated:])
+                # 未分发的部分放回 pending
+                if len(dispatch_group) < len(group):
+                    pending.extend(group[len(dispatch_group):])
+
+                # 从 free 中移除已分配的 Worker，后续 sp_group 不会重复分配
+                for w in used_workers:
+                    free.remove(w)
 
         while True:
             # 1. 等待：优先用 ray.wait 阻塞（检测 Worker 完成），无 inflight 时等新请求
