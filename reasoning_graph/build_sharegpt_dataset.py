@@ -12,7 +12,7 @@
 输入格式兼容两种 reasoning 子项格式：
   OmniThought: {"thought": "...", "full_response": "...", "Cognitive_Difficulty": {...}, ...}
   DeepMath:    {"thought": "...", "solution": "..."}
-  — 缺少 full_response 时，自动由 thought+solution 拼装：<think>\n{thought}\n</think>\\n{solution}
+  — 缺少 full_response 时，自动由 thought+solution 拼装：<think>\n{thought}\n</think>\n\n{solution}
 
 额外参数:
   --fsf_lowest: 在候选范围内直接选择 FSF 最低的 CoT（而非概率采样）

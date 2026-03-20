@@ -6,9 +6,9 @@ RD(r, q) = PPL(answer | rationale, question) / PPL(answer | question)
 
 特性:
 - 多卡 DP: 每张 GPU 运行独立 vllm 实例处理数据分片，而非 TP 浪费通信
-- 断点续传: worker 定期写 checkpoint，中断后自动跳过已完成项
+- 动态任务队列: 任务切成小块，GPU 跑完一块自动认领下一块，消除空闲等待
+- 断点续传: worker 定期写结果，中断后自动跳过已完成项
 - 增量计算: 多次用不同模型运行，结果追加到 rds 列表
-- 拉满利用率: 一次性将分片内全部 prompt 交给 vllm 自行调度
 
 输入/输出格式:
 {
@@ -34,8 +34,8 @@ RD(r, q) = PPL(answer | rationale, question) / PPL(answer | question)
   # 8 卡 DP，自动检测 GPU 数量
   python rd_calc.py -i input.jsonl -o output.jsonl -m /path/to/model
 
-  # 指定 4 卡
-  python rd_calc.py -i input.jsonl -o output.jsonl -m /path/to/model --num-gpus 4
+  # 指定 4 卡，每块 50 条任务
+  python rd_calc.py -i input.jsonl -o output.jsonl -m /path/to/model --num-gpus 4 --chunk-size 50
 
   # 中断后重新运行，自动续传
   python rd_calc.py -i input.jsonl -o output.jsonl -m /path/to/model
@@ -47,8 +47,6 @@ import math
 import os
 import sys
 import subprocess
-import signal
-import time
 from typing import List, Dict, Any, Optional, Set, Tuple
 from pathlib import Path
 
@@ -69,18 +67,22 @@ def parse_args():
     parser.add_argument("--num-gpus", type=int, default=None,
                         help="DP GPU 数量（默认自动检测可用 GPU 数）")
     parser.add_argument("--gpu-memory-utilization", type=float, default=0.92,
-                        help="GPU 显存利用率（默认 0.92，尽量拉满）")
+                        help="GPU 显存利用率（默认 0.92）")
     parser.add_argument("--max-model-len", type=int, default=8192)
-    parser.add_argument("--checkpoint-steps", type=int, default=500,
-                        help="每处理 N 条 reasoning 写一次 checkpoint")
+    parser.add_argument("--chunk-size", type=int, default=1024,
+                        help="动态队列每块任务数（默认 1024）")
+    parser.add_argument("--max-num-batched-tokens", type=int, default=2048,
+                        help="chunked prefill 每步最大 token 数，直接控制 prompt_logprobs 内存峰值"
+                             "（默认 2048，对应峰值约 1.5 GB；OOM 时调小，GPU 充裕时可调大）")
     parser.add_argument("--force", action="store_true",
                         help="强制重算（即使该模型已有 RD 记录）")
 
     # Worker 内部参数（对用户隐藏）
     parser.add_argument("--_worker", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--_gpu-id", type=int, default=0, help=argparse.SUPPRESS)
-    parser.add_argument("--_assign-file", type=str, help=argparse.SUPPRESS)
+    parser.add_argument("--_queue-dir", type=str, help=argparse.SUPPRESS)
     parser.add_argument("--_result-file", type=str, help=argparse.SUPPRESS)
+    parser.add_argument("--_total-items", type=int, default=0, help=argparse.SUPPRESS)
 
     return parser.parse_args()
 
@@ -123,14 +125,40 @@ def get_available_gpus() -> List[int]:
 
 
 # ============================================================================
+# 动态任务队列管理
+# ============================================================================
+
+def recover_queue(queue_dir: Path):
+    """恢复上次中断残留的 .claiming_* 文件，重新放回队列"""
+    for f in sorted(queue_dir.glob("chunk_*.claiming_*")):
+        base = f.name.rsplit('.claiming_', 1)[0]
+        target = queue_dir / (base + '.json')
+        if not target.exists():
+            f.rename(target)
+            print(f"  恢复未完成任务块: {target.name}")
+        else:
+            f.unlink()
+
+
+def claim_next_chunk(queue_dir: Path, gpu_id: int) -> Tuple[Optional[List], Optional[Path]]:
+    """原子性认领一个待处理任务块，返回 (items, claimed_path) 或 (None, None)"""
+    for chunk_file in sorted(queue_dir.glob("chunk_*.json")):
+        claimed = chunk_file.with_name(chunk_file.stem + f'.claiming_{gpu_id}')
+        try:
+            chunk_file.rename(claimed)
+            with open(claimed) as f:
+                items = json.load(f)
+            return items, claimed
+        except (FileNotFoundError, OSError):
+            continue  # 被其他 worker 抢先认领了，继续找下一块
+    return None, None
+
+
+# ============================================================================
 # PPL / RD 计算核心
 # ============================================================================
 
 def get_answer_start_token_idx(tokenizer, full_text: str, solution: str) -> int:
-    """
-    找到 solution 在 full_text 中对应的起始 token index。
-    rfind 定位字符串位置，tokenize 前缀得到 token 数。
-    """
     pos = full_text.rfind(solution)
     if pos == -1:
         pos = full_text.rfind(solution.strip())
@@ -173,30 +201,22 @@ def compute_ppl_from_logprobs(logprobs: list, answer_start_idx: int) -> float:
 
 
 # ============================================================================
-# Worker: 单 GPU 上运行 vllm 处理分配到的数据
+# Worker: 单 GPU，循环从队列认领任务块并处理
 # ============================================================================
 
 def worker_main(args):
-    """Worker 进程入口：加载模型，处理分配到的 (d_idx, r_idx) 列表"""
+    """Worker 进程入口：加载模型一次，循环认领任务块直到队列为空"""
     from vllm import LLM, SamplingParams
     from transformers import AutoTokenizer
     from tqdm import tqdm
 
     gpu_id = args._gpu_id
-    assign_file = args._assign_file
+    queue_dir = Path(args._queue_dir)
     result_file = args._result_file
     model_name = args.model_name or Path(args.model).name
     model_path = str(Path(args.model).resolve())
 
-    # 读取分配的任务
-    with open(assign_file, 'r') as f:
-        assignments = json.load(f)  # [(d_idx, r_idx), ...]
-
-    if not assignments:
-        print(f"[GPU {gpu_id}] 无任务，退出")
-        return
-
-    # 读取已完成的 checkpoint
+    # 读取已完成记录（断点续传）
     done_set: Set[Tuple[int, int]] = set()
     if os.path.exists(result_file):
         with open(result_file, 'r') as f:
@@ -205,107 +225,129 @@ def worker_main(args):
                 if line:
                     entry = json.loads(line)
                     done_set.add((entry["d_idx"], entry["r_idx"]))
+    print(f"[GPU {gpu_id}] 已有 {len(done_set)} 条完成记录（断点续传）")
 
-    remaining = [(d, r) for d, r in assignments if (d, r) not in done_set]
-    print(f"[GPU {gpu_id}] 分配 {len(assignments)} 条，已完成 {len(done_set)} 条，剩余 {len(remaining)} 条")
-
-    if not remaining:
-        print(f"[GPU {gpu_id}] 全部已完成，跳过")
-        return
-
-    # 加载原始数据（只读，用于构建 prompt）
+    # 加载数据（只读，用于构建 prompt）
     data = load_data(args.input)
 
-    # 加载模型
+    # 加载模型（只加载一次，循环复用）
     print(f"[GPU {gpu_id}] 加载模型: {args.model}")
     tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
     llm = LLM(
         model=args.model,
         gpu_memory_utilization=args.gpu_memory_utilization,
         max_model_len=args.max_model_len,
+        max_num_batched_tokens=args.max_num_batched_tokens,
+        enable_chunked_prefill=True,
         trust_remote_code=True,
     )
     sampling_params = SamplingParams(max_tokens=1, prompt_logprobs=1)
 
-    # 构建全部 prompt，一次性交给 vllm 调度
-    print(f"[GPU {gpu_id}] 构建 {len(remaining)} × 2 = {len(remaining)*2} 个 prompts...")
-    all_prompts = []
-    all_prefix_lens = []
-    prompt_map = []  # (idx_in_remaining, type)
+    total_processed = 0
+    total_items = args._total_items
+    pbar = tqdm(total=total_items, initial=len(done_set),
+                desc=f"[GPU {gpu_id}]", unit="条", position=gpu_id, leave=True)
 
-    for rem_idx, (d_idx, r_idx) in enumerate(tqdm(remaining, desc=f"[GPU {gpu_id}] 构建 prompts")):
-        item = data[d_idx]
-        question = item["question"]
-        reasoning = item["reasoning"][r_idx]
-        thought = reasoning["thought"]
-        solution = reasoning["solution"]
+    while True:
+        # 认领下一个任务块
+        chunk_items, claimed_path = claim_next_chunk(queue_dir, gpu_id)
+        if chunk_items is None:
+            pbar.close()
+            print(f"[GPU {gpu_id}] 队列已空，退出")
+            break
 
-        # with rationale
-        full_wr = build_prompt_with_rationale(tokenizer, question, thought, solution)
-        ans_start = get_answer_start_token_idx(tokenizer, full_wr, solution)
-        if ans_start == -1:
-            full_tokens = tokenizer.encode(full_wr, add_special_tokens=False)
-            sol_tokens = tokenizer.encode(solution, add_special_tokens=False)
-            ans_start = len(full_tokens) - len(sol_tokens)
-        all_prompts.append(full_wr)
-        all_prefix_lens.append(ans_start)
-        prompt_map.append((rem_idx, "with_r"))
+        # 跳过已完成的条目
+        remaining = [(d, r) for d, r in chunk_items if (d, r) not in done_set]
 
-        # without rationale
-        full_wor = build_prompt_without_rationale(tokenizer, question, solution)
-        ans_start = get_answer_start_token_idx(tokenizer, full_wor, solution)
-        if ans_start == -1:
-            full_tokens = tokenizer.encode(full_wor, add_special_tokens=False)
-            sol_tokens = tokenizer.encode(solution, add_special_tokens=False)
-            ans_start = len(full_tokens) - len(sol_tokens)
-        all_prompts.append(full_wor)
-        all_prefix_lens.append(ans_start)
-        prompt_map.append((rem_idx, "without_r"))
+        if not remaining:
+            # 整块都已完成（续传场景），直接标记 done
+            claimed_path.rename(claimed_path.with_name(
+                claimed_path.stem.rsplit(f'.claiming_{gpu_id}', 1)[0] + '.done'))
+            continue
 
-    # 一次性推理，让 vllm 自行调度 batch（拉满利用率）
-    print(f"[GPU {gpu_id}] 开始推理 {len(all_prompts)} 个 prompts...")
-    outputs = llm.generate(all_prompts, sampling_params, use_tqdm=True)
+        print(f"[GPU {gpu_id}] 认领 {claimed_path.name}，处理 {len(remaining)}/{len(chunk_items)} 条")
 
-    # 收集 PPL 结果
-    ppl_map: Dict[Tuple[int, str], float] = {}  # (rem_idx, type) -> ppl
-    for i, output in enumerate(outputs):
-        rem_idx, ptype = prompt_map[i]
-        prefix_len = all_prefix_lens[i]
-        prompt_logprobs = output.prompt_logprobs
-        if prompt_logprobs is None:
-            ppl = float('inf')
-        else:
-            ppl = compute_ppl_from_logprobs(prompt_logprobs, prefix_len)
-        ppl_map[(rem_idx, ptype)] = ppl
+        # 构建所有 prompt
+        all_prompts = []
+        all_prefix_lens = []
+        prompt_map = []  # (rem_idx, type)
 
-    # 计算 RD 并写入结果文件（追加模式）
-    print(f"[GPU {gpu_id}] 写入结果...")
-    with open(result_file, 'a', encoding='utf-8') as f:
         for rem_idx, (d_idx, r_idx) in enumerate(remaining):
-            ppl_wr = ppl_map.get((rem_idx, "with_r"), float('inf'))
-            ppl_wor = ppl_map.get((rem_idx, "without_r"), float('inf'))
+            item = data[d_idx]
+            question = item["question"]
+            reasoning = item["reasoning"][r_idx]
+            thought = reasoning["thought"]
+            solution = reasoning["solution"]
 
-            if ppl_wor > 0 and ppl_wor != float('inf'):
-                rd = ppl_wr / ppl_wor
-            else:
-                rd = float('inf')
+            # with rationale
+            full_wr = build_prompt_with_rationale(tokenizer, question, thought, solution)
+            ans_start = get_answer_start_token_idx(tokenizer, full_wr, solution)
+            if ans_start == -1:
+                full_tokens = tokenizer.encode(full_wr, add_special_tokens=False)
+                sol_tokens = tokenizer.encode(solution, add_special_tokens=False)
+                ans_start = len(full_tokens) - len(sol_tokens)
+            all_prompts.append(full_wr)
+            all_prefix_lens.append(ans_start)
+            prompt_map.append((rem_idx, "with_r"))
 
-            result = {
-                "d_idx": d_idx,
-                "r_idx": r_idx,
-                "model_name": model_name,
-                "model_path": model_path,
-                "ppl_with_rationale": ppl_wr,
-                "ppl_without_rationale": ppl_wor,
-                "rd": rd,
-            }
-            f.write(json.dumps(result, ensure_ascii=False) + '\n')
+            # without rationale
+            full_wor = build_prompt_without_rationale(tokenizer, question, solution)
+            ans_start = get_answer_start_token_idx(tokenizer, full_wor, solution)
+            if ans_start == -1:
+                full_tokens = tokenizer.encode(full_wor, add_special_tokens=False)
+                sol_tokens = tokenizer.encode(solution, add_special_tokens=False)
+                ans_start = len(full_tokens) - len(sol_tokens)
+            all_prompts.append(full_wor)
+            all_prefix_lens.append(ans_start)
+            prompt_map.append((rem_idx, "without_r"))
 
-    print(f"[GPU {gpu_id}] 完成! 处理 {len(remaining)} 条 reasoning")
+        # 推理（让 vllm 自行调度 batch）
+        outputs = llm.generate(all_prompts, sampling_params, use_tqdm=True)
+
+        # 收集 PPL
+        ppl_map: Dict[Tuple[int, str], float] = {}
+        for i, output in enumerate(outputs):
+            rem_idx, ptype = prompt_map[i]
+            prefix_len = all_prefix_lens[i]
+            prompt_logprobs = output.prompt_logprobs
+            ppl = float('inf') if prompt_logprobs is None else \
+                compute_ppl_from_logprobs(prompt_logprobs, prefix_len)
+            ppl_map[(rem_idx, ptype)] = ppl
+
+        # 写结果（追加，含完整上下文方便人工查看）
+        with open(result_file, 'a', encoding='utf-8') as f:
+            for rem_idx, (d_idx, r_idx) in enumerate(remaining):
+                ppl_wr = ppl_map.get((rem_idx, "with_r"), float('inf'))
+                ppl_wor = ppl_map.get((rem_idx, "without_r"), float('inf'))
+                rd = ppl_wr / ppl_wor if (ppl_wor > 0 and ppl_wor != float('inf')) else float('inf')
+                item = data[d_idx]
+                reasoning = item["reasoning"][r_idx]
+                result = {
+                    "d_idx": d_idx,
+                    "r_idx": r_idx,
+                    "question": item["question"],
+                    "thought": reasoning["thought"],
+                    "solution": reasoning["solution"],
+                    "model_name": model_name,
+                    "model_path": model_path,
+                    "ppl_with_rationale": ppl_wr,
+                    "ppl_without_rationale": ppl_wor,
+                    "rd": rd,
+                }
+                f.write(json.dumps(result, ensure_ascii=False) + '\n')
+                done_set.add((d_idx, r_idx))
+
+        total_processed += len(remaining)
+        pbar.update(len(remaining))
+
+        # 标记任务块完成
+        done_name = claimed_path.stem.rsplit(f'.claiming_{gpu_id}', 1)[0] + '.done'
+        claimed_path.rename(claimed_path.with_name(done_name))
+    print(f"[GPU {gpu_id}] 全部完成，共处理 {total_processed} 条 reasoning")
 
 
 # ============================================================================
-# Launcher: 数据分片 → 启动多 Worker → 合并结果
+# Launcher: 创建动态队列 → 启动多 Worker → 合并结果
 # ============================================================================
 
 def launcher_main(args):
@@ -313,7 +355,7 @@ def launcher_main(args):
     model_path = str(Path(args.model).resolve())
 
     print(f"{'='*60}")
-    print(f"  MORSD RD 计算 (DP 模式)")
+    print(f"  MORSD RD 计算 (DP + 动态任务队列)")
     print(f"{'='*60}")
     print(f"模型名称: {model_name}")
     print(f"模型路径: {model_path}")
@@ -348,29 +390,38 @@ def launcher_main(args):
 
     print(f"待计算: {len(need_compute)} 条 reasoning")
 
-    # 准备工作目录
+    # 准备工作目录和队列目录
     output_path = Path(args.output)
     work_dir = output_path.parent / f".rd_calc_{output_path.stem}_{model_name}"
     work_dir.mkdir(parents=True, exist_ok=True)
+    queue_dir = work_dir / "queue"
+    queue_dir.mkdir(exist_ok=True)
 
-    # 均匀分片
-    shards = [[] for _ in range(num_gpus)]
-    for i, item in enumerate(need_compute):
-        shards[i % num_gpus].append(item)
+    # 恢复上次中断残留的 claiming 文件
+    recover_queue(queue_dir)
 
-    for i, shard in enumerate(shards):
-        print(f"  GPU {gpu_ids[i]}: {len(shard)} 条 reasoning")
+    # 如果队列已有待处理块（续传），不重新创建；否则创建新的任务块
+    existing_pending = list(queue_dir.glob("chunk_*.json"))
+    if existing_pending:
+        print(f"发现 {len(existing_pending)} 个未完成任务块，继续上次计算")
+    else:
+        # 任务数不足 chunk_size 时，至少均分到每张 GPU，避免只有一张卡有活干
+        if len(need_compute) <= args.chunk_size:
+            effective_chunk_size = math.ceil(len(need_compute) / num_gpus)
+            print(f"任务数 ({len(need_compute)}) ≤ chunk_size ({args.chunk_size})，"
+                  f"均分为 {num_gpus} 块（每块约 {effective_chunk_size} 条）")
+        else:
+            effective_chunk_size = args.chunk_size
+        chunks = [need_compute[i:i + effective_chunk_size]
+                  for i in range(0, len(need_compute), effective_chunk_size)]
+        for c_idx, chunk in enumerate(chunks):
+            chunk_file = queue_dir / f"chunk_{c_idx:06d}.json"
+            with open(chunk_file, 'w') as f:
+                json.dump(chunk, f)
+        print(f"创建 {len(chunks)} 个任务块，每块最多 {effective_chunk_size} 条")
 
-    # 写分配文件
-    assign_files = []
-    result_files = []
-    for i in range(num_gpus):
-        af = work_dir / f"shard_{i}.assign.json"
-        rf = work_dir / f"shard_{i}.results.jsonl"
-        with open(af, 'w') as f:
-            json.dump(shards[i], f)
-        assign_files.append(str(af))
-        result_files.append(str(rf))
+    # 每个 worker 有独立的结果文件
+    result_files = [str(work_dir / f"worker_{i}.results.jsonl") for i in range(num_gpus)]
 
     # 启动 worker 子进程
     print(f"\n启动 {num_gpus} 个 worker 进程...")
@@ -386,10 +437,12 @@ def launcher_main(args):
             "--model", args.model,
             "--gpu-memory-utilization", str(args.gpu_memory_utilization),
             "--max-model-len", str(args.max_model_len),
+            "--max-num-batched-tokens", str(args.max_num_batched_tokens),
             "--_worker",
             "--_gpu-id", str(gpu_ids[i]),
-            "--_assign-file", assign_files[i],
+            "--_queue-dir", str(queue_dir),
             "--_result-file", result_files[i],
+            "--_total-items", str(len(need_compute)),
         ]
         if args.model_name:
             cmd.extend(["--model-name", args.model_name])
@@ -436,7 +489,6 @@ def launcher_main(args):
                     "rd": entry["rd"],
                 }
 
-                # 如果 force 模式，先移除旧记录
                 if args.force and "rds" in reasoning:
                     reasoning["rds"] = [
                         e for e in reasoning["rds"] if e.get("model_name") != model_name

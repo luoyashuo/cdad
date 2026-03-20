@@ -2,14 +2,14 @@
 # Copy this file and edit the paths/parameters for your experiment.
 
 # Basic configuration
-experiment_name: "qwen2_5_7b_grpo_8x40g"
+experiment_name: "llama3_8b_1b_grpo_8x40g"
 output_root: "/data/hf_home/datasets/Yaseal/CDAD_EXP/cot_rewrite"
 resume: true   # Auto-resume from last checkpoint on restart
 seed: 42
 
 # Model configuration
 model:
-  checkpoint_path: "/data/cdad/checkpoints/cot_rewriter/cot_rewriter_grpo/qwen2_5_7b_grpo_8x40g/global_step_70"
+  checkpoint_path: "/data/cdad/checkpoints/cot_rewriter/cot_rewriter_grpo/llama3_8b_1b_grpo_8x40g/global_step_70"
   # Format detection: auto / hf / lora / fsdp / megatron
   # auto: detects based on directory structure
   format: "auto"
@@ -35,7 +35,7 @@ rollout:
 
 # Correct Judge configuration (Step 3)
 correct_judge:
-  model_path: "/data/modelscope_cache/models/Qwen/Qwen3-4B"
+  model_path: "/data/modelscope_cache/models/Qwen/Qwen3-8B"
   enabled: true
   batch_size: 96           # Total items per step (same semantics as rollout; per-worker = batch_size / num_gpus)
   tensor_parallel_size: 1
