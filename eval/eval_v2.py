@@ -110,7 +110,8 @@ class CrossBenchmarkEvaluator:
 
     def __init__(self, config_file: str, resume: bool = False,
                  resume_dir: Optional[str] = None,
-                 output_dir_override: Optional[str] = None):
+                 output_dir_override: Optional[str] = None,
+                 force_rescore: bool = False):
         self.config_file = config_file
         self.config = self._load_config()
         self.model_path = self.config['model_path']
@@ -151,6 +152,9 @@ class CrossBenchmarkEvaluator:
         self.resume = resume or (resume_dir is not None)
         self.completed_benchmarks: Set[str] = set()
         
+        # 是否强制重新评分（即使 repeat 数量相同）
+        self.force_rescore = force_rescore
+        
         # vLLM 引擎
         self.engine: Optional[VLLMOfflineEngine] = None
         
@@ -163,6 +167,7 @@ class CrossBenchmarkEvaluator:
         logger.info(f"CrossBenchmarkEvaluator 初始化完成")
         logger.info(f"输出目录: {self.output_dir}")
         logger.info(f"版本: {self.version}")
+        logger.info(f"强制重新评分: {force_rescore}")
 
     def _load_config(self) -> Dict:
         with open(self.config_file, 'r', encoding='utf-8') as f:
@@ -329,22 +334,33 @@ class CrossBenchmarkEvaluator:
             )
 
         if loaded >= bench.total_prompts:
-            # 尝试复用已有评分：subsets 完全一致 且 effective_repeats == old_repeats 才跳过
-            if old_result_data is not None and effective_repeats == old_repeats:
-                old_subsets = set(old_result_data.get('subsets', []))
-                cur_subsets = set(bench.subsets.keys())
-                if old_subsets == cur_subsets:
-                    bench.per_repeat_scores = old_result_data.get('per_repeat_scores', [])
-                    bench.stats = {k: old_result_data[k] for k in ['mean', 'std', 'min', 'max']
-                                   if k in old_result_data}
+            # 预测充足，检查是否需要重新评分
+            # 默认：如果 repeats 相同且未指定 force_rescore，则跳过评分
+            should_rescore = self.force_rescore or (effective_repeats != old_repeats)
+            
+            if should_rescore:
+                bench.status = "scoring"
+                reason = "强制重新评分" if self.force_rescore else f"repeats 变化 ({old_repeats}→{effective_repeats})"
+                logger.info(f"[{bench.bench_name}] Resume: 预测充足 ({loaded}/{bench.total_prompts})，"
+                            f"将重新评分（原因: {reason}）")
+            else:
+                # 直接复用已有评分结果
+                if old_result_data and 'per_repeat_scores' in old_result_data:
+                    bench.per_repeat_scores = old_result_data['per_repeat_scores']
+                    bench.stats = {
+                        'mean': old_result_data.get('mean', 0),
+                        'std': old_result_data.get('std', 0),
+                        'min': old_result_data.get('min', 0),
+                        'max': old_result_data.get('max', 0),
+                    }
                     bench.status = "done"
-                    logger.info(f"[{bench.bench_name}] Resume: 完全跳过 "
-                                f"(effective_repeats={effective_repeats}, subsets={cur_subsets})")
-                    return loaded
-            # 预测充足但需重新评分（subsets 或 repeats 有变化）
-            bench.status = "scoring"
-            logger.info(f"[{bench.bench_name}] Resume: 预测充足 ({loaded}/{bench.total_prompts})，"
-                        f"需重新评分")
+                    self.completed_benchmarks.add(bench.bench_name)
+                    logger.info(f"[{bench.bench_name}] Resume: 预测充足且 repeats 相同 ({effective_repeats})，"
+                                f"跳过评分，直接复用已有结果 (mean={bench.stats['mean']:.4f})")
+                else:
+                    # 没有旧评分结果，需要重新评分
+                    bench.status = "scoring"
+                    logger.info(f"[{bench.bench_name}] Resume: 预测充足但无旧评分结果，将重新评分")
         else:
             logger.info(f"[{bench.bench_name}] Resume: 需补齐 "
                         f"{bench.total_prompts - loaded}/{bench.total_prompts} 条预测")
@@ -556,13 +572,16 @@ class CrossBenchmarkEvaluator:
     def _extract_all_prompts(self) -> List[PromptItem]:
         """从所有 BenchState 提取 PromptItem 列表。
 
-        排列策略：按 benchmark 分组（小 benchmark 优先），同一 benchmark 的 prompts
-        连续排列。这样小 benchmark 先完成推理，可以尽早开始评分（CPU 线程），
-        不阻塞后续大 benchmark 的推理。
-
-        benchmark 内部 shuffle 打散 repeat 的局部性，配合 max_dedup_n 限制，
-        确保 Worker 内有足够的 unique prompts 填满 GPU batch。
+        排列策略：
+        1. 按 benchmark 分组（小 benchmark 优先），同一 benchmark 的 prompts 连续排列。
+           这样小 benchmark 先完成推理，可以尽早开始评分（CPU 线程）。
+        2. benchmark 内部按 repeat 轮次排序：先完成 repeat 0（所有题目），再 repeat 1，...
+           这样中途中断时，已完成的数据是若干完整 repeat，便于 resume 和评分。
+        3. 每个 repeat 轮内部 shuffle，配合 max_dedup_n 限制，
+           确保 Worker 内有足够的 unique prompts 填满 GPU batch。
         """
+        from collections import defaultdict
+
         # 按 benchmark 分组收集
         bench_items: List[Tuple[int, str, List[PromptItem]]] = []
 
@@ -573,7 +592,10 @@ class CrossBenchmarkEvaluator:
 
             sp = self._config_to_sampling_params(bench.task_config.generation_config)
             existing_results = bench.results  # resume 加载的已有结果
-            items = []
+            repeats = bench.repeats
+
+            # 按 repeat 轮次分组收集
+            repeat_groups: Dict[int, List[PromptItem]] = defaultdict(list)
             skipped = 0
             for subset_name, dataset in bench.subsets.items():
                 for sample in dataset:
@@ -582,7 +604,7 @@ class CrossBenchmarkEvaluator:
                         skipped += 1
                         continue
                     prompt_text = self._messages_to_prompt(sample.input)
-                    items.append(PromptItem(
+                    item = PromptItem(
                         bench_name=bench.bench_name,
                         subset_name=subset_name,
                         sample_id=sample.id,
@@ -590,11 +612,22 @@ class CrossBenchmarkEvaluator:
                         prompt_text=prompt_text,
                         sampling_params=sp,
                         sample=sample,
-                    ))
+                    )
+                    repeat_idx = sample.id % repeats
+                    repeat_groups[repeat_idx].append(item)
+
             if skipped > 0:
-                logger.info(f"  {bench.bench_name}: 跳过 {skipped} 已有, 需补齐 {len(items)}")
-            # benchmark 内部 shuffle，打散 repeat 局部性
-            random.shuffle(items)
+                logger.info(f"  {bench.bench_name}: 跳过 {skipped} 已有, 需补齐 "
+                            f"{sum(len(g) for g in repeat_groups.values())}")
+
+            # 按 repeat 轮次排序：repeat 0 → repeat 1 → ...
+            # 每个 repeat 轮内部 shuffle，打散局部性
+            items = []
+            for r in sorted(repeat_groups.keys()):
+                group = repeat_groups[r]
+                random.shuffle(group)
+                items.extend(group)
+
             bench_items.append((len(items), bench.bench_name, items))
 
         # 按 benchmark 大小排序：小的先跑，先完成先评分
@@ -606,7 +639,7 @@ class CrossBenchmarkEvaluator:
             logger.info(f"  {name}: {size} prompts")
 
         logger.info(f"Prompt 提取完成: {len(all_items)} prompts, "
-                    f"来自 {len(bench_items)} benchmarks, 小 benchmark 优先")
+                    f"来自 {len(bench_items)} benchmarks, 小 benchmark 优先, repeat 轮次优先")
         return all_items
 
     def _run_global_inference(self, all_prompts: List[PromptItem]):
@@ -618,8 +651,13 @@ class CrossBenchmarkEvaluator:
         total = len(all_prompts)
         logger.info(f"开始全局推理: {total} prompts")
 
+        # 计算 resume 已加载的基线数量（不计入速度估算）
+        resumed_count = sum(
+            b.completed for b in self.bench_states.values() if b.status != "failed"
+        )
+
         # 初始化 StatusPrinter，接管 logger 的 StreamHandler
-        self._progress = StatusPrinter(self.bench_states)
+        self._progress = StatusPrinter(self.bench_states, resumed_done=resumed_count)
         _hijacked: List[logging.Handler] = []
         _status_handler: Optional[_StatusLogHandler] = None
         root_log = logging.getLogger()
@@ -737,6 +775,10 @@ class CrossBenchmarkEvaluator:
             except Exception as e:
                 logger.warning(f"[{item.bench_name}] 流式写入失败: {e}")
 
+            # 实时刷新进度显示
+            if self._progress is not None:
+                self._progress.refresh()
+
             # 检查是否完成
             if bench.completed >= bench.total_prompts:
                 if bench.status != "scoring":
@@ -820,7 +862,7 @@ class CrossBenchmarkEvaluator:
                     logger.info(f"  model_dump to dict")
                 
                 # 3. 提取分数
-                score = self._extract_score(result)
+                score = self._extract_score(result, bench)
                 scores.append(score)
                 logger.info(f"[{bench.bench_name}] repeat {repeat_idx + 1}: score={score:.4f}")
             
@@ -907,36 +949,62 @@ class CrossBenchmarkEvaluator:
         logger.info(f"[{bench.bench_name}] repeat_{repeat_idx}: 写入 {total_written} 条 predictions, 其中空结果 {empty_count} 条")
         return repeat_dir
 
-    def _extract_score(self, result) -> float:
+    def _extract_score(self, result, bench: Optional[BenchState] = None) -> float:
         """从 evalscope 结果中提取分数
-        
+
         result 可能是:
         - dict: {dataset_name: report_dict, ...}
         - Report 对象
         - List[Report]
+
+        当 bench 指定了 subset 时，只取该 subset 的分数（避免被其他 subset 的 0 分拉低均值）
         """
+        # 获取当前 benchmark 实际使用的 subset 集合
+        valid_subsets = set(bench.subsets.keys()) if bench and bench.subsets else None
+
         # 1. 处理 Report 对象
         if hasattr(result, 'score'):
             score = result.score
             logger.info(f"  Report.score = {score}")
             return float(score) if score is not None else 0.0
-        
+
         # 2. 处理 List[Report]
         if isinstance(result, list):
             scores = []
             for r in result:
                 if hasattr(r, 'score') and r.score is not None:
+                    # 如果 Report 有 name/dataset_name 属性，按 valid_subsets 过滤
+                    r_name = getattr(r, 'name', None) or getattr(r, 'dataset_name', None)
+                    if valid_subsets and r_name and r_name not in valid_subsets:
+                        continue
                     scores.append(float(r.score))
             final_score = np.mean(scores) if scores else 0.0
             logger.info(f"  List[Report] scores = {scores}, final = {final_score}")
             return final_score
-        
+
         # 3. 处理 dict
         if not isinstance(result, dict):
             logger.warning(f"_extract_score: 未知类型 {type(result)}")
             return 0.0
-        
-        # 遍历所有 dataset 结果
+
+        # run_task 返回的是 {dataset_name: report_dict} 格式
+        # 首先检查是否是单 dataset 结果（最常见情况）
+        if len(result) == 1:
+            dataset_result = list(result.values())[0]
+            if isinstance(dataset_result, dict):
+                score = dataset_result.get('score', dataset_result.get('accuracy', 0))
+                if score is not None:
+                    final_score = float(score)
+                    logger.info(f"  Single dataset result: score = {final_score}")
+                    return final_score
+            elif hasattr(dataset_result, 'score') and dataset_result.score is not None:
+                final_score = float(dataset_result.score)
+                logger.info(f"  Single dataset Report result: score = {final_score}")
+                return final_score
+
+        # 遍历 dataset 结果（多 dataset 情况）
+        # 注意：dict 的 key 是 dataset_name（如 'aime25'），不是 subset_name
+        # 所以不应该用 valid_subsets 去过滤，valid_subsets 是子集名称（如 'AIME2025-I'）
         scores = []
         for dataset_name, dataset_result in result.items():
             if isinstance(dataset_result, dict):
@@ -946,7 +1014,7 @@ class CrossBenchmarkEvaluator:
             elif hasattr(dataset_result, 'score'):
                 if dataset_result.score is not None:
                     scores.append(float(dataset_result.score))
-        
+
         final_score = np.mean(scores) if scores else 0.0
         logger.info(f"  Dict result: scores = {scores}, final = {final_score}")
         return final_score
@@ -1060,14 +1128,21 @@ class CrossBenchmarkEvaluator:
             if need_inference:
                 # 2. 初始化 vLLM 引擎（仅在有推理需求时）
                 vllm_cfg = self.config.get('vllm', {})
+                dp = vllm_cfg.get('dp', 1)
+                chunk_size = vllm_cfg.get('worker_chunk_size', 0)
+                # worker_chunk_size=0 表示全量分发，但会导致进度长时间无更新
+                # dp>1 时自动设置合理的 chunk_size，确保 Worker 更频繁地返回结果
+                if chunk_size == 0 and dp > 1:
+                    chunk_size = 64
+                    logger.info(f"worker_chunk_size 未设置，dp={dp}，自动调整为 {chunk_size} 以提高进度更新频率")
                 self.engine = VLLMOfflineEngine(
                     model_path=self.model_path,
                     tp=vllm_cfg.get('tp', 1),
-                    dp=vllm_cfg.get('dp', 1),
+                    dp=dp,
                     gpu_memory_utilization=vllm_cfg.get('gpu_memory_utilization', 0.9),
                     max_model_len=vllm_cfg.get('max_model_len', None),
                     enforce_eager=vllm_cfg.get('enforce_eager', True),
-                    worker_chunk_size=vllm_cfg.get('worker_chunk_size', 0),
+                    worker_chunk_size=chunk_size,
                     max_dedup_n=vllm_cfg.get('max_dedup_n', 8),
                 )
 
@@ -1166,14 +1241,23 @@ class StatusPrinter:
     BAR_W        = 20    # 进度条宽度（字符数）
     LINE_W       = 80    # 行宽上限，避免终端折行导致光标偏移
     MAX_TPS_HIST = 3     # 保留最近 N 次 TPS 记录
-    REDRAW_SEC   = 15    # 后台定期刷新间隔（秒）
+    REDRAW_SEC   = 5     # 后台定期刷新间隔（秒）
 
-    def __init__(self, bench_states: Dict[str, 'BenchState']):
+    EMA_ALPHA    = 0.1   # EMA 平滑系数（越小越平滑）
+
+    def __init__(self, bench_states: Dict[str, 'BenchState'], resumed_done: int = 0):
         self._bench_states  = bench_states
         self._lock          = threading.Lock()
-        self._tps_history: List[Tuple[float, str]] = []  # (window_tps, time_str)
+        self._tps_history: List[Tuple[float, str]] = []  # (ema_tps, time_str)
+        self._ema_tps: Optional[float] = None            # TPS 的 EMA 平滑值
         self._start_time    = time.time()
         self._initialized   = False
+
+        # Resume 基线：推理开始前已完成的数量，不计入速度估算
+        self._resumed_done  = resumed_done
+        self._last_done     = resumed_done   # 上次采样时的 done 计数
+        self._last_sample_t = self._start_time
+        self._ema_speed: Optional[float] = None  # EMA 平滑后的推理速度 (samples/sec)
 
         # 固定行数：分隔线×4 + 总进度×1 + bench×N + TPS×1
         self._block_height  = 4 + 1 + len(bench_states) + 1
@@ -1190,11 +1274,25 @@ class StatusPrinter:
         with self._lock:
             self._render(msg)
 
+    def refresh(self):
+        """由 _on_result 调用，限流重绘（最多每 0.5s 一次，避免频繁刷屏）。"""
+        now = time.time()
+        if now - getattr(self, '_last_refresh', 0) < 0.5:
+            return
+        self._last_refresh = now
+        with self._lock:
+            self._render(None)
+
     def record_tps(self, window_tps: float, _global_tps: float):
         """记录一次 TPS 读数并触发重绘。由 VLLMOfflineEngine._tps_callback 调用。"""
         ts = datetime.now().strftime("%H:%M:%S")
         with self._lock:
-            self._tps_history.append((window_tps, ts))
+            # 对 window_tps 做 EMA 平滑，避免大批次完成时出现毛刺
+            if self._ema_tps is None:
+                self._ema_tps = window_tps
+            else:
+                self._ema_tps = self.EMA_ALPHA * window_tps + (1 - self.EMA_ALPHA) * self._ema_tps
+            self._tps_history.append((self._ema_tps, ts))
             if len(self._tps_history) > self.MAX_TPS_HIST:
                 self._tps_history.pop(0)
             self._render(None)
@@ -1240,11 +1338,43 @@ class StatusPrinter:
                 if total > 0 else '░' * bw
         elap  = time.time() - self._start_time
         etime = f"{int(elap//3600):02d}:{int(elap%3600//60):02d}:{int(elap%60):02d}"
+        
+        # 计算 ETA（基于 EMA 平滑速度，排除 resume 数据的影响）
+        now = time.time()
+        new_done = done - self._resumed_done  # 本轮推理实际完成的数量
+        eta_str = "计算中..."
+        if new_done > 0 and done < total:
+            # 更新 EMA 速度：用增量 / 时间差计算瞬时速度
+            dt = now - self._last_sample_t
+            d_done = done - self._last_done
+            if dt > 0 and d_done > 0:
+                instant_speed = d_done / dt
+                if self._ema_speed is None:
+                    self._ema_speed = instant_speed
+                else:
+                    self._ema_speed = self.EMA_ALPHA * instant_speed + (1 - self.EMA_ALPHA) * self._ema_speed
+                self._last_done = done
+                self._last_sample_t = now
+
+            speed = self._ema_speed
+            if speed is None:
+                # 还没采样到增量，用全局平均作为 fallback
+                speed = new_done / elap if elap > 0 else 0
+
+            remain = total - done
+            eta_sec = remain / speed if speed > 0 else 0
+            eta_h = int(eta_sec // 3600)
+            eta_m = int((eta_sec % 3600) // 60)
+            eta_s = int(eta_sec % 60)
+            eta_str = f"{eta_h:02d}:{eta_m:02d}:{eta_s:02d}"
+        elif done >= total:
+            eta_str = "已完成"
+        
         n_done   = sum(1 for b in self._bench_states.values() if b.status == "done")
         n_total  = len(self._bench_states)
         total_line = (
             f" 总进度 [{bar}] {done:6d}/{total:<6d} {pct:5.1f}%"
-            f"  bench {n_done}/{n_total}  ⏱ {etime}"
+            f"  bench {n_done}/{n_total}  ⏱ {etime}  ETA: {eta_str}"
         )
 
         # ── per-bench ────────────────────────────────────────
@@ -1314,6 +1444,8 @@ def main():
                         help='指定续传的输出目录')
     parser.add_argument('--output-dir', type=str, default=None,
                         help='强制指定输出目录（覆盖自动生成的目录）')
+    parser.add_argument('--force-rescore', action='store_true',
+                        help='强制重新评分：即使 repeats 数量与上次相同也重新评分（默认会跳过）')
     
     args = parser.parse_args()
     
@@ -1326,7 +1458,8 @@ def main():
         config_file=args.config,
         resume=args.resume,
         resume_dir=args.resume_dir,
-        output_dir_override=args.output_dir
+        output_dir_override=args.output_dir,
+        force_rescore=args.force_rescore
     )
     
     evaluator.run()

@@ -148,9 +148,9 @@ PYEOF
 # ============================================================
 # 格式: 每两个相邻元素为一组 (model_path, base_config)
 declare -a JOBS=(
-    "/data/cdad/checkpoints/rewrite_cot/qwen2.5_7b_instruct_lora_sft_dual_30k"    "eval_configs/eval_all_sft_v2.yaml"
+    # "/data/cdad/checkpoints/rewrite_cot/qwen2.5_7b_instruct_lora_sft_dual_30k"    "eval_configs/eval_all_sft_v2.yaml"
     "/data/cdad/checkpoints/vallina_sft/qwen2.5_7b_instruct_lora_sft_30k"          "eval_configs/eval_all_baseline.yaml"
-    "/data/cdad/checkpoints/rewrite_cot/qwen2.5_7b_instruct_lora_sft_mix_15k"       "eval_configs/eval_all_sft_v2.yaml"
+    # "/data/cdad/checkpoints/rewrite_cot/qwen2.5_7b_instruct_lora_sft_mix_15k"       "eval_configs/eval_all_sft_v2.yaml"
 )
 
 # ============================================================
@@ -167,6 +167,10 @@ declare -a JOBS=(
 #   )
 RESUME=1
 RESUME_DIRS=()
+
+# FORCE_RESCORE=1: 强制重新评分，即使 repeats 数量与上次相同
+# 默认情况下，如果 repeats 相同，会跳过评分直接复用上次结果
+FORCE_RESCORE=0
 
 # ============================================================
 # Step 3: 自定义输出目录（可选）
@@ -240,6 +244,13 @@ for (( i=0; i<${#JOBS[@]}; i+=2 )); do
         log "  输出目录 : $OUTPUT_DIR"
     fi
 
+    # 构造强制重新评分参数
+    FORCE_RESCORE_FLAG=""
+    if [ "$FORCE_RESCORE" -eq 1 ]; then
+        FORCE_RESCORE_FLAG="--force-rescore"
+        log "  评分模式 : 强制重新评分"
+    fi
+
     # 若是未 merge 的 LoRA，先自动 merge
     maybe_merge_lora "$MODEL_PATH" || { FAILED=$((FAILED + 1)); continue; }
 
@@ -249,7 +260,7 @@ for (( i=0; i<${#JOBS[@]}; i+=2 )); do
     # 运行 eval_v2.py
     log "  开始运行 eval_v2.py..."
     # shellcheck disable=SC2086
-    python -u eval_v2.py "$TMP_CONFIG" $THIS_RESUME_FLAG $OUTPUT_DIR_FLAG > "$LOG_FILE" 2>&1
+    python -u eval_v2.py "$TMP_CONFIG" $THIS_RESUME_FLAG $OUTPUT_DIR_FLAG $FORCE_RESCORE_FLAG > "$LOG_FILE" 2>&1
     EXIT_CODE=$?
 
     if [ $EXIT_CODE -eq 0 ]; then

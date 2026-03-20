@@ -71,6 +71,33 @@ class SGLangCorrectJudgeActor:
         cuda_devices_str = ",".join(map(str, gpu_ids))
         os.environ["CUDA_VISIBLE_DEVICES"] = cuda_devices_str
 
+        # Set unique MASTER_PORT to avoid torch.distributed TCP rendezvous port conflicts
+        # when multiple CorrectJudge workers initialize in parallel on the same machine.
+        # Dynamically find an available port instead of using a fixed offset,
+        # to avoid EADDRINUSE errors when ports are still in TIME_WAIT state.
+        import socket
+        master_port = base_port + 500
+        max_master_port = min(base_port + 999, 65535)
+        found_port = False
+        for offset in range(100):
+            candidate = base_port + 500 + offset
+            if candidate > max_master_port:
+                break
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                    s.bind(("127.0.0.1", candidate))
+                    master_port = candidate
+                    found_port = True
+                    break
+            except OSError:
+                continue
+        if not found_port:
+            logger.warning(f"[{worker_name}] Could not find available MASTER_PORT in [{base_port + 500}, {max_master_port}], using {master_port}")
+        os.environ["MASTER_PORT"] = str(master_port)
+        os.environ["MASTER_ADDR"] = "127.0.0.1"
+        logger.info(f"[{worker_name}] Using MASTER_PORT={master_port}")
+
         # Log GPU memory status
         def get_nvidia_smi_memory_for_gpu(gpu_idx):
             try:

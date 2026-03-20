@@ -24,10 +24,10 @@ vllm:
   # - eval_batch_size: ThreadPoolExecutor 并发提交数（推荐 4096）
   # - max_dedup_n: n 参数去重上限（0=不限, 8=推荐）。限制 n 可增加 unique prompts 数，
   #   提高 GPU batch 利用率。如 AIME 30题×64 repeats, n=8 → 每卡 30×8=240 有效序列
-  # - worker_chunk_size: 每次分发给 Worker 的上限（0=不限, 按 benchmark 全量均分）
-  #   设为 0 可让同一 benchmark 一次性打满所有 Worker，优先完成 → 尽早评分
+  # - worker_chunk_size: 每次分发给 Worker 的上限。dp>1 时 0 会自动设为 64，
+  #   确保进度实时更新。可手动设置更小值（如 32）获取更细粒度的进度
   # - tps_interval: TPS 打印间隔（秒），设为 0 可禁用
-  eval_batch_size: 4096
+  eval_batch_size: 768
   max_dedup_n: 8
   worker_chunk_size: 0
   tps_interval: 30
@@ -89,22 +89,23 @@ benchmarks:
   # ==================== General Benchmarks ====================
   GPQA:
     dataset_name: "gpqa_extend"
-    repeats: 8
-    temperature: 0.6
+    repeats: 4
+    temperature: 1.0
     max_tokens: 28000
     few_shot_num: 0
     use_sandbox: false
 
   MMLUProNoMath:
     dataset_name: "mmlu_pro_no_math"
-    repeats: 4
+    repeats: 1
     temperature: 1.0
     max_tokens: 28000
     few_shot_num: 0
 
   ARC:
     dataset_name: "arc"
-    repeats: 4
+    subset: "ARC-Challenge"
+    repeats: 3
     temperature: 1.0
     max_tokens: 28000
     few_shot_num: 0

@@ -78,14 +78,23 @@ class SGLangFSFActor:
         # to avoid EADDRINUSE errors when ports are still in TIME_WAIT state.
         import socket
         master_port = base_port + 500
+        max_master_port = min(base_port + 999, 65535)
+        found_port = False
         for offset in range(100):
+            candidate = base_port + 500 + offset
+            if candidate > max_master_port:
+                break
             try:
                 with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
                     s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-                    s.bind(("127.0.0.1", master_port))
+                    s.bind(("127.0.0.1", candidate))
+                    master_port = candidate
+                    found_port = True
                     break
             except OSError:
-                master_port = base_port + 500 + offset + 1
+                continue
+        if not found_port:
+            logger.warning(f"[{worker_name}] Could not find available MASTER_PORT in [{base_port + 500}, {max_master_port}], using {master_port}")
         os.environ["MASTER_PORT"] = str(master_port)
         os.environ["MASTER_ADDR"] = "127.0.0.1"
         logger.info(f"[{worker_name}] Using MASTER_PORT={master_port}")
