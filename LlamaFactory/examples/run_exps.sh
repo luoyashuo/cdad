@@ -13,7 +13,7 @@ export SWANLAB_API_KEY="xmtHYzg2Bw5uh1dprg81E"
 # 日志目录
 LOG_DIR="logs"
 
-TRAIN_PID=2944521  
+TRAIN_PID=3028943  
 
 echo "等待训练进程 PID $TRAIN_PID 结束..."
 while kill -0 "$TRAIN_PID" 2>/dev/null; do
@@ -35,8 +35,10 @@ declare -a CONFIGS=(
     # "examples/rewrite_cot/qwen2.5_7b_instruct_full_sft_dual_30k.yaml"
     # "examples/rewrite_cot/qwen2.5_7b_instruct_lora_sft_dual_30k.yaml"
     # "examples/vallina_sft/qwen2.5_7b_instruct_lora_sft_30k.yaml"
-    "examples/rewrite_cot/qwen2.5_7b_instruct_lora_sft_mix_15k.yaml"
-
+    # "examples/rewrite_cot/qwen2.5_7b_instruct_lora_sft_mix_15k.yaml"
+    "examples/rewrite_cot/llama3_1b_instruct_full_sft_mix_30k_r25.yaml"
+    "examples/rewrite_cot/llama3_1b_instruct_full_sft_mix_30k_r50.yaml"
+    "examples/rewrite_cot/llama3_1b_instruct_full_sft_mix_30k_r75.yaml"
 
 )
 

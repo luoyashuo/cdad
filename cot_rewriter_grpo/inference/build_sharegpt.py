@@ -202,6 +202,7 @@ def build_dataset(
     build_mode: str = "single",
     question_limit: Optional[int] = None,
     mix_rewrite_ratio: float = 0.5,
+    target_count: Optional[int] = None,
 ) -> Dict[str, int]:
     """
     Build ShareGPT dataset from a list of records.
@@ -209,12 +210,14 @@ def build_dataset(
     Args:
         build_mode: "single" – one sample per question using rewrite_cot (original behavior).
                     "dual"   – two samples per question: original_cot and rewrite_cot.
-                    "mix"    – one sample per question, randomly choosing rewrite_cot or
-                               original_cot per question based on mix_rewrite_ratio.
-                               Only questions with a valid rewrite (after filtering) are included.
+                    "mix"    – target_count samples total. First fill floor(target_count *
+                               mix_rewrite_ratio) slots from questions with valid rewrites
+                               (after filtering); then fill the remainder with original_cot
+                               from unused questions (no duplicate questions).
         question_limit: if set, randomly sample this many questions before building.
-        mix_rewrite_ratio: (mix mode only) fraction of questions that use rewrite_cot; the
-                           rest use original_cot. Default 0.5.
+        mix_rewrite_ratio: (mix mode only) fraction of target_count that uses rewrite_cot.
+        target_count: (mix mode only) desired total output samples. If None, uses all
+                      questions with valid rewrites as rewrite samples (old behavior).
 
     Returns stats dict: total, selected, skipped, output_samples, mix_rewrite, mix_original.
     """
@@ -231,6 +234,78 @@ def build_dataset(
     output_samples = 0
     mix_rewrite = 0
     mix_original = 0
+
+    if build_mode == "mix":
+        # Pre-pass: split into valid-rewrite pool and no-rewrite pool
+        valid_rewrite_pool: List[tuple] = []  # (record, best_rewrite)
+        no_rewrite_pool: List[Dict] = []
+
+        for record in records:
+            rewrites = record.get("rewrite_cots", [])
+            best = select_best_rewrite(
+                rewrites,
+                filter_correct_only=filter_correct_only,
+                filter_fsf_positive=filter_fsf_positive,
+                filter_fsf_zero=filter_fsf_zero,
+                strategy=strategy,
+            )
+            if best is not None:
+                valid_rewrite_pool.append((record, best))
+            else:
+                no_rewrite_pool.append(record)
+
+        skipped = len(no_rewrite_pool)
+
+        # Determine how many rewrite vs original samples
+        n_total = target_count if target_count is not None else len(valid_rewrite_pool)
+        n_rewrite = min(int(round(n_total * mix_rewrite_ratio)), len(valid_rewrite_pool))
+        n_original = n_total - n_rewrite
+
+        # Shuffle and partition valid_rewrite_pool
+        random.shuffle(valid_rewrite_pool)
+        rewrite_selected = valid_rewrite_pool[:n_rewrite]
+        remaining_valid = valid_rewrite_pool[n_rewrite:]
+
+        # Build original pool: remaining valid records + no-rewrite records (no duplicate questions)
+        original_pool: List[Dict] = [r for r, _ in remaining_valid] + no_rewrite_pool
+        random.shuffle(original_pool)
+        original_selected = original_pool[:n_original]
+
+        if len(original_selected) < n_original:
+            print(
+                f"WARNING: Not enough original samples to fill target. "
+                f"Need {n_original}, have {len(original_selected)}. "
+                f"Output will be {n_rewrite + len(original_selected)} samples."
+            )
+
+        selected = len(rewrite_selected)
+
+        # Build all samples, then shuffle before writing
+        all_samples = []
+        for record, best in rewrite_selected:
+            all_samples.append((_make_sharegpt_sample(record["question"], best["rewrite_cot"], record.get("solution", "")), "rewrite"))
+        for record in original_selected:
+            all_samples.append((_make_sharegpt_sample(record["question"], record.get("original_cot", ""), record.get("solution", "")), "original"))
+
+        random.shuffle(all_samples)
+
+        with open(output_file, "w") as fout:
+            for sample, kind in all_samples:
+                fout.write(json.dumps(sample, ensure_ascii=False) + "\n")
+                if kind == "rewrite":
+                    mix_rewrite += 1
+                else:
+                    mix_original += 1
+                output_samples += 1
+
+        return {
+            "total": total,
+            "selected": selected,
+            "skipped": skipped,
+            "output_samples": output_samples,
+            "mix_rewrite": mix_rewrite,
+            "mix_original": mix_original,
+        }
 
     with open(output_file, "w") as fout:
         for record in records:
@@ -263,19 +338,6 @@ def build_dataset(
             if build_mode == "dual":
                 fout.write(json.dumps(
                     _make_sharegpt_sample(question, rewrite_cot, solution),
-                    ensure_ascii=False,
-                ) + "\n")
-                output_samples += 1
-            elif build_mode == "mix":
-                # Randomly pick rewrite or original for this question
-                if random.random() < mix_rewrite_ratio:
-                    cot = rewrite_cot
-                    mix_rewrite += 1
-                else:
-                    cot = record.get("original_cot", "")
-                    mix_original += 1
-                fout.write(json.dumps(
-                    _make_sharegpt_sample(question, cot, solution),
                     ensure_ascii=False,
                 ) + "\n")
                 output_samples += 1
@@ -422,6 +484,9 @@ def main():
         sys.exit(1)
 
     mix_rewrite_ratio = float(db_cfg.get("mix_rewrite_ratio", 0.5))
+    target_count = db_cfg.get("target_count", None)
+    if target_count is not None:
+        target_count = int(target_count)
 
     # Determine input/output paths
     if args.input_file:
@@ -461,6 +526,7 @@ def main():
     print(f"  Strategy:       {strategy}")
     if build_mode == "mix":
         print(f"  Mix ratio:      rewrite={mix_rewrite_ratio:.2f}, original={1-mix_rewrite_ratio:.2f}")
+        print(f"  Target count:   {target_count if target_count is not None else 'all valid rewrites'}")
 
     stats = build_dataset(
         records=records,
@@ -473,6 +539,7 @@ def main():
         build_mode=build_mode,
         question_limit=question_limit,
         mix_rewrite_ratio=mix_rewrite_ratio,
+        target_count=target_count,
     )
 
     print(f"\nDone:")

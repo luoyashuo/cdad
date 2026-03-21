@@ -4,12 +4,82 @@ The logic in this file largely borrows from Qwen2.5-Math codebase at https://git
 # flake8: noqa
 import re
 import regex
+import multiprocessing
 from latex2sympy2_extended import latex2sympy
 from math import isclose
 from sympy import N, simplify
 from sympy.parsing.latex import parse_latex
 from sympy.parsing.sympy_parser import parse_expr
 from word2number import w2n
+
+# sympy 操作的超时时间（秒），防止 simplify/equals 在复杂表达式上无限 hang
+_SYMPY_TIMEOUT = 5
+
+
+def _symbolic_equal_in_process(a_str, b_str, result_queue):
+    """在独立子进程中运行完整的 symbolic_equal（包括 parse + simplify）。
+    子进程有独立 GIL，超时后可被 kill()，不会拖慢主进程。"""
+    try:
+        def _parse(s):
+            for f in [parse_latex, parse_expr, latex2sympy]:
+                try:
+                    return f(s.replace('\\\\', '\\'))
+                except Exception:
+                    try:
+                        return f(s)
+                    except Exception:
+                        pass
+            return s
+
+        a = _parse(a_str)
+        b = _parse(b_str)
+
+        # direct equal
+        try:
+            if str(a) == str(b) or a == b:
+                result_queue.put(True)
+                return
+        except Exception:
+            pass
+
+        # simplify equal
+        try:
+            if a.equals(b) or simplify(a - b) == 0:
+                result_queue.put(True)
+                return
+        except Exception:
+            pass
+
+        # equation equal
+        try:
+            if (abs(a.lhs - a.rhs)).equals(abs(b.lhs - b.rhs)):
+                result_queue.put(True)
+                return
+        except Exception:
+            pass
+
+        # numeric from sympy
+        try:
+            if isclose(float(N(a)), float(N(b)), rel_tol=1e-4):
+                result_queue.put(True)
+                return
+        except Exception:
+            pass
+
+        # matrix
+        try:
+            if a.shape == b.shape:
+                _a = a.applyfunc(lambda x: round(x, 3))
+                _b = b.applyfunc(lambda x: round(x, 3))
+                if _a.equals(_b):
+                    result_queue.put(True)
+                    return
+        except Exception:
+            pass
+
+        result_queue.put(False)
+    except Exception:
+        result_queue.put(False)
 
 
 def convert_word_number(text: str) -> str:
@@ -483,59 +553,24 @@ def numeric_equal(prediction: float, reference: float):
 
 def symbolic_equal(a, b):
 
-    def _parse(s):
-        for f in [parse_latex, parse_expr, latex2sympy]:
-            try:
-                return f(s.replace('\\\\', '\\'))
-            except Exception:
-                try:
-                    return f(s)
-                except Exception:
-                    pass
-        return s
+    # 输入过长（模型输出了垃圾）直接跳过
+    if len(str(a)) > 500 or len(str(b)) > 500:
+        return False
 
-    a = _parse(a)
-    b = _parse(b)
-
-    # direct equal
+    # 在子进程中运行，超时后直接 kill，不影响主进程 GIL
+    ctx = multiprocessing.get_context('fork')
+    q = ctx.Queue()
+    p = ctx.Process(target=_symbolic_equal_in_process, args=(str(a), str(b), q))
+    p.start()
+    p.join(timeout=_SYMPY_TIMEOUT)
+    if p.is_alive():
+        p.kill()
+        p.join()
+        return False
     try:
-        if str(a) == str(b) or a == b:
-            return True
+        return q.get_nowait()
     except Exception:
-        pass
-
-    # simplify equal
-    try:
-        if a.equals(b) or simplify(a - b) == 0:
-            return True
-    except Exception:
-        pass
-
-    # equation equal
-    try:
-        if (abs(a.lhs - a.rhs)).equals(abs(b.lhs - b.rhs)):
-            return True
-    except Exception:
-        pass
-
-    try:
-        if numeric_equal(float(N(a)), float(N(b))):
-            return True
-    except Exception:
-        pass
-
-    # matrix
-    try:
-        # if a and b are matrix
-        if a.shape == b.shape:
-            _a = a.applyfunc(lambda x: round(x, 3))
-            _b = b.applyfunc(lambda x: round(x, 3))
-            if _a.equals(_b):
-                return True
-    except Exception:
-        pass
-
-    return False
+        return False
 
 
 if __name__ == '__main__':

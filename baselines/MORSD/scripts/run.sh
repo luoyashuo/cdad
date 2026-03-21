@@ -8,14 +8,14 @@ while kill -0 "$TRAIN_PID" 2>/dev/null; do
     echo "进程仍在进行中，10s 后检查..."
     sleep 10
 done
-log "进程已结束"
+echo "进程已结束"
 
 
 SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 PYTHON="/home/luoys/cdad/.venv/bin/python"
 
-INPUT="/data/hf_home/datasets/Yaseal/CDAD_EXP/deepmath_sft_30k/train_1000.jsonl"
-OUTPUT="/data/hf_home/datasets/Yaseal/CDAD_EXP/deepmath_sft_30k/train_morsd_1000.jsonl"
+INPUT="/data/hf_home/datasets/Yaseal/CDAD_EXP/deepmath_sft_30k/train.jsonl"
+OUTPUT="/data/hf_home/datasets/Yaseal/CDAD_EXP/deepmath_sft_30k/train_morsd.jsonl"
 
 NUM_GPUS=8
 MAX_MODEL_LEN=16384

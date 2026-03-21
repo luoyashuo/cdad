@@ -57,3 +57,47 @@ nohup huggingface-cli download \
     --local-dir-use-symlinks False \
     --local-dir ${local_dir} \
     ${model_name} &> ${log_file} 2>&1 &
+
+
+# export HF_ENDPOINT=https://hf-mirror.com
+export HF_ENDPOINT=https://huggingface.co
+export HF_HOME=/data/hf_home
+model_name=asas-ai/Llama-3.2-1B-Open-R1-Distill
+local_dir=/data/hf_home/models/${model_name//\//-}
+log_file=${local_dir}.log
+mkdir -p ${log_file%/*}
+echo ${log_file}
+nohup huggingface-cli download \
+    --resume-download \
+    --local-dir-use-symlinks False \
+    --local-dir ${local_dir} \
+    ${model_name} &> ${log_file} 2>&1 &
+
+
+
+export HF_ENDPOINT=https://huggingface.co
+export HF_HOME=/data/hf_home
+model_name=Yaseal/llama3_3b_instruct_vallina_full_sft_30k
+local_dir=/data/hf_home/models/${model_name//\//-}
+log_file=${local_dir}.log
+mkdir -p ${log_file%/*}
+echo ${log_file}
+nohup huggingface-cli download \
+    --resume-download \
+    --local-dir-use-symlinks False \
+    --local-dir ${local_dir} \
+    ${model_name} &> ${log_file} 2>&1 &
+
+
+export HF_ENDPOINT=https://huggingface.co
+export HF_HOME=/data/hf_home
+model_name=Yaseal/llama3_1b_instruct_vallina_full_sft_30k
+local_dir=/data/hf_home/models/${model_name//\//-}
+log_file=${local_dir}.log
+mkdir -p ${log_file%/*}
+echo ${log_file}
+nohup huggingface-cli download \
+    --resume-download \
+    --local-dir-use-symlinks False \
+    --local-dir ${local_dir} \
+    ${model_name} &> ${log_file} 2>&1 &

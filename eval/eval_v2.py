@@ -1111,11 +1111,22 @@ class CrossBenchmarkEvaluator:
             logger.error("没有有效的 benchmark 可以评估")
             return
 
-        # 立即触发需要重新评分的 benchmark（repeats 变更或 crash 后已有足够预测）
+        # 先同步完成需要重新评分的 benchmark（避免与推理引擎 / StatusPrinter 并发导致 hang）
         scoring_benches = {k: v for k, v in active_benches.items() if v.status == "scoring"}
-        for bench in scoring_benches.values():
-            logger.info(f"[{bench.bench_name}] 触发重新评分...")
-            self._scoring_pool.submit(self._score_benchmark, bench)
+        if scoring_benches:
+            logger.info(f"先完成 {len(scoring_benches)} 个 benchmark 的评分（同步）...")
+            scoring_futures = []
+            for bench in scoring_benches.values():
+                logger.info(f"[{bench.bench_name}] 触发重新评分...")
+                scoring_futures.append(
+                    self._scoring_pool.submit(self._score_benchmark, bench))
+            # 等待所有评分完成，再启动推理引擎
+            for fut in scoring_futures:
+                try:
+                    fut.result()
+                except Exception as e:
+                    logger.error(f"评分异常: {e}")
+            logger.info("所有 pending 评分已完成")
 
         # 需要推理的 benchmark
         need_inference = {k: v for k, v in active_benches.items()

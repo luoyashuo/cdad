@@ -27,7 +27,7 @@ vllm:
   # - worker_chunk_size: 每次分发给 Worker 的上限。dp>1 时 0 会自动设为 64，
   #   确保进度实时更新。可手动设置更小值（如 32）获取更细粒度的进度
   # - tps_interval: TPS 打印间隔（秒），设为 0 可禁用
-  eval_batch_size: 768
+  eval_batch_size: 1024
   max_dedup_n: 8
   worker_chunk_size: 0
   tps_interval: 30
@@ -43,7 +43,7 @@ benchmarks:
   # ==================== MATH Benchmarks ====================
   AIME25:
     dataset_name: "aime25"
-    repeats: 16
+    repeats: 24
     temperature: 0.6
     max_tokens: 28000
     few_shot_num: 0
@@ -51,7 +51,7 @@ benchmarks:
 
   AIME24:
     dataset_name: "aime24"
-    repeats: 16
+    repeats: 24
     temperature: 0.6
     max_tokens: 28000
     few_shot_num: 0
