@@ -254,7 +254,7 @@ python rd_calc.py \
 python build_dataset_morsd.py \
     -i /data/hf_home/datasets/Yaseal/CDAD_EXP/deepmath_sft_30k/train_morsd.jsonl \
     -o /data/hf_home/datasets/Yaseal/CDAD_EXP/deepmath_morsd_30k \
-    -m Llama-3.2-3B-Instruct \
+    -m /data/modelscope_cache/models/LLM-Research/Llama-3.2-3B-Instruct \
     -k 1 \
     --train-ratio 0.99 \
     -r ../LlamaFactory/data/dataset_info.json

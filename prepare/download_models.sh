@@ -75,7 +75,8 @@ nohup huggingface-cli download \
 
 
 
-export HF_ENDPOINT=https://huggingface.co
+# export HF_ENDPOINT=https://huggingface.co
+export HF_ENDPOINT=https://hf-mirror.com
 export HF_HOME=/data/hf_home
 model_name=Yaseal/llama3_3b_instruct_vallina_full_sft_30k
 local_dir=/data/hf_home/models/${model_name//\//-}
@@ -89,7 +90,8 @@ nohup huggingface-cli download \
     ${model_name} &> ${log_file} 2>&1 &
 
 
-export HF_ENDPOINT=https://huggingface.co
+# export HF_ENDPOINT=https://huggingface.co
+export HF_ENDPOINT=https://hf-mirror.com
 export HF_HOME=/data/hf_home
 model_name=Yaseal/llama3_1b_instruct_vallina_full_sft_30k
 local_dir=/data/hf_home/models/${model_name//\//-}

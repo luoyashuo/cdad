@@ -76,7 +76,7 @@ kill_stray_ray() {
 # 可选：等待训练进程结束
 # ============================================================
 # 如果需要等待训练结束，取消下面两行的注释并设置正确的 PID
-TRAIN_PID=3060346  # 训练脚本 PID
+TRAIN_PID=630715  # 训练脚本 PID
 
 if [ -n "$TRAIN_PID" ]; then
     log "等待训练进程 PID $TRAIN_PID 结束..."
@@ -150,11 +150,14 @@ declare -a JOBS=(
     # "/data/cdad/checkpoints/rewrite_cot/qwen2.5_7b_instruct_lora_sft_dual_30k"    "eval_configs/eval_all_sft_v2.yaml"
     # "/data/cdad/checkpoints/vallina_sft/qwen2.5_7b_instruct_lora_sft_30k"          "eval_configs/eval_all_baseline.yaml"
     # "/data/cdad/checkpoints/rewrite_cot/qwen2.5_7b_instruct_lora_sft_mix_15k"       "eval_configs/eval_all_sft_v2.yaml"
-    "/data/cdad/checkpoints/rewrite_cot/llama3_1b_instruct_full_sft_mix_30k_r25"       "eval_configs/eval_all_sft_v2.yaml"
-    "/data/cdad/checkpoints/rewrite_cot/llama3_1b_instruct_full_sft_mix_30k_r50"       "eval_configs/eval_all_sft_v2.yaml"
-    "/data/cdad/checkpoints/rewrite_cot/llama3_1b_instruct_full_sft_mix_30k_r75"       "eval_configs/eval_all_sft_v2.yaml"
-    "/data/modelscope_cache/models/LLM-Research/Llama-3.2-1B-Instruct"      "eval_configs/eval_all_baseline.yaml"
-    "/data/modelscope_cache/models/LLM-Research/Llama-3.2-3B-Instruct"      "eval_configs/eval_all_baseline.yaml"
+    # "/data/cdad/checkpoints/rewrite_cot/llama3_1b_instruct_full_sft_mix_30k_r25"       "eval_configs/eval_all_sft_v2.yaml"
+    # "/data/cdad/checkpoints/rewrite_cot/llama3_1b_instruct_full_sft_mix_30k_r50"       "eval_configs/eval_all_sft_v2.yaml"
+    # "/data/cdad/checkpoints/rewrite_cot/llama3_1b_instruct_full_sft_mix_30k_r75"       "eval_configs/eval_all_sft_v2.yaml"
+    # "/data/modelscope_cache/models/LLM-Research/Llama-3.2-1B-Instruct"      "eval_configs/eval_all_baseline.yaml"
+    # "/data/modelscope_cache/models/LLM-Research/Llama-3.2-3B-Instruct"      "eval_configs/eval_all_baseline.yaml"
+    "/data/cdad/checkpoints/rewrite_cot/llama3_1b_instruct_full_sft_mix_30k_r100"       "eval_configs/eval_all_sft_v2.yaml"
+    "/data/hf_home/models/Yaseal-llama3_1b_instruct_vallina_full_sft_30k"      "eval_configs/eval_all_sft_v2.yaml"
+    "/data/hf_home/models/Yaseal-llama3_3b_instruct_vallina_full_sft_30k"      "eval_configs/eval_all_sft_v2.yaml"
 )
 
 # ============================================================

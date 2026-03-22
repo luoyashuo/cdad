@@ -36,9 +36,10 @@ declare -a CONFIGS=(
     # "examples/rewrite_cot/qwen2.5_7b_instruct_lora_sft_dual_30k.yaml"
     # "examples/vallina_sft/qwen2.5_7b_instruct_lora_sft_30k.yaml"
     # "examples/rewrite_cot/qwen2.5_7b_instruct_lora_sft_mix_15k.yaml"
-    "examples/rewrite_cot/llama3_1b_instruct_full_sft_mix_30k_r25.yaml"
-    "examples/rewrite_cot/llama3_1b_instruct_full_sft_mix_30k_r50.yaml"
-    "examples/rewrite_cot/llama3_1b_instruct_full_sft_mix_30k_r75.yaml"
+    # "examples/rewrite_cot/llama3_1b_instruct_full_sft_mix_30k_r25.yaml"
+    # "examples/rewrite_cot/llama3_1b_instruct_full_sft_mix_30k_r50.yaml"
+    # "examples/rewrite_cot/llama3_1b_instruct_full_sft_mix_30k_r75.yaml"
+    "examples/rewrite_cot/llama3_1b_instruct_full_sft_mix_30k_r100.yaml"
 
 )
 
@@ -54,7 +55,8 @@ declare -a NAMES=(
     # "qwen2.5_7b_instruct_full_sft_dual_30k"
     # "qwen2.5_7b_instruct_lora_sft_dual_30k"
     # "qwen2.5_7b_instruct_lora_sft_30k"
-    "qwen2.5_7b_instruct_lora_sft_mix_15k"
+    # "qwen2.5_7b_instruct_lora_sft_mix_15k"
+    "llama3_1b_instruct_full_sft_mix_30k_r100"
 )
 
 echo "=== 开始串行训练任务 ==="
