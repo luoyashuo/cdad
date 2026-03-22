@@ -1698,5 +1698,83 @@
       "user_tag": "user",
       "assistant_tag": "assistant"
     }
+  },
+  "deepmath_morsd_llama3_3b_30k_train": {
+    "file_name": "/data/hf_home/datasets/Yaseal/CDAD_EXP/deepmath_morsd_llama3_3b_30k/train.jsonl",
+    "formatting": "sharegpt",
+    "columns": {
+      "messages": "conversations"
+    },
+    "tags": {
+      "role_tag": "role",
+      "content_tag": "content",
+      "user_tag": "user",
+      "assistant_tag": "assistant"
+    }
+  },
+  "deepmath_morsd_llama3_3b_30k_val": {
+    "file_name": "/data/hf_home/datasets/Yaseal/CDAD_EXP/deepmath_morsd_llama3_3b_30k/val.jsonl",
+    "formatting": "sharegpt",
+    "columns": {
+      "messages": "conversations"
+    },
+    "tags": {
+      "role_tag": "role",
+      "content_tag": "content",
+      "user_tag": "user",
+      "assistant_tag": "assistant"
+    }
+  },
+  "deepmath_morsd_llama3_1b_30k_train": {
+    "file_name": "/data/hf_home/datasets/Yaseal/CDAD_EXP/deepmath_morsd_llama3_1b_30k/train.jsonl",
+    "formatting": "sharegpt",
+    "columns": {
+      "messages": "conversations"
+    },
+    "tags": {
+      "role_tag": "role",
+      "content_tag": "content",
+      "user_tag": "user",
+      "assistant_tag": "assistant"
+    }
+  },
+  "deepmath_morsd_llama3_1b_30k_val": {
+    "file_name": "/data/hf_home/datasets/Yaseal/CDAD_EXP/deepmath_morsd_llama3_1b_30k/val.jsonl",
+    "formatting": "sharegpt",
+    "columns": {
+      "messages": "conversations"
+    },
+    "tags": {
+      "role_tag": "role",
+      "content_tag": "content",
+      "user_tag": "user",
+      "assistant_tag": "assistant"
+    }
+  },
+  "deepmath_morsd_qwen2_5_7b_30k_train": {
+    "file_name": "/data/hf_home/datasets/Yaseal/CDAD_EXP/deepmath_morsd_qwen2_5_7b_30k/train.jsonl",
+    "formatting": "sharegpt",
+    "columns": {
+      "messages": "conversations"
+    },
+    "tags": {
+      "role_tag": "role",
+      "content_tag": "content",
+      "user_tag": "user",
+      "assistant_tag": "assistant"
+    }
+  },
+  "deepmath_morsd_qwen2_5_7b_30k_val": {
+    "file_name": "/data/hf_home/datasets/Yaseal/CDAD_EXP/deepmath_morsd_qwen2_5_7b_30k/val.jsonl",
+    "formatting": "sharegpt",
+    "columns": {
+      "messages": "conversations"
+    },
+    "tags": {
+      "role_tag": "role",
+      "content_tag": "content",
+      "user_tag": "user",
+      "assistant_tag": "assistant"
+    }
   }
 }

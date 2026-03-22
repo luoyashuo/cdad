@@ -1,0 +1,64 @@
+### model
+model_name_or_path: /data/modelscope_cache/models/LLM-Research/Llama-3.2-1B-Instruct
+trust_remote_code: true
+torch_dtype: bfloat16
+
+### data
+# 减小序列长度以节省显存（根据数据分布调整，可改为 4096 或 6144）
+train_file: /data/hf_home/datasets/Yaseal/CDAD_EXP/deepmath_sft_30k/train_mcckd.jsonl
+max_length: 4096
+preprocessing_num_workers: 16
+
+### MCC-KD specific
+rationales_per_question: 2
+consistency_weight: 1.0
+kl_temperature: 1.0
+use_consistency_loss: true
+use_lora: false
+### Training Arguments
+# 输出
+output_dir: /data/qzq/ckpt_mcckd_llama_1b
+overwrite_output_dir: true
+
+# 训练参数 - 优化后：增大 batch_size，减小 gradient_accumulation_steps
+num_train_epochs: 2
+per_device_train_batch_size: 1
+gradient_accumulation_steps: 8
+learning_rate: 2.0e-5
+weight_decay: 0.0
+warmup_ratio: 0.1
+lr_scheduler_type: cosine
+
+# 优化器 - 使用 DeepSpeed 的 fused AdamW
+optim: adamw_torch_fused
+
+# 精度
+bf16: true
+fp16: false
+gradient_checkpointing: true
+
+# 日志
+logging_steps: 10
+logging_strategy: steps
+
+# 保存
+save_strategy: epoch
+save_total_limit: 2
+
+# DeepSpeed ZeRO-2 (更快的配置，无 CPU offload)
+deepspeed: ./configs/ds_config_zero3.json
+
+# 性能优化
+dataloader_num_workers: 4
+dataloader_pin_memory: true
+
+
+# 分布式
+ddp_find_unused_parameters: false
+ddp_timeout: 180000000
+
+# 其他
+remove_unused_columns: false
+group_by_length: false
+report_to: tensorboard
+seed: 42

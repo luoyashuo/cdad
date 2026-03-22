@@ -1,0 +1,1 @@
+mjq -f /data/hf_home/datasets/Yaseal/CDAD_EXP/deepmath_sft_30k/train.jsonl -s 1

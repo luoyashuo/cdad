@@ -1,0 +1,78 @@
+### model
+model_name_or_path: /data/modelscope_cache/models/Qwen/Qwen2.5-7B-Instruct
+trust_remote_code: true
+torch_dtype: bfloat16
+
+### data
+# 减小序列长度以节省显存（根据数据分布调整，可改为 4096 或 6144）
+train_file: /data/hf_home/datasets/Yaseal/CDAD_EXP/deepmath_sft_30k/train_mcckd.jsonl
+max_length: 4096
+preprocessing_num_workers: 16
+
+### MCC-KD specific
+rationales_per_question: 2
+consistency_weight: 1.0
+kl_temperature: 1.0
+use_consistency_loss: true
+
+### LoRA
+# 减小 LoRA rank 以节省显存
+use_lora: true
+lora_r: 32
+lora_alpha: 16
+lora_dropout: 0.1
+lora_target_modules:
+  - q_proj
+  - k_proj
+  - v_proj
+  - o_proj
+  - gate_proj
+  - up_proj
+  - down_proj
+
+### Training Arguments
+# 输出
+output_dir: /data/qzq/ckpt_mcckd_qwen_7B/mcckd_qwen2.5_7b
+overwrite_output_dir: true
+
+# 训练参数 - 优化后：增大 batch_size，减小 gradient_accumulation_steps
+num_train_epochs: 2
+per_device_train_batch_size: 2
+gradient_accumulation_steps: 4
+learning_rate: 2.0e-5
+weight_decay: 0.0
+warmup_ratio: 0.1
+lr_scheduler_type: cosine
+
+# 优化器 - 使用 DeepSpeed 的 fused AdamW
+optim: adamw_torch_fused
+
+# 精度
+bf16: true
+fp16: false
+
+# 日志
+logging_steps: 10
+logging_strategy: steps
+
+# 保存
+save_strategy: epoch
+save_total_limit: 2
+
+# DeepSpeed ZeRO-2 (更快的配置，无 CPU offload)
+deepspeed: ./configs/ds_config_zero2.json
+
+# 性能优化
+dataloader_num_workers: 4
+dataloader_pin_memory: true
+
+
+# 分布式
+ddp_find_unused_parameters: false
+ddp_timeout: 180000000
+
+# 其他
+remove_unused_columns: false
+group_by_length: false
+report_to: tensorboard
+seed: 42

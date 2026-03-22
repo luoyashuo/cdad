@@ -253,9 +253,25 @@ python rd_calc.py \
 # Step 2: 用指定模型的 RD 构建数据集
 python build_dataset_morsd.py \
     -i /data/hf_home/datasets/Yaseal/CDAD_EXP/deepmath_sft_30k/train_morsd.jsonl \
-    -o /data/hf_home/datasets/Yaseal/CDAD_EXP/deepmath_morsd_30k \
-    -m /data/modelscope_cache/models/LLM-Research/Llama-3.2-3B-Instruct \
+    -o /data/hf_home/datasets/Yaseal/CDAD_EXP/deepmath_morsd_llama3_3b_30k \
+    -m Llama-3.2-3B-Instruct \
     -k 1 \
     --train-ratio 0.99 \
-    -r ../LlamaFactory/data/dataset_info.json
+    -r ../../LlamaFactory/data/dataset_info.json
+    
+python build_dataset_morsd.py \
+    -i /data/hf_home/datasets/Yaseal/CDAD_EXP/deepmath_sft_30k/train_morsd.jsonl \
+    -o /data/hf_home/datasets/Yaseal/CDAD_EXP/deepmath_morsd_llama3_1b_30k \
+    -m Llama-3.2-1B-Instruct \
+    -k 1 \
+    --train-ratio 0.99 \
+    -r ../../LlamaFactory/data/dataset_info.json
+    
+python build_dataset_morsd.py \
+    -i /data/hf_home/datasets/Yaseal/CDAD_EXP/deepmath_sft_30k/train_morsd.jsonl \
+    -o /data/hf_home/datasets/Yaseal/CDAD_EXP/deepmath_morsd_qwen2_5_7b_30k \
+    -m Qwen2.5-7B-Instruct \
+    -k 1 \
+    --train-ratio 0.99 \
+    -r ../../LlamaFactory/data/dataset_info.json
 """

@@ -158,6 +158,10 @@ declare -a JOBS=(
     "/data/cdad/checkpoints/rewrite_cot/llama3_1b_instruct_full_sft_mix_30k_r100"       "eval_configs/eval_all_sft_v2.yaml"
     "/data/hf_home/models/Yaseal-llama3_1b_instruct_vallina_full_sft_30k"      "eval_configs/eval_all_sft_v2.yaml"
     "/data/hf_home/models/Yaseal-llama3_3b_instruct_vallina_full_sft_30k"      "eval_configs/eval_all_sft_v2.yaml"
+    "/data/cdad/checkpoints/morsd/llama3_1b_instruct_full_sft_morsd"      "eval_configs/eval_all_sft_v2.yaml"
+    "/data/cdad/checkpoints/morsd/llama3_3b_instruct_full_sft_morsd"      "eval_configs/eval_all_sft_v2.yaml"
+    "/data/qzq/ckpt_mcckd_llama_1b"      "eval_configs/eval_all_sft_v2.yaml"
+    "/data/qzq/ckpt_mcckd_llama_3b"      "eval_configs/eval_all_sft_v2.yaml"
 )
 
 # ============================================================

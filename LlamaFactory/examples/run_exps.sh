@@ -13,7 +13,7 @@ export SWANLAB_API_KEY="xmtHYzg2Bw5uh1dprg81E"
 # 日志目录
 LOG_DIR="logs"
 
-TRAIN_PID=3028943  
+TRAIN_PID=1674865  
 
 echo "等待训练进程 PID $TRAIN_PID 结束..."
 while kill -0 "$TRAIN_PID" 2>/dev/null; do
@@ -40,6 +40,8 @@ declare -a CONFIGS=(
     # "examples/rewrite_cot/llama3_1b_instruct_full_sft_mix_30k_r50.yaml"
     # "examples/rewrite_cot/llama3_1b_instruct_full_sft_mix_30k_r75.yaml"
     "examples/rewrite_cot/llama3_1b_instruct_full_sft_mix_30k_r100.yaml"
+    "examples/rewrite_cot/llama3_1b_instruct_full_sft_morsd_30k.yaml"
+    "examples/rewrite_cot/llama3_3b_instruct_full_sft_morsd_30k.yaml"
 
 )
 
@@ -57,6 +59,8 @@ declare -a NAMES=(
     # "qwen2.5_7b_instruct_lora_sft_30k"
     # "qwen2.5_7b_instruct_lora_sft_mix_15k"
     "llama3_1b_instruct_full_sft_mix_30k_r100"
+    "llama3_1b_instruct_full_sft_morsd_30k"
+    "llama3_3b_instruct_full_sft_morsd_30k"
 )
 
 echo "=== 开始串行训练任务 ==="
