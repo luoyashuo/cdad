@@ -1776,5 +1776,44 @@
       "user_tag": "user",
       "assistant_tag": "assistant"
     }
+  },
+  "deepmath_plain_30k_train_llama3_8b_1b_dual_30k": {
+    "file_name": "/data/hf_home/datasets/Yaseal/CDAD_EXP/cot_rewrite/llama3_8b_1b_grpo_8x40g/final/dual_30k.jsonl",
+    "formatting": "sharegpt",
+    "columns": {
+      "messages": "conversations"
+    },
+    "tags": {
+      "role_tag": "role",
+      "content_tag": "content",
+      "user_tag": "user",
+      "assistant_tag": "assistant"
+    }
+  },
+  "deepmath_plain_30k_token_skip_mix_30k_r25": {
+    "file_name": "/data/hf_home/datasets/Yaseal/CDAD_EXP/token_skip/deepmath_plain_30k/mix_30k_r25.jsonl",
+    "formatting": "sharegpt",
+    "columns": {
+      "messages": "conversations"
+    },
+    "tags": {
+      "role_tag": "role",
+      "content_tag": "content",
+      "user_tag": "user",
+      "assistant_tag": "assistant"
+    }
+  },
+  "deepmath_plain_30k_token_skip_mix_30k_r50": {
+    "file_name": "/data/hf_home/datasets/Yaseal/CDAD_EXP/token_skip/deepmath_plain_30k/mix_30k_r50.jsonl",
+    "formatting": "sharegpt",
+    "columns": {
+      "messages": "conversations"
+    },
+    "tags": {
+      "role_tag": "role",
+      "content_tag": "content",
+      "user_tag": "user",
+      "assistant_tag": "assistant"
+    }
   }
 }

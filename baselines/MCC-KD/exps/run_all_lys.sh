@@ -4,6 +4,18 @@
 # 参考 run_train.sh 和 run_exps.sh
 
 set -e
+LOG_DIR="logs"
+
+#############################################
+TRAIN_PID=2885718  
+
+echo "等待训练进程 PID $TRAIN_PID 结束..."
+while kill -0 "$TRAIN_PID" 2>/dev/null; do
+    echo "训练仍在进行中，10s 后检查..."
+    sleep 10
+done
+echo "训练进程已结束"
+#############################################
 
 cd /home/luoys/qzq/mcc-deepmath
 mkdir -p logs
@@ -35,18 +47,21 @@ echo ""
 
 # 训练任务列表
 declare -a CONFIGS=(
-    "./configs/training_config_llama_1B.yaml"
     "./configs/training_config_llama_3B.yaml"
+    "./configs/training_config_llama_1B.yaml"
+
 )
 
 declare -a NAMES=(
-    "llama_1B"
     "llama_3B"
+    "llama_1B"
+
 )
 
 declare -a MODEL_NAMES=(
-    "Llama-1B"
     "Llama-3B"
+    "Llama-1B"
+
 )
 
 TOTAL=${#CONFIGS[@]}

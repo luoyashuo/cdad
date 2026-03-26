@@ -6,7 +6,7 @@ torch_dtype: bfloat16
 ### data
 # 减小序列长度以节省显存（根据数据分布调整，可改为 4096 或 6144）
 train_file: /data/hf_home/datasets/Yaseal/CDAD_EXP/deepmath_sft_30k/train_mcckd.jsonl
-max_length: 4096
+max_length: 9000
 preprocessing_num_workers: 16
 
 ### MCC-KD specific
@@ -23,7 +23,7 @@ overwrite_output_dir: true
 # 训练参数 - 优化后：增大 batch_size，减小 gradient_accumulation_steps
 num_train_epochs: 2
 per_device_train_batch_size: 1
-gradient_accumulation_steps: 8
+gradient_accumulation_steps: 2
 learning_rate: 2.0e-5
 weight_decay: 0.0
 warmup_ratio: 0.1
@@ -46,7 +46,7 @@ save_strategy: epoch
 save_total_limit: 2
 
 # DeepSpeed ZeRO-2 (更快的配置，无 CPU offload)
-deepspeed: ./configs/ds_config_zero3.json
+deepspeed: ./configs/ds_config_zero2.json
 
 # 性能优化
 dataloader_num_workers: 4

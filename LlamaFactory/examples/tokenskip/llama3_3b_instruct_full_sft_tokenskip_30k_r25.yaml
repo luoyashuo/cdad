@@ -11,7 +11,7 @@ deepspeed: /home/luoys/cdad/LlamaFactory/examples/deepspeed/ds_z2_config.json  #
 
 
 ### dataset
-dataset: deepmath_morsd_llama3_3b_30k_train
+dataset: deepmath_plain_30k_token_skip_mix_30k_r25
 template: llama3
 cutoff_len: 9000
 max_samples: 9999999999
@@ -21,7 +21,7 @@ dataloader_prefetch_factor: 4
 neat_packing: true
 
 ### output
-output_dir: /data/cdad/checkpoints/morsd/llama3_3b_instruct_full_sft_morsd
+output_dir: /data/cdad/checkpoints/tokenskip/llama3_3b_instruct_full_sft_tokenskip_30k_r25
 logging_steps: 10
 save_strategy: epoch
 plot_loss: true

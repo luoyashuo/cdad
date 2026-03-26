@@ -14,3 +14,5 @@ setuptools==74.1.1
 packaging
 ninja
 psutil>=5.9.0
+llmlingua
+pebble==5.1.0

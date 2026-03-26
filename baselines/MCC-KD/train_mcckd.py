@@ -306,7 +306,13 @@ class MCCDKDataset(Dataset):
             input_ids = input_ids[:self.max_length]
             attention_mask = attention_mask[:self.max_length]
             labels = labels[:self.max_length]
-        
+            # 同步截断 answer_indices，确保不越界
+            truncated_indices = []
+            for start, end in answer_token_indices:
+                if start < self.max_length:
+                    truncated_indices.append([start, min(end, self.max_length)])
+            answer_token_indices = truncated_indices if truncated_indices else [[prompt_len, self.max_length]]
+
         return {
             "input_ids": input_ids,
             "attention_mask": attention_mask,
@@ -470,7 +476,7 @@ class MCCKDTrainer(Trainer):
             # 如果没有有效样本，返回 0
             return torch.tensor(0.0, device=logits_a.device, requires_grad=True)
     
-    def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
+    def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
         """
         计算 MCC-KD 的总损失 - 与官方实现 ParallelSolverMccDistillTrainer.distill 对齐
         
@@ -646,8 +652,7 @@ def mcckd_data_collator(features, tokenizer, max_length):
     # 使用 DataCollatorForSeq2Seq 分别处理
     collator = DataCollatorForSeq2Seq(
         tokenizer=tokenizer,
-        padding='max_length',
-        max_length=max_length,
+        padding='longest',
         label_pad_token_id=-100,
         pad_to_multiple_of=8,
     )

@@ -1,12 +1,12 @@
 ### model
-model_name_or_path: /fs/fast/u20240075/luoyashuo/modelscope_cache/models/LLM-Research/Llama-3.2-3B-Instruct
+model_name_or_path: /data/modelscope_cache/models/LLM-Research/Llama-3.2-3B-Instruct
 trust_remote_code: true
 
 ### method
 stage: sft
 do_train: true
 finetuning_type: full
-deepspeed: /home/u20240075/luoyashuo/projects/cdad/LlamaFactory/examples/deepspeed/ds_z2_config.json  # choices: [ds_z0_config.json, ds_z2_config.json, ds_z3_config.json]
+deepspeed: /home/luoys/cdad/LlamaFactory/examples/deepspeed/ds_z2_config.json  # choices: [ds_z0_config.json, ds_z2_config.json, ds_z3_config.json]
 
 ### dataset
 dataset: deepmath_plain_30k_train
@@ -20,7 +20,7 @@ dataloader_prefetch_factor: 4
 neat_packing: true
 
 ### output
-output_dir: /fs/fast/u20240075/luoyashuo/cdad/checkpoints/vallina_sft/llama3_3b_instruct_vallina_full_sft_30k
+output_dir: /data/cdad/checkpoints/vallina_sft/llama3_3b_instruct_vallina_full_sft_30k
 logging_steps: 10
 save_strategy: epoch
 plot_loss: true
@@ -30,7 +30,7 @@ report_to: swanlab  # choices: [none, wandb, tensorboard, swanlab, mlflow]
 flash_attn: fa2
 ### train
 per_device_train_batch_size: 1
-gradient_accumulation_steps: 8
+gradient_accumulation_steps: 2
 learning_rate: 2.0e-5
 num_train_epochs: 2.0
 lr_scheduler_type: cosine

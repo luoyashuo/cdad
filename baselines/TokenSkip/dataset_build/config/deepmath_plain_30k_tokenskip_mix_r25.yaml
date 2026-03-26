@@ -1,0 +1,15 @@
+input_file: /data/hf_home/datasets/Yaseal/CDAD_EXP/deepmath_plain_30k/train.jsonl
+output_dir: /data/hf_home/datasets/Yaseal/CDAD_EXP/token_skip/deepmath_plain_30k
+output_filename: mix_30k_r25.jsonl
+
+llmlingua_model: /data/hf_home/models/microsoft-llmlingua-2-xlm-roberta-large-meetingbank
+compression_ratio: 0.7   # target keep-rate for LLMLingua-2 on each compressed sample
+
+skip_ratio: 0.25          # 25% samples compressed, 75% original
+seed: 42
+
+llamafactory:
+  enabled: true
+  dataset_info_path: /home/luoys/cdad/LlamaFactory/data/dataset_info.json
+  dataset_name: deepmath_plain_30k_token_skip_mix_30k_r25
+  use_absolute_path: true

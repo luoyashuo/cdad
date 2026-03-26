@@ -175,7 +175,6 @@ pyrightconfig.json
 */.venv/*
 */logs/*
 
-
 ckpts/
 datasets/
 outputs/
