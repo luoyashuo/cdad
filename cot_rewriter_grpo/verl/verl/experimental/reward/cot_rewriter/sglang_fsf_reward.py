@@ -230,7 +230,7 @@ Generate complete Graphviz DOT code in dot blocks."""
             messages, tokenize=False, add_generation_prompt=True, enable_thinking=False
         )
         return prompt
-    def _parse_fsf_from_dot(self, dot_output: str) -> Optional[float]:
+    def _parse_fsf_from_dot(self, dot_output: str) -> Optional[Dict[str, Any]]:
         """
         Parse FSF value from DOT graph format output.
         
@@ -241,7 +241,7 @@ Generate complete Graphviz DOT code in dot blocks."""
             dot_output: Raw model output text (DOT format)
             
         Returns:
-            FSF value between 0.0 and 1.0, or None if parsing fails
+            Dict with keys 'fsf', 'failed_nodes', 'total_nodes', or None if parsing fails
         """
         try:
             import pydot
@@ -262,7 +262,7 @@ Generate complete Graphviz DOT code in dot blocks."""
             
             node_count = len(nodes)
             if node_count == 0:
-                return 0.0
+                return {"fsf": 0.0, "failed_nodes": 0, "total_nodes": 0}
 
             # Count failed nodes (fillcolor=lightpink)
             failed_nodes = 0
@@ -281,7 +281,7 @@ Generate complete Graphviz DOT code in dot blocks."""
             fsf = failed_nodes / node_count
             # Log FSF parsing details at INFO level for visibility
             logger.info(f"[SGLangFSFActor-{self.gpu_ids}] FSF={fsf:.4f} ({failed_nodes}/{node_count} nodes, {node_count-failed_nodes} successful)")
-            return fsf
+            return {"fsf": fsf, "failed_nodes": failed_nodes, "total_nodes": node_count}
 
         except ImportError:
             logger.warning(f"[SGLangFSFActor-{self.gpu_ids}] pydot not installed")
@@ -296,7 +296,7 @@ Generate complete Graphviz DOT code in dot blocks."""
         micro_batch_size: int = 4,
         return_dot_outputs: bool = False,  # Whether to return raw DOT outputs
         save_prompts: bool = False,  # Whether to save request prompts
-    ) -> List[Optional[float]] | Tuple[List[Optional[float]], List[Optional[str]], Dict[str, List[str]]]:
+    ) -> List[Optional[Dict[str, Any]]] | Tuple[List[Optional[Dict[str, Any]]], List[Optional[str]], Dict[str, List[str]]]:
         """
         Batch computation of FSF values with micro-batching to avoid OOM.
 
@@ -307,7 +307,7 @@ Generate complete Graphviz DOT code in dot blocks."""
             save_prompts: If True, also return saved prompts dict
 
         Returns:
-            If save_prompts=False and return_dot_outputs=False: List of FSF values (None for unparseable outputs)
+            If save_prompts=False and return_dot_outputs=False: List of dicts with keys 'fsf', 'failed_nodes', 'total_nodes' (None for unparseable outputs)
             If save_prompts=False and return_dot_outputs=True: Tuple of (fsf_values, dot_outputs)
             If save_prompts=True: Tuple of (fsf_values, dot_outputs or None, saved_prompts dict)
         """
@@ -687,6 +687,8 @@ class SGLangFSFClient:
         Returns:
             Dict with:
                 - rewrite_fsfs: FSF values for rewrite CoTs
+                - rewrite_failed_nodes: Failed node counts for rewrite CoTs
+                - rewrite_total_nodes: Total node counts for rewrite CoTs
                 - rewrite_dot_outputs: (optional) Raw DOT outputs for rewrite CoTs
                 - saved_prompts: (optional) Dict with saved prompts if requested
         """
@@ -711,6 +713,8 @@ class SGLangFSFClient:
 
         # Aggregate rewrite results
         rewrite_fsfs = [None] * batch_size
+        rewrite_failed_nodes = [None] * batch_size
+        rewrite_total_nodes = [None] * batch_size
         rewrite_dot_outputs = [None] * batch_size if return_dot_outputs else None
         saved_prompts_out = None if save_prompts else None  # Aggregated saved prompts
         for worker_idx, chunk_size, future in rewrite_futures:
@@ -736,13 +740,18 @@ class SGLangFSFClient:
                 chunk_dots = None
             start_idx = sum(len(rewrite_chunks[i]) for i in range(worker_idx))
             for i, result in enumerate(chunk_fsfs):
-                rewrite_fsfs[start_idx + i] = result
+                if result is not None:
+                    rewrite_fsfs[start_idx + i] = result.get("fsf")
+                    rewrite_failed_nodes[start_idx + i] = result.get("failed_nodes")
+                    rewrite_total_nodes[start_idx + i] = result.get("total_nodes")
             if return_dot_outputs and chunk_dots is not None:
                 for i, dot in enumerate(chunk_dots):
                     rewrite_dot_outputs[start_idx + i] = dot
 
         result = {
             "rewrite_fsfs": rewrite_fsfs,
+            "rewrite_failed_nodes": rewrite_failed_nodes,
+            "rewrite_total_nodes": rewrite_total_nodes,
         }
         if return_dot_outputs:
             result["rewrite_dot_outputs"] = rewrite_dot_outputs
@@ -771,7 +780,11 @@ class SGLangFSFClient:
         Returns:
             Dict with:
                 - original_fsfs: FSF values for original CoTs
+                - original_failed_nodes: Failed node counts for original CoTs
+                - original_total_nodes: Total node counts for original CoTs
                 - rewrite_fsfs: FSF values for rewrite CoTs
+                - rewrite_failed_nodes: Failed node counts for rewrite CoTs
+                - rewrite_total_nodes: Total node counts for rewrite CoTs
                 - logic_rewards: Binary rewards (1 if improved, 0 otherwise, None if unparseable)
                 - original_dot_outputs: (optional) Raw DOT outputs for original CoTs
                 - rewrite_dot_outputs: (optional) Raw DOT outputs for rewrite CoTs
@@ -798,6 +811,8 @@ class SGLangFSFClient:
 
         # Aggregate original results
         original_fsfs = [None] * batch_size
+        original_failed_nodes = [None] * batch_size
+        original_total_nodes = [None] * batch_size
         original_dot_outputs = [None] * batch_size if return_dot_outputs else None
         for worker_idx, chunk_size, future in original_futures:
             chunk_results = ray.get(future)
@@ -808,7 +823,10 @@ class SGLangFSFClient:
                 chunk_dots = None
             start_idx = sum(len(original_chunks[i]) for i in range(worker_idx))
             for i, result in enumerate(chunk_fsfs):
-                original_fsfs[start_idx + i] = result
+                if result is not None:
+                    original_fsfs[start_idx + i] = result.get("fsf")
+                    original_failed_nodes[start_idx + i] = result.get("failed_nodes")
+                    original_total_nodes[start_idx + i] = result.get("total_nodes")
             if return_dot_outputs and chunk_dots is not None:
                 for i, dot in enumerate(chunk_dots):
                     original_dot_outputs[start_idx + i] = dot
@@ -826,6 +844,8 @@ class SGLangFSFClient:
 
         # Aggregate rewrite results
         rewrite_fsfs = [None] * batch_size
+        rewrite_failed_nodes = [None] * batch_size
+        rewrite_total_nodes = [None] * batch_size
         rewrite_dot_outputs = [None] * batch_size if return_dot_outputs else None
         for worker_idx, chunk_size, future in rewrite_futures:
             chunk_results = ray.get(future)
@@ -836,7 +856,10 @@ class SGLangFSFClient:
                 chunk_dots = None
             start_idx = sum(len(rewrite_chunks[i]) for i in range(worker_idx))
             for i, result in enumerate(chunk_fsfs):
-                rewrite_fsfs[start_idx + i] = result
+                if result is not None:
+                    rewrite_fsfs[start_idx + i] = result.get("fsf")
+                    rewrite_failed_nodes[start_idx + i] = result.get("failed_nodes")
+                    rewrite_total_nodes[start_idx + i] = result.get("total_nodes")
             if return_dot_outputs and chunk_dots is not None:
                 for i, dot in enumerate(chunk_dots):
                     rewrite_dot_outputs[start_idx + i] = dot
@@ -856,7 +879,11 @@ class SGLangFSFClient:
 
         result = {
             "original_fsfs": original_fsfs,
+            "original_failed_nodes": original_failed_nodes,
+            "original_total_nodes": original_total_nodes,
             "rewrite_fsfs": rewrite_fsfs,
+            "rewrite_failed_nodes": rewrite_failed_nodes,
+            "rewrite_total_nodes": rewrite_total_nodes,
             "logic_rewards": logic_rewards,
         }
         if return_dot_outputs:

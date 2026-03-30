@@ -24,7 +24,7 @@ export PROJECT_BASE_DIR="${PROJECT_ROOT}"
 # 默认配置
 
 DEFAULT_GPUS="0,1,2,3,4,5,6,7"
-DEFAULT_CONFIG="llama3_8b_1b_grpo_8x40g"
+DEFAULT_CONFIG="llama3_8b_3b_grpo_8x40g"
 # 解析参数
 GPUS="${1:-$DEFAULT_GPUS}"
 CONFIG_NAME="${2:-$DEFAULT_CONFIG}"

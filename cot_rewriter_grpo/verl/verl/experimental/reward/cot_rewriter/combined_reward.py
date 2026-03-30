@@ -742,6 +742,8 @@ class CombinedRewardComputer:
         # Training data has 'fsf' field with pre-computed FSF values
         # We use this as original_fsf instead of computing it via FSF model
         original_fsfs = []
+        original_failed_nodes = [None] * batch_size
+        original_total_nodes = [None] * batch_size
         if data is not None:
             for i in range(batch_size):
                 data_item = data[i]
@@ -752,6 +754,17 @@ class CombinedRewardComputer:
                     original_fsfs.append(fsf_val if fsf_val is not None else 0.0)
                 else:
                     original_fsfs.append(0.0)
+                # Load failed_nodes and total_nodes if available
+                if 'failed_nodes' in data_item.non_tensor_batch:
+                    fn_val = data_item.non_tensor_batch['failed_nodes']
+                    if hasattr(fn_val, 'item'):
+                        fn_val = fn_val.item()
+                    original_failed_nodes[i] = fn_val
+                if 'total_nodes' in data_item.non_tensor_batch:
+                    tn_val = data_item.non_tensor_batch['total_nodes']
+                    if hasattr(tn_val, 'item'):
+                        tn_val = tn_val.item()
+                    original_total_nodes[i] = tn_val
         else:
             # No data provided, initialize all FSF values to 0
             original_fsfs = [0.0] * batch_size
@@ -761,6 +774,8 @@ class CombinedRewardComputer:
             if fsf_val != 0.0:
                 logger.info(f"[FSF] Sample {i}: pre_computed_original_fsf={fsf_val:.4f}")
         rewrite_fsfs = [0.0] * batch_size
+        rewrite_failed_nodes = [None] * batch_size
+        rewrite_total_nodes = [None] * batch_size
         original_dot_outputs = [None] * batch_size  # Raw DOT outputs for original CoTs
         rewrite_dot_outputs = [None] * batch_size  # Raw DOT outputs for rewrite CoTs
         fsf_parse_failed_count = 0  # Count of samples with parse failures
@@ -823,6 +838,8 @@ class CombinedRewardComputer:
                 )
 
                 expanded_rewrite_fsfs = fsf_result["rewrite_fsfs"]
+                expanded_rewrite_failed_nodes = fsf_result.get("rewrite_failed_nodes", [None] * len(expanded_rewrite_cots))
+                expanded_rewrite_total_nodes = fsf_result.get("rewrite_total_nodes", [None] * len(expanded_rewrite_cots))
 
                 # Extract DOT outputs if needed
                 if self.save_fsf_dot_outputs:
@@ -835,10 +852,18 @@ class CombinedRewardComputer:
 
                 # Reorganize results: group FSF values by original sample index
                 rewrite_fsf_accumulator = [[] for _ in range(batch_size)]
+                rewrite_failed_nodes_accumulator = [[] for _ in range(batch_size)]
+                rewrite_total_nodes_accumulator = [[] for _ in range(batch_size)]
                 for expanded_idx, fsf_val in enumerate(expanded_rewrite_fsfs):
                     sample_idx, run_idx = sample_to_expanded_map[expanded_idx]
                     if fsf_val is not None:
                         rewrite_fsf_accumulator[sample_idx].append(fsf_val)
+                        fn_val = expanded_rewrite_failed_nodes[expanded_idx]
+                        if fn_val is not None:
+                            rewrite_failed_nodes_accumulator[sample_idx].append(fn_val)
+                        tn_val = expanded_rewrite_total_nodes[expanded_idx]
+                        if tn_val is not None:
+                            rewrite_total_nodes_accumulator[sample_idx].append(tn_val)
 
                 # Reorganize DOT outputs: save all runs' outputs as a list for each sample
                 # When r_logic_repeat_n > 1, collect all DOT outputs for each sample
@@ -870,20 +895,42 @@ class CombinedRewardComputer:
 
                 # Compute average FSF for each sample
                 rewrite_fsfs = []
+                rewrite_failed_nodes = []
+                rewrite_total_nodes = []
                 for i, fsf_list in enumerate(rewrite_fsf_accumulator):
                     if len(fsf_list) == 0:
                         # All runs failed for this sample
                         rewrite_fsfs.append(None)
+                        rewrite_failed_nodes.append(None)
+                        rewrite_total_nodes.append(None)
                     else:
                         # Average the FSF values across runs
                         avg_fsf = sum(fsf_list) / len(fsf_list)
                         rewrite_fsfs.append(avg_fsf)
+                        # Average failed_nodes and total_nodes across runs
+                        fn_list = rewrite_failed_nodes_accumulator[i]
+                        rewrite_failed_nodes.append(int(round(sum(fn_list) / len(fn_list))) if fn_list else None)
+                        tn_list = rewrite_total_nodes_accumulator[i]
+                        rewrite_total_nodes.append(int(round(sum(tn_list) / len(tn_list))) if tn_list else None)
                         if repeat_n > 1 and i < 3:  # Log first few samples
                             logger.info(f"[FSF] Sample {i}: FSF averaged over {len(fsf_list)} runs = {avg_fsf:.4f} (values: {fsf_list})")
 
                 # Count samples with unparseable FSF (all runs failed)
                 rewrite_failed = sum(1 for f in rewrite_fsfs if f is None)
                 fsf_parse_failed_count = rewrite_failed
+
+                # Compute original failed_nodes if not available from dataset
+                if any(fn is None for fn in original_failed_nodes):
+                    logger.info(f"[FSF] Computing original failed_nodes for {batch_size} original CoTs...")
+                    original_fsf_result = self.fsf_judge.compute_rewrite_fsf_only(
+                        rewrite_cots=original_cots,
+                        return_dot_outputs=False,
+                        save_prompts=False,
+                    )
+                    for i in range(batch_size):
+                        if original_failed_nodes[i] is None:
+                            original_failed_nodes[i] = original_fsf_result.get("rewrite_failed_nodes", [None] * batch_size)[i]
+                            original_total_nodes[i] = original_fsf_result.get("rewrite_total_nodes", [None] * batch_size)[i]
 
                 # FSF is now a binary penalty (fsf > 0 → reward=0), r_logic kept for logging only
                 r_logic = []
@@ -906,6 +953,8 @@ class CombinedRewardComputer:
                     # Set all FSF rewards to 0 for group
                     r_logic = [0.0 for _ in range(batch_size)]
                     rewrite_fsfs = [0.0 for _ in range(batch_size)]
+                    rewrite_failed_nodes = [0 for _ in range(batch_size)]
+                    rewrite_total_nodes = [0 for _ in range(batch_size)]
                     rewrite_dot_outputs = [None for _ in range(batch_size)]
                     fsf_group_skipped = True
                 else:
@@ -1074,27 +1123,44 @@ class CombinedRewardComputer:
         penalty_reasons = [[] for _ in range(batch_size)]  # Track penalty reasons per sample
 
         # ========== FSF Penalty Detection ==========
-        # If rewrite_fsf > 0 (has failed steps), treat as penalty: reward → 0
-        fsf_penalty_flags = [0.0] * batch_size  # 1.0 if fsf > 0, 0.0 otherwise
+        # If rewrite_failed_nodes < original_failed_nodes, treat as penalty: reward → 0
+        fsf_penalty_flags = [0.0] * batch_size  # 1.0 if penalty triggered, 0.0 otherwise
         if self.use_logic_reward:
             for i in range(batch_size):
-                rew_fsf = rewrite_fsfs[i]
-                if rew_fsf is not None and rew_fsf > 0:
+                rew_fn = rewrite_failed_nodes[i]
+                orig_fn = original_failed_nodes[i]
+                if rew_fn is not None and orig_fn is not None and rew_fn < orig_fn:
                     penalized_flags[i] = True
                     penalty_reasons[i].append("fsf")
                     fsf_penalty_flags[i] = 1.0
                     if i < 3:
                         logger.info(
-                            f"[FSF_PENALTY] Sample {i}: rewrite_fsf={rew_fsf:.4f} > 0, "
+                            f"[FSF_PENALTY] Sample {i}: rewrite_failed_nodes={rew_fn} < original_failed_nodes={orig_fn}, "
                             f"reward will be set to 0"
                         )
             fsf_penalized_count = sum(1 for f in fsf_penalty_flags if f > 0)
             fsf_zero_count = batch_size - fsf_penalized_count
-            logger.info(
-                f"[FSF_PENALTY] batch_size={batch_size}, "
-                f"fsf>0 (penalized)={fsf_penalized_count}, fsf=0 (clean)={fsf_zero_count}, "
-                f"fsf_penalty_rate={fsf_penalized_count/batch_size:.2%}"
-            )
+            # Compute failed_nodes statistics
+            valid_rew_fn = [fn for fn in rewrite_failed_nodes if fn is not None]
+            valid_orig_fn = [fn for fn in original_failed_nodes if fn is not None]
+            if valid_rew_fn:
+                mean_rew_fn = sum(valid_rew_fn) / len(valid_rew_fn)
+                mean_orig_fn = sum(valid_orig_fn) / len(valid_orig_fn) if valid_orig_fn else None
+                logger.info(
+                    f"[FSF_PENALTY] batch_size={batch_size}, "
+                    f"penalized={fsf_penalized_count}, not_penalized={fsf_zero_count}, "
+                    f"fsf_penalty_rate={fsf_penalized_count/batch_size:.2%}, "
+                    f"rewrite_failed_nodes: max={max(valid_rew_fn)}, min={min(valid_rew_fn)}, mean={mean_rew_fn:.2f}, "
+                    f"original_failed_nodes: max={max(valid_orig_fn) if valid_orig_fn else 'N/A'}, "
+                    f"min={min(valid_orig_fn) if valid_orig_fn else 'N/A'}, "
+                    f"mean={f'{mean_orig_fn:.2f}' if mean_orig_fn is not None else 'N/A'}"
+                )
+            else:
+                logger.info(
+                    f"[FSF_PENALTY] batch_size={batch_size}, "
+                    f"penalized={fsf_penalized_count}, not_penalized={fsf_zero_count}, "
+                    f"fsf_penalty_rate={fsf_penalized_count/batch_size:.2%}"
+                )
 
         # ========== Correct Judge Penalty Detection ==========
         r_cog_before_correct_judge = r_cog.copy()  # Keep copy for logging
@@ -1285,6 +1351,10 @@ class CombinedRewardComputer:
             "reward_deltas": reward_deltas,  # NEW: Log raw rewrite-original deltas
             "original_fsfs": original_fsfs,  # FSF values for original CoTs (pre-computed from dataset)
             "rewrite_fsfs": rewrite_fsfs,  # FSF values for rewrite CoTs (computed by FSF model)
+            "original_failed_nodes": original_failed_nodes,  # Failed node counts for original CoTs
+            "rewrite_failed_nodes": rewrite_failed_nodes,  # Failed node counts for rewrite CoTs
+            "original_total_nodes": original_total_nodes,  # Total node counts for original CoTs
+            "rewrite_total_nodes": rewrite_total_nodes,  # Total node counts for rewrite CoTs
             # Note: original_dot_outputs is omitted (original cot does not call FSF judge)
             "fsf_parse_failed_count": fsf_parse_failed_count,  # Number of samples with FSF parse failures
             "fsf_group_skipped": fsf_group_skipped,  # Whether FSF reward was skipped for entire group
@@ -1326,6 +1396,17 @@ class CombinedRewardComputer:
                 "penalty_reasons": penalty_reasons,  # Per-sample penalty reason lists
                 # === DEBUG: Pre-computed FSF from training data ===
                 "pre_computed_original_fsfs": original_fsfs,  # Pre-computed FSF for original CoTs (from training data)
+                # === Failed nodes statistics ===
+                "rewrite_failed_nodes": rewrite_failed_nodes,
+                "original_failed_nodes": original_failed_nodes,
+                "rewrite_total_nodes": rewrite_total_nodes,
+                "original_total_nodes": original_total_nodes,
+                "rewrite_failed_nodes_max": max([fn for fn in rewrite_failed_nodes if fn is not None]) if any(fn is not None for fn in rewrite_failed_nodes) else None,
+                "rewrite_failed_nodes_min": min([fn for fn in rewrite_failed_nodes if fn is not None]) if any(fn is not None for fn in rewrite_failed_nodes) else None,
+                "rewrite_failed_nodes_mean": sum([fn for fn in rewrite_failed_nodes if fn is not None]) / len([fn for fn in rewrite_failed_nodes if fn is not None]) if any(fn is not None for fn in rewrite_failed_nodes) else None,
+                "original_failed_nodes_max": max([fn for fn in original_failed_nodes if fn is not None]) if any(fn is not None for fn in original_failed_nodes) else None,
+                "original_failed_nodes_min": min([fn for fn in original_failed_nodes if fn is not None]) if any(fn is not None for fn in original_failed_nodes) else None,
+                "original_failed_nodes_mean": sum([fn for fn in original_failed_nodes if fn is not None]) / len([fn for fn in original_failed_nodes if fn is not None]) if any(fn is not None for fn in original_failed_nodes) else None,
                 # === FSF DOT outputs (for saving to rollout_data/val_data) ===
                 "rewrite_dot_outputs": rewrite_dot_outputs,  # Raw DOT outputs for rewrite CoTs (if save_fsf_dot_outputs=True)
                 # === Saved prompts (for debugging) ===
@@ -1911,8 +1992,24 @@ def compute_cot_rewriter_reward(
             "similarities": result.get("extra_info", {}).get("similarities", [0.0] * batch_size),
             "saved_prompts": result.get("extra_info", {}).get("saved_prompts", None),
             "fsf_reward_mode": fsf_reward_mode,
-            # FSF penalty flags (1.0 if rewrite_fsf > 0, 0.0 otherwise)
+            # FSF penalty flags (1.0 if rewrite_failed_nodes < original_failed_nodes, 0.0 otherwise)
             "fsf_penalty_flags": result.get("fsf_penalty_flags", [0.0] * batch_size),
+            # Failed nodes information
+            "rewrite_failed_nodes": result.get("rewrite_failed_nodes", [None] * batch_size),
+            "original_failed_nodes": result.get("original_failed_nodes", [None] * batch_size),
+            "rewrite_total_nodes": result.get("rewrite_total_nodes", [None] * batch_size),
+            "original_total_nodes": result.get("original_total_nodes", [None] * batch_size),
+            # Failed nodes statistics (converted to 0-dim numpy arrays to pass DataProto consistency check)
+            **{
+                k: np.array(v, dtype=object) for k, v in {
+                    "rewrite_failed_nodes_max": result.get("extra_info", {}).get("rewrite_failed_nodes_max"),
+                    "rewrite_failed_nodes_min": result.get("extra_info", {}).get("rewrite_failed_nodes_min"),
+                    "rewrite_failed_nodes_mean": result.get("extra_info", {}).get("rewrite_failed_nodes_mean"),
+                    "original_failed_nodes_max": result.get("extra_info", {}).get("original_failed_nodes_max"),
+                    "original_failed_nodes_min": result.get("extra_info", {}).get("original_failed_nodes_min"),
+                    "original_failed_nodes_mean": result.get("extra_info", {}).get("original_failed_nodes_mean"),
+                }.items() if v is not None
+            },
             # Penalty flags (zero-reward penalty system)
             "penalized_flags": [1 if f else 0 for f in penalized_flags],  # 1 if any penalty triggered, 0 otherwise
             "penalty_reasons": penalty_reasons,  # Per-sample penalty reason lists

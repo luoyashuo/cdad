@@ -44,6 +44,20 @@ import zmq
 from filelock import FileLock
 from omegaconf import DictConfig, OmegaConf
 from tensordict import TensorDict
+# Pre-import vLLM models to avoid subprocess pickle issues in model registry inspection
+# See: https://github.com/vllm-project/vllm/issues/ (vLLM 0.8.5+ subprocess pickle error)
+# IMPORTANT: Must call ModelRegistry.inspect_model_cls to populate the LRU cache
+# before Ray workers are spawned, otherwise subprocess will fail in Ray runtime_env
+try:
+    from vllm.model_executor.models import llama as _vllm_llama_module
+    _ = _vllm_llama_module.LlamaForCausalLM  # Force model class loading
+    # Pre-populate ModelRegistry cache to avoid subprocess issues in Ray workers
+    from vllm.model_executor.models.registry import ModelRegistry
+    _ = ModelRegistry.inspect_model_cls(['LlamaForCausalLM'])
+except Exception as _e:
+    import logging
+    logging.getLogger(__name__).warning(f"Pre-import of LlamaForCausalLM failed: {_e}")
+
 from vllm import LLM, SamplingParams
 from vllm.distributed import parallel_state as vllm_ps
 from vllm.lora.request import LoRARequest

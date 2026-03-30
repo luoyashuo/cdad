@@ -1,28 +1,36 @@
 #!/usr/bin/env python3
 """
-Build COT rewrite training dataset from DeepMath format data.
+Build COT rewrite training dataset from DeepMath format data with FSF filtering.
 
-Input format (per line in JSONL):
+Input format (per line in JSONL from train_fsf.jsonl):
     {
         "question": "...",
         "reasoning": [
-            {"thought": "...", "solution": "..."},
+            {
+                "thought": "...",
+                "solution": "...",
+                "fsf": 0.25,
+                "failed_nodes": 1,
+                "node_count": 4,
+                ...
+            },
             ...
         ]
     }
 
-Supports two modes:
-  --mode random : randomly pick one thought per question
-  --mode all    : use all thoughts per question
+Features:
+  - Filter by failed_nodes range (1-3)
+  - Each reasoning becomes an independent sample
+  - Train/val split is done at the question level
 
-Train/val split is done at the question level to guarantee no question overlap.
-Both splits are shuffled.
-
-Output format (same as build_cot_rewrite_from_sharegpt.py):
+Output format:
     {
         "question": "...",
         "original_thought": "...",
         "solution": "...",
+        "fsf": 0.25,
+        "failed_nodes": 1,
+        "node_count": 4,
         "system_prompt": "...",
         "user_prompt": "..."
     }
@@ -45,17 +53,34 @@ import itertools
 # =============================================================================
 
 def build_prompt(question: str, thought: str) -> Tuple[str, str]:
+#     system_prompt = """\
+# You are an expert in math and code. The 'Original Reasoning Process' provides a raw derivation that leads to a correct solution. Your task is to extract the correct path and present it clearly.
+
+# Follow these guidelines:
+# 1. **Refine and Bridge**: Retain the core logic, including essential self-reflections and verification steps. Supplement logical leaps and clarify complex steps to ensure a smooth, coherent flow.
+# 2. **Filter Invalid Paths**: Remove derivation branches within the 'Original Reasoning' that do not lead to the final answer (e.g., failed attempts, incorrect directions, or dead ends). Keep only the effective reasoning path.
+# 3. **Avoid Literal Repetition**: Rephrase the content in your own words rather than simply duplicating the text of the original process.
+
+# **Output Rules:**
+# - Directly output the rewritten reasoning process.
+# - Do NOT mention that you are rewriting another reasoning process."""
+
+
     system_prompt = """\
-You are an expert in math and code. The 'Original Reasoning Process' provides a raw derivation that leads to a correct solution. Your task is to extract the correct path and present it clearly.
+You are an expert in math. The 'Original Reasoning Process' provides a raw derivation that leads to a correct solution. Your task is to extract the logical core and transform it into a "Cognitive-Aligned" reasoning path.
 
 Follow these guidelines:
-1. **Refine and Bridge**: Retain the core logic, including essential self-reflections and verification steps. Supplement logical leaps and clarify complex steps to ensure a smooth, coherent flow.
-2. **Filter Invalid Paths**: Remove derivation branches within the 'Original Reasoning' that do not lead to the final answer (e.g., failed attempts, incorrect directions, or dead ends). Keep only the effective reasoning path.
-3. **Avoid Literal Repetition**: Rephrase the content in your own words rather than simply duplicating the text of the original process.
+
+1. **Refine and Bridge**: Retain the core logic, especially all self-reflection behaviors and verification steps. If the original process contains a moment where it realizes a mistake and pivots to a new strategy (e.g., "Wait, this is wrong because...", "Actually, let's try..."), YOU MUST PRESERVE THIS PIVOT. Supplement logical leaps to ensure a smooth, pedagogical flow.
+
+2. **Preserve Cognitive Pivots**: Treat "trial -> error detection -> correction" sequences as essential cognitive bridges rather than invalid paths. Ensure the transition between an initial attempt, the realization of a flaw, and the subsequent correction is logically explicit and clear.
+
+3. **Avoid Literal Repetition**: Rephrase the content in your own words to improve clarity and logical rigor. The final output should read like a master teacher's explanation, illustrating not just the correct answer, but the thinking process required to reach it.
 
 **Output Rules:**
 - Directly output the rewritten reasoning process.
-- Do NOT mention that you are rewriting another reasoning process."""
+- Do NOT mention that you are rewriting another reasoning process.
+- Prioritize the completeness of the cognitive trajectory over absolute brevity."""
 
     user_prompt = f"""\
 ## Problem
@@ -71,13 +96,21 @@ Follow these guidelines:
 
 
 # =============================================================================
-# Data loading
+# Data loading with FSF filtering
 # =============================================================================
 
-def _load_single_file(args: Tuple[str, int]) -> List[Dict[str, Any]]:
-    """Load one DeepMath JSONL file; returns list of (question, reasoning_list)."""
-    file_path, worker_id = args
+def _load_single_file_with_fsf(args: Tuple[str, int, int, int]) -> List[Dict[str, Any]]:
+    """
+    Load one FSF JSONL file with failed_nodes filtering.
+    
+    Args:
+        args: (file_path, worker_id, min_failed_nodes, max_failed_nodes)
+    
+    Returns list of {"question": ..., "reasoning": [filtered_reasoning, ...]}
+    """
+    file_path, worker_id, min_failed_nodes, max_failed_nodes = args
     records = []
+    
     try:
         with open(file_path, "r", encoding="utf-8") as f:
             for line in f:
@@ -88,90 +121,84 @@ def _load_single_file(args: Tuple[str, int]) -> List[Dict[str, Any]]:
                     data = json.loads(line)
                 except json.JSONDecodeError:
                     continue
+                
                 question = data.get("question", "").strip()
-                reasoning = data.get("reasoning", [])
-                if not question or not reasoning:
+                reasoning_list = data.get("reasoning", [])
+                
+                if not question or not reasoning_list:
                     continue
-                records.append({"question": question, "reasoning": reasoning})
+                
+                # Filter reasoning by failed_nodes (1-3)
+                filtered_reasoning = []
+                for r in reasoning_list:
+                    # Check if it's a valid FSF result
+                    if r.get("parse_failed") or r.get("fsf") is None:
+                        continue
+                    
+                    failed_nodes = r.get("failed_nodes")
+                    if failed_nodes is None:
+                        continue
+                    
+                    # Filter: failed_nodes must be between min and max (inclusive)
+                    if min_failed_nodes <= failed_nodes <= max_failed_nodes:
+                        filtered_reasoning.append(r)
+                
+                # Only keep questions that have at least one valid reasoning
+                if filtered_reasoning:
+                    records.append({
+                        "question": question,
+                        "reasoning": filtered_reasoning
+                    })
     except Exception as e:
         print(f"[Worker {worker_id}] Error loading {file_path}: {e}")
+    
     return records
 
 
-def load_deepmath_data(file_paths: List[str], num_workers: Optional[int] = None) -> List[Dict[str, Any]]:
-    """Load all DeepMath JSONL files in parallel."""
+def load_fsf_data(
+    file_paths: List[str],
+    min_failed_nodes: int = 1,
+    max_failed_nodes: int = 3,
+    num_workers: Optional[int] = None
+) -> List[Dict[str, Any]]:
+    """Load FSF JSONL files with failed_nodes filtering."""
     if num_workers is None:
         num_workers = min(cpu_count(), max(1, len(file_paths)))
 
     print(f"  Loading {len(file_paths)} file(s) with {num_workers} workers...")
-    args_list = [(fp, i) for i, fp in enumerate(file_paths)]
+    print(f"  Filtering: failed_nodes between {min_failed_nodes} and {max_failed_nodes}")
+    
+    args_list = [(fp, i, min_failed_nodes, max_failed_nodes) for i, fp in enumerate(file_paths)]
 
     with Pool(processes=num_workers) as pool:
-        results = pool.map(_load_single_file, args_list)
+        results = pool.map(_load_single_file_with_fsf, args_list)
 
     records = list(itertools.chain.from_iterable(results))
-    print(f"  Loaded {len(records)} questions from {len(file_paths)} file(s)")
+    
+    # Count total reasonings
+    total_reasonings = sum(len(r["reasoning"]) for r in records)
+    
+    print(f"  Loaded {len(records)} questions with {total_reasonings} valid reasonings")
+    print(f"  (filtered by failed_nodes in [{min_failed_nodes}, {max_failed_nodes}])")
+    
     return records
 
 
 # =============================================================================
-# Entry building
+# Entry building - each reasoning as independent sample
 # =============================================================================
 
-def build_entries_random(
+def build_entries_from_fsf(
     records: List[Dict[str, Any]],
-    seed: int,
     tokenizer=None,
     max_problem_tokens: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
-    """One randomly selected thought per question."""
-    rng = random.Random(seed)
+    """
+    Build entries where each reasoning is an independent sample.
+    
+    Each entry contains FSF metadata for analysis.
+    """
     entries = []
-    skipped = 0
-
-    for rec in records:
-        question = rec["question"]
-        reasoning_list = rec["reasoning"]
-
-        # Filter to items with non-empty thought
-        valid = [r for r in reasoning_list if r.get("thought", "").strip()]
-        if not valid:
-            skipped += 1
-            continue
-
-        chosen = rng.choice(valid)
-        thought = chosen["thought"].strip()
-        solution = chosen.get("solution", "")
-
-        system_prompt, user_prompt = build_prompt(question, thought)
-
-        if tokenizer is not None and max_problem_tokens is not None:
-            try:
-                if len(tokenizer.encode(user_prompt)) > max_problem_tokens:
-                    skipped += 1
-                    continue
-            except Exception:
-                pass
-
-        entries.append({
-            "question": question,
-            "original_thought": thought,
-            "solution": solution,
-            "system_prompt": system_prompt,
-            "user_prompt": user_prompt,
-        })
-
-    print(f"  Built {len(entries)} entries (skipped {skipped})")
-    return entries
-
-
-def build_entries_all(
-    records: List[Dict[str, Any]],
-    tokenizer=None,
-    max_problem_tokens: Optional[int] = None,
-) -> Dict[str, List[Dict[str, Any]]]:
-    """All thoughts per question; returns {question: [entry, ...]}."""
-    question_to_entries: Dict[str, List[Dict[str, Any]]] = {}
     skipped = 0
     total = 0
 
@@ -202,12 +229,19 @@ def build_entries_all(
                 "solution": solution,
                 "system_prompt": system_prompt,
                 "user_prompt": user_prompt,
+                # FSF metadata
+                "fsf": r.get("fsf"),
+                "failed_nodes": r.get("failed_nodes"),
+                "node_count": r.get("node_count"),
+                "node_count_dict": r.get("node_count_dict"),
+                "dot_graph": r.get("dot_graph"),
+                "retry_count": r.get("retry_count", 0),
             }
-            question_to_entries.setdefault(question, []).append(entry)
+            entries.append(entry)
             total += 1
 
-    print(f"  Built {total} entries across {len(question_to_entries)} questions (skipped {skipped})")
-    return question_to_entries
+    print(f"  Built {total} entries (skipped {skipped})")
+    return entries
 
 
 # =============================================================================
@@ -216,7 +250,6 @@ def build_entries_all(
 
 def split_by_question(
     records: List[Dict[str, Any]],
-    mode: str,
     train_ratio: float,
     seed: int,
     tokenizer=None,
@@ -238,26 +271,52 @@ def split_by_question(
 
     print(f"  Questions: {len(train_records)} train / {len(val_records)} val")
 
-    if mode == "random":
-        train_entries = build_entries_random(train_records, seed, tokenizer, max_problem_tokens)
-        val_entries = build_entries_random(val_records, seed + 1, tokenizer, max_problem_tokens)
-    else:  # all
-        train_q2e = build_entries_all(train_records, tokenizer, max_problem_tokens)
-        val_q2e = build_entries_all(val_records, tokenizer, max_problem_tokens)
+    # Build entries - each reasoning becomes an independent sample
+    train_entries = build_entries_from_fsf(train_records, tokenizer, max_problem_tokens)
+    val_entries = build_entries_from_fsf(val_records, tokenizer, max_problem_tokens)
 
-        # Flatten and shuffle each split independently
-        train_entries = list(itertools.chain.from_iterable(train_q2e.values()))
-        val_entries = list(itertools.chain.from_iterable(val_q2e.values()))
-
-        rng.shuffle(train_entries)
-        random.Random(seed + 1).shuffle(val_entries)
-
-    # For 'random' mode the entries are already 1-per-question, but shuffle anyway
-    if mode == "random":
-        rng.shuffle(train_entries)
-        random.Random(seed + 1).shuffle(val_entries)
+    # Shuffle entries
+    rng.shuffle(train_entries)
+    random.Random(seed + 1).shuffle(val_entries)
 
     return train_entries, val_entries
+
+
+def sample_entries_by_failed_nodes(
+    entries: List[Dict[str, Any]],
+    nonzero_values: List[int] = [1, 2, 3],
+    zero_ratio: float = 0.25,
+    seed: int = 42,
+) -> List[Dict[str, Any]]:
+    """
+    Sample entries so that failed_nodes=0 accounts for `zero_ratio`,
+    and the rest are sampled from `nonzero_values`.
+    """
+    rng = random.Random(seed)
+
+    zero_entries = [e for e in entries if e.get("failed_nodes") == 0]
+    nonzero_entries = [e for e in entries if e.get("failed_nodes") in nonzero_values]
+
+    n_zero = len(zero_entries)
+    n_nonzero = len(nonzero_entries)
+
+    # target: zero / nonzero = zero_ratio / (1 - zero_ratio)
+    target_zero = min(n_zero, int(n_nonzero * zero_ratio / (1 - zero_ratio)))
+    target_nonzero = int(target_zero * (1 - zero_ratio) / zero_ratio)
+    target_nonzero = min(target_nonzero, n_nonzero)
+
+    if target_zero == 0 and target_nonzero == 0:
+        return []
+
+    sampled = []
+    if target_zero > 0:
+        sampled.extend(rng.sample(zero_entries, target_zero))
+    if target_nonzero > 0:
+        sampled.extend(rng.sample(nonzero_entries, target_nonzero))
+
+    rng.shuffle(sampled)
+    print(f"    Sampled {len(sampled)} entries ({target_zero} zero + {target_nonzero} nonzero)")
+    return sampled
 
 
 # =============================================================================
@@ -276,21 +335,42 @@ def print_statistics(entries: List[Dict[str, Any]], name: str = "Dataset"):
     if total == 0:
         print(f"\n{name}: No entries")
         return
+    
     avg_thought = sum(len(e.get("original_thought", "")) for e in entries) / total
     avg_sol = sum(len(e.get("solution", "")) for e in entries) / total
+    
+    # FSF statistics
+    fsf_values = [e.get("fsf") for e in entries if e.get("fsf") is not None]
+    failed_nodes_list = [e.get("failed_nodes") for e in entries if e.get("failed_nodes") is not None]
+    
     print(f"\n{name} Statistics:")
-    print(f"  Total entries:              {total}")
+    print(f"  Total entries:               {total}")
     print(f"  Avg original_thought length: {avg_thought:.0f} chars")
     print(f"  Avg solution length:         {avg_sol:.0f} chars")
+    
+    if fsf_values:
+        print(f"  Avg FSF:                     {sum(fsf_values)/len(fsf_values):.4f}")
+        print(f"  FSF range:                   {min(fsf_values):.4f} - {max(fsf_values):.4f}")
+    
+    if failed_nodes_list:
+        failed_dist = {}
+        for fn in failed_nodes_list:
+            failed_dist[fn] = failed_dist.get(fn, 0) + 1
+        print(f"  Failed nodes distribution:")
+        for fn in sorted(failed_dist.keys()):
+            print(f"    {fn} failed nodes: {failed_dist[fn]} entries")
 
 
 def get_default_config() -> Dict[str, Any]:
     return {
         "input_paths": [
-            "/data/hf_home/datasets/Yaseal/CDAD_EXP/deepmath_rl_5k/train.jsonl",
+            "/data/hf_home/datasets/Yaseal/CDAD_EXP/deepmath_rl_5k/train_fsf.jsonl",
         ],
-        "output_dir": "/data/luoys/data/cdad/cot_rewrite_deepmath",
-        "mode": "random",          # "random" or "all"
+        "output_dir": "/data/luoys/data/cdad/cot_rewrite_deepmath_fsf",
+        "min_failed_nodes": 0,      # Minimum failed_nodes to include
+        "max_failed_nodes": 3,      # Maximum failed_nodes to include
+        "target_zero_ratio": 0.25,  # Target ratio of failed_nodes=0 samples
+        "nonzero_failed_nodes": [1, 2, 3],  # Allowed non-zero failed_nodes values
         "tokenizer_path": None,
         "max_problem_tokens": None,
         "train_ratio": 0.99,
@@ -309,23 +389,26 @@ def main(config: Optional[Dict[str, Any]] = None):
 
     input_paths = config["input_paths"]
     output_dir = config["output_dir"]
-    mode = config.get("mode", "random")
+    min_failed_nodes = config.get("min_failed_nodes", 0)
+    max_failed_nodes = config.get("max_failed_nodes", 3)
+    target_zero_ratio = config.get("target_zero_ratio", 0.25)
+    nonzero_failed_nodes = config.get("nonzero_failed_nodes", [1, 2, 3])
     tokenizer_path = config.get("tokenizer_path")
     max_problem_tokens = config.get("max_problem_tokens")
     train_ratio = config.get("train_ratio", 0.99)
     random_seed = config.get("random_seed", 42)
     num_workers = config.get("num_workers")
 
-    if mode not in ("random", "all"):
-        raise ValueError(f"--mode must be 'random' or 'all', got: {mode!r}")
-
     print("=" * 60)
-    print("COT Rewrite Dataset Builder (DeepMath format)")
+    print("COT Rewrite Dataset Builder (DeepMath with FSF Filter)")
     print("=" * 60)
     print(f"\nConfiguration:")
     print(f"  INPUT_PATHS:       {input_paths}")
     print(f"  OUTPUT_DIR:        {output_dir}")
-    print(f"  MODE:              {mode}")
+    print(f"  MIN_FAILED_NODES:  {min_failed_nodes}")
+    print(f"  MAX_FAILED_NODES:  {max_failed_nodes}")
+    print(f"  TARGET_ZERO_RATIO: {target_zero_ratio}")
+    print(f"  NONZERO_FAILED_NODES: {nonzero_failed_nodes}")
     print(f"  TRAIN_RATIO:       {train_ratio}")
     print(f"  RANDOM_SEED:       {random_seed}")
     print(f"  TOKENIZER_PATH:    {tokenizer_path}")
@@ -340,18 +423,36 @@ def main(config: Optional[Dict[str, Any]] = None):
         tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
         print(f"  Loaded: {tokenizer_path}")
 
-    # Step 1: Load
+    # Step 1: Load with FSF filtering
     print("\n" + "-" * 60)
-    print("Step 1: Loading DeepMath data...")
+    print("Step 1: Loading FSF data with failed_nodes filtering...")
     print("-" * 60)
-    records = load_deepmath_data(input_paths, num_workers=num_workers)
+    records = load_fsf_data(
+        input_paths,
+        min_failed_nodes=min_failed_nodes,
+        max_failed_nodes=max_failed_nodes,
+        num_workers=num_workers
+    )
 
     # Step 2: Split & build entries
     print("\n" + "-" * 60)
-    print(f"Step 2: Splitting by question and building entries (mode={mode})...")
+    print("Step 2: Splitting by question and building entries...")
+    print("  (Each reasoning becomes an independent sample)")
     print("-" * 60)
     train_entries, val_entries = split_by_question(
-        records, mode, train_ratio, random_seed, tokenizer, max_problem_tokens
+        records, train_ratio, random_seed, tokenizer, max_problem_tokens
+    )
+
+    # Step 2.5: Sample to control failed_nodes distribution
+    print("\n" + "-" * 60)
+    print("Step 2.5: Sampling entries to control failed_nodes distribution...")
+    print(f"  Target: {target_zero_ratio*100:.0f}% failed_nodes=0, rest from {nonzero_failed_nodes}")
+    print("-" * 60)
+    train_entries = sample_entries_by_failed_nodes(
+        train_entries, nonzero_failed_nodes, target_zero_ratio, random_seed
+    )
+    val_entries = sample_entries_by_failed_nodes(
+        val_entries, nonzero_failed_nodes, target_zero_ratio, random_seed + 1
     )
 
     print_statistics(train_entries, "Train Set")
@@ -400,19 +501,24 @@ def main(config: Optional[Dict[str, Any]] = None):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Build COT rewrite dataset from DeepMath format JSONL"
+        description="Build COT rewrite dataset from DeepMath FSF data"
     )
     parser.add_argument("--config", type=str, help="Path to config JSON file")
     parser.add_argument(
-        "--input", type=str, nargs="+", help="Input DeepMath JSONL file path(s)"
+        "--input", type=str, nargs="+", help="Input FSF JSONL file path(s)"
     )
     parser.add_argument("--output-dir", type=str, help="Output directory")
     parser.add_argument(
-        "--mode",
-        type=str,
-        choices=["random", "all"],
-        default="random",
-        help="'random': pick one thought per question; 'all': use all thoughts (default: random)",
+        "--min-failed-nodes",
+        type=int,
+        default=1,
+        help="Minimum failed_nodes to include (default: 1)"
+    )
+    parser.add_argument(
+        "--max-failed-nodes",
+        type=int,
+        default=3,
+        help="Maximum failed_nodes to include (default: 3)"
     )
     parser.add_argument("--train-ratio", type=float, default=0.99, help="Train ratio (default: 0.99)")
     parser.add_argument("--seed", type=int, default=42, help="Random seed (default: 42)")
@@ -430,7 +536,8 @@ if __name__ == "__main__":
             config["input_paths"] = args.input
         if args.output_dir:
             config["output_dir"] = args.output_dir
-        config["mode"] = args.mode
+        config["min_failed_nodes"] = args.min_failed_nodes
+        config["max_failed_nodes"] = args.max_failed_nodes
         config["train_ratio"] = args.train_ratio
         config["random_seed"] = args.seed
         if args.tokenizer:
@@ -446,27 +553,22 @@ if __name__ == "__main__":
 """
 # Example usage:
 
-# Random mode (1 thought per question):
+# Default: failed_nodes in [1, 3]
 python3 build_cot_rewrite_from_deepmath.py \
-    --input /data/hf_home/datasets/Yaseal/CDAD_EXP/deepmath_rl_5k/train.jsonl \
-    --output-dir /data/hf_home/datasets/Yaseal/CDAD_EXP/cot_rewrite_deepmath_random_5k \
-    --mode random \
-    --train-ratio 0.99 \
-    --seed 42
+    --input /data/hf_home/datasets/Yaseal/CDAD_EXP/deepmath_rl_5k/train_fsf.jsonl \
+    --output-dir /data/hf_home/datasets/Yaseal/CDAD_EXP/cot_rewrite_deepmath_fsf_1to3
 
-# All mode (all thoughts per question):
+# Custom failed_nodes range [2, 5]
 python3 build_cot_rewrite_from_deepmath.py \
-    --input /data/hf_home/datasets/Yaseal/CDAD_EXP/deepmath_rl_5k/train.jsonl \
-    --output-dir /data/luoys/data/cdad/cot_rewrite_deepmath_all \
-    --mode all \
-    --train-ratio 0.99 \
-    --seed 42
+    --input /data/hf_home/datasets/Yaseal/CDAD_EXP/deepmath_rl_5k/train_fsf.jsonl \
+    --output-dir /data/hf_home/datasets/Yaseal/CDAD_EXP/cot_rewrite_deepmath_fsf_2to5 \
+    --min-failed-nodes 2 \
+    --max-failed-nodes 5
 
-# With token-length filtering:
+# With token-length filtering
 python3 build_cot_rewrite_from_deepmath.py \
-    --input /data/hf_home/datasets/Yaseal/CDAD_EXP/deepmath_rl_5k/train.jsonl \
-    --output-dir /data/luoys/data/cdad/cot_rewrite_deepmath_all \
-    --mode all \
+    --input /data/hf_home/datasets/Yaseal/CDAD_EXP/deepmath_rl_5k/train_fsf.jsonl \
+    --output-dir /data/luoys/data/cdad/cot_rewrite_deepmath_fsf \
     --tokenizer /data/luoys/modelscope_cache/models/Qwen/Qwen3-4B \
     --max-tokens 4500
 """

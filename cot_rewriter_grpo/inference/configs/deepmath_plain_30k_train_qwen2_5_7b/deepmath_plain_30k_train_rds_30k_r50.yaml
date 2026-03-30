@@ -1,0 +1,26 @@
+build_mode: "rd_split"
+question_limit: null
+
+filters:
+  fsf_positive: false
+  fsf_zero: true
+  correct_only: true
+
+selection_strategy: "priority_correct"
+
+# rd_split 模式：所有 30k 样本都输出，按 RD 决定用哪种 CoT：
+#   top 50% RD  → rewrite_cot（无有效 rewrite 时 fallback 到 original_cot）
+#   bottom 50%  → original_cot
+rd_filter:
+  enabled: true
+  model_name: "Qwen2.5-7B-Instruct"
+  top_percentile: 0.5
+  rd_file: "/data/hf_home/datasets/Yaseal/CDAD_EXP/deepmath_sft_30k/train_morsd.jsonl"
+
+output_filename: "rd_split_50.jsonl"
+
+llamafactory:
+  enabled: true
+  dataset_info_path: "/home/luoys/cdad/LlamaFactory/data/dataset_info.json"
+  dataset_name: "deepmath_plain_30k_train_qwen2_5_7b_rds_30k_r50"
+  use_absolute_path: true

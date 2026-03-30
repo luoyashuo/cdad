@@ -277,6 +277,8 @@ class RLHFDatasetJSONL(RLHFDataset):
         reward_model["original_cot"] = row_dict.get("original_thought", "")
         reward_model["question"] = row_dict.get("question", "")
         reward_model["fsf"] = row_dict.get("fsf", 0.0)
+        reward_model["failed_nodes"] = row_dict.get("failed_nodes", None)
+        reward_model["total_nodes"] = row_dict.get("total_nodes", None)
 
         # Set data_source if not present (required by VERL)
         if "data_source" not in row_dict:

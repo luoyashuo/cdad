@@ -1,0 +1,261 @@
+You are a Cognitive Logic Analyst specializing in reasoning trajectory visualization. Your goal is to convert a raw reasoning trace into a structured Graphviz DOT diagram that distinguishes between successful steps, failed attempts, and explicit self-corrections.
+### Node Definitions (Strict)
+- [Color: lightblue] 'Success/Progress': Direct steps that lead toward the correct answer.
+- [Color: lightpink] 'Failed Attempt': Steps containing errors, incorrect logic, or dead ends.
+- [Color: lightyellow] 'Reflection/Critique': METASTEPS where the model explicitly identifies a previous error (e.g., "Wait, this is wrong because...", "Actually, I missed the boundary condition").
+
+### Edge Rules
+1. CHRONOLOGICAL FLOW: Connect nodes sequentially based on the order of thought.
+2. THE REFLECTION BRIDGE: If a model realizes a mistake and pivots, the graph MUST show the chain: [Failed Node (pink)] -> [Reflection Node (yellow)] -> [Corrective Step (blue)].
+3. BRANCHING: Only branch from a common ancestor if the model completely restarts a task without acknowledging the previous failure.
+
+### Output Format
+- Output ONLY a valid Graphviz DOT code block.
+- Use 'rankdir=TB' and 'node [shape=box, style=filled, fontname="Arial"]'.
+- No conversational filler or explanations.
+
+---
+
+### Few-Shot Examples
+
+#### Example 1: Standard Success (Direct Reasoning)
+Reasoning Trace: The area of a circle with radius 3 is PI * 3^2, which is 9PI. Thus, the answer is 9PI.
+Output:
+```dot
+digraph G {
+    rankdir=TB;
+    node [shape=box, style=filled, fontname="Arial"];
+    N1 [label="Problem: Area of circle r=3", fillcolor=lightblue];
+    N2 [label="Formula: PI * 3^2", fillcolor=lightblue];
+    N3 [label="Calculation: 9PI", fillcolor=lightblue];
+    N4 [label="Final Answer: 9PI", fillcolor=lightblue];
+    N1 -> N2 -> N3 -> N4;
+}
+```
+#### Example 2: The Reflection Bridge (Self-Correction)
+Reasoning Trace: Solve 2x + 10 = 20. First, subtract 10 from 20 to get 30. Wait, 20 minus 10 is 10, not 30. So 2x = 10, which means x = 5. Final answer is 5.
+Output:
+```dot
+digraph G {
+    rankdir=TB;
+    node [shape=box, style=filled, fontname="Arial"];
+    N1 [label="Problem: 2x + 10 = 20", fillcolor=lightblue];
+    N2 [label="Mistake: 20-10=30", fillcolor=lightpink];
+    N3 [label="Reflection: 20-10 is actually 10", fillcolor=lightyellow];
+    N4 [label="Correction: 2x=10 -> x=5", fillcolor=lightblue];
+    N5 [label="Final Answer: 5", fillcolor=lightblue];
+    N1 -> N2 -> N3 -> N4 -> N5;
+}
+```
+#### Example 3: Abandoned Path (Branching without explicit reflection)
+Reasoning Trace: Find the root of 4. Is it 1? No. Let's try 2. 2*2=4. Answer is 2.
+Output:
+```dot
+digraph G {
+    rankdir=TB;
+    node [shape=box, style=filled, fontname="Arial"];
+    N1 [label="Problem: sqrt(4)", fillcolor=lightblue];
+    N2 [label="Try 1: 1*1=1 (Fail)", fillcolor=lightpink];
+    N3 [label="Try 2: 2*2=4 (Success)", fillcolor=lightblue];
+    N4 [label="Final Answer: 2", fillcolor=lightblue];
+    N1 -> N2;
+    N1 -> N3 -> N4;
+}
+```
+### Current Task
+Reasoning Trace: Okay, let's see. I need to figure out if the prime number p must be 3 in this situation. Let me start by restating the problem to make sure I understand it.\n\nWe have a finite group G, and p is the smallest prime divisor of the order of G, denoted |G|. There's an element x in G with order p, so o(x) = p. Then, there's another element h in G such that when we conjugate x by h, we get x raised to the 10th power. In symbols, that's h x h^{-1} = x^{10}. The question is whether this setup necessarily means that p must be 3. We need to prove or disprove this statement.\n\nFirst, let's recall some group theory concepts. When we conjugate an element by another element, the result is an element of the same order. So, the order of x^{10} must be equal to the order of x, which is p. Since x has order p, x^{10} must also have order p. For x^{10} to have order p, the exponent 10 must be relatively prime to p. Wait, is that the case? Let me think.\n\nIf x has order p, then the order of x^k for any integer k is p / gcd(k, p). So, since x^{10} has order p, we must have that gcd(10, p) = 1. Because if gcd(10, p) is d > 1, then the order would be p/d, which is less than p. But we need the order to be exactly p, so gcd(10, p) must be 1. Therefore, p cannot divide 10. That tells us that p is a prime not dividing 10. The primes dividing 10 are 2 and 5, so p cannot be 2 or 5. But p is the smallest prime divisor of |G|, so if the group's order has prime divisors, the smallest one is p, which can't be 2 or 5. But the problem states that p is the smallest prime divisor of |G|. So, possible values for p would be primes larger than 5, but since p is the smallest prime divisor, |G| must have no primes smaller than p. But wait, 3 is smaller than 5 and 7, etc. So perhaps p could be 3? Let me check.\n\nWait, if p is 3, then 3 does not divide 10, so gcd(10, 3) is 1, which would mean x^{10} also has order 3, which is okay. But is there a reason that p must be 3? Or could p be another prime?\n\nWait, but the problem states that p is the smallest prime divisor of |G|. So if |G| has prime divisors, the smallest one is p, which can't be 2 or 5. So p could be 3, 7, 11, etc. So why does the problem suggest that p must be 3?\n\nPerhaps there is more structure here. Let's consider the automorphism group. The conjugation by h is an automorphism of G. Specifically, the map φ: G → G defined by φ(g) = h g h^{-1} is an automorphism. Since φ(x) = x^{10}, this automorphism sends x to x^{10}. The automorphism group of the cyclic subgroup generated by x, which is of order p, is isomorphic to the multiplicative group modulo p, i.e., Aut(⟨x⟩) ≅ (ℤ/pℤ)^×. The order of Aut(⟨x⟩) is p - 1.\n\nSo, the automorphism induced by conjugation by h must correspond to multiplication by 10 modulo p. That is, the map sending x^k to x^{10k} must be an automorphism of ⟨x⟩. For this to be an automorphism, 10 must be a generator of the multiplicative group modulo p, or at least have an order dividing p - 1. Wait, actually, 10 just needs to be an element of (ℤ/pℤ)^×, which it is since p does not divide 10. So 10 is invertible modulo p. Therefore, the map is indeed an automorphism.\n\nBut more importantly, the automorphism φ (conjugation by h) must have an order that divides the order of the automorphism group, which is p - 1. But actually, the order of the automorphism φ is the smallest positive integer m such that φ^m is the identity automorphism. Let's compute φ^m(x). Applying φ once, we get x^{10}. Applying φ again, we get (x^{10})^{10} = x^{10^2}. Applying φ m times, we get x^{10^m}. For φ^m to be the identity automorphism, we must have 10^m ≡ 1 mod p. Therefore, the order of 10 modulo p must divide m. But since φ is an element of Aut(⟨x⟩), which has order p - 1, the order of φ must divide p - 1. Therefore, the order of 10 modulo p divides p - 1, which is true because 10^{p - 1} ≡ 1 mod p by Fermat's little theorem.\n\nHowever, we also have that h is an element of G, and the order of h (or rather, the automorphism induced by h) must divide the order of G. Wait, not exactly. The automorphism φ is conjugation by h, so the inner automorphism group is a subgroup of Aut(⟨x⟩). The order of φ as an automorphism divides the order of h in G, but perhaps this is more complicated. Alternatively, maybe we can relate the exponent 10 to some congruence.\n\nAlternatively, since conjugation by h sends x to x^{10}, then conjugating multiple times would lead to x^{10^k}. Since G is finite, there must be some m where h^m is in the centralizer of x, meaning that conjugation by h^m fixes x. Therefore, x^{10^m} = x, which implies 10^m ≡ 1 mod p. So the multiplicative order of 10 modulo p divides m. But h is an element of G, so the order of h divides |G|. Therefore, the multiplicative order of 10 modulo p divides the order of h, which divides |G|. However, since p is the smallest prime divisor of |G|, the multiplicative order of 10 modulo p must be 1 or a composite number? Wait, not necessarily. Let me think.\n\nAlternatively, since p divides |G| (as the order of x is p), by Cauchy's theorem, but p is the smallest prime divisor. So |G| has order divisible by p, and all other prime divisors are larger than or equal to p. So the multiplicative order of 10 modulo p must divide |G|, but since p is the smallest prime divisor, the multiplicative order of 10 modulo p must be congruent to 0 modulo primes ≥ p or 1? Hmm, perhaps not directly.\n\nWait, the multiplicative order of 10 modulo p is the smallest positive integer k such that 10^k ≡ 1 mod p. Let's denote this order as d. Then, d divides p - 1 by Fermat's little theorem. Also, d divides φ(p - 1), but I don't know if that's helpful here.\n\nSince d divides |G|, as h^d would conjugate x to x^{10^d} = x, so h^d is in the centralizer of x. However, the order of h could be any divisor of |G|. But since p is the smallest prime divisor, the order of h must be a product of primes each ≥ p. Therefore, the multiplicative order d of 10 modulo p must divide a number that is a product of primes each ≥ p. But d divides p - 1, which is less than p (since p is a prime). Wait, p - 1 is less than p, but p - 1's prime divisors must be less than p. However, p is the smallest prime divisor of |G|. Therefore, the prime divisors of p - 1 must not divide |G|, except possibly p - 1 is 1, but p is a prime, so p - 1 is composite unless p = 2. But p cannot be 2 here, since p is the smallest prime divisor, and we already saw that p can't be 2 or 5. Wait, hold on.\n\nWait, if p is the smallest prime divisor of |G|, then all prime divisors of |G| are ≥ p. So, since d divides p - 1, which is less than p, and p is the smallest prime divisor of |G|, then p - 1 must be 1 or have prime factors less than p. But since p is the smallest prime divisor of |G|, those prime factors cannot divide |G|. Therefore, the only way that d divides p - 1 and d divides |G| is if d divides the greatest common divisor of p - 1 and |G|. But since all prime factors of p - 1 are less than p, and p is the smallest prime divisor of |G|, the gcd(p - 1, |G|) must be 1. Therefore, d divides 1, so d = 1. Therefore, 10 ≡ 1 mod p. Therefore, p divides 10 - 1 = 9. Hence, p divides 9. Since p is a prime, p must be 3. Therefore, p = 3. So the answer is yes, p must be 3.\n\nLet me verify this reasoning step by step.\n\n1. Conjugation by h sends x to x^{10}, which is an automorphism of the cyclic group ⟨x⟩.\n\n2. This automorphism corresponds to multiplication by 10 modulo p, so 10 must be an element of (ℤ/pℤ)^×, which it is since p doesn't divide 10.\n\n3. The order of this automorphism is the multiplicative order of 10 modulo p, say d.\n\n4. Since the automorphism is given by conjugation by h, the order d must divide the order of h in G, which in turn divides |G|.\n\n5. However, p is the smallest prime dividing |G|, so any prime divisor of |G| is ≥ p.\n\n6. The multiplicative order d divides p - 1 (by Fermat's little theorem) and divides |G|.\n\n7. Since p is the smallest prime divisor of |G|, any prime factor of p - 1 is less than p, and hence cannot divide |G|.\n\n8. Therefore, the gcd(p - 1, |G|) = 1, which implies that d divides 1. Therefore, d = 1.\n\n9. Hence, 10 ≡ 1 mod p, so p divides 9. The only prime divisor of 9 is 3, so p = 3.\n\nYes, this seems correct. Therefore, the answer is yes, p must be 3.\n\n**Final Answer**\n\\boxed{3}
+Output:
+
+ref_cnt -> 组内归一化（不包括penalty的样本） -> sigmoid -> *=\lambda 作为reward
+
+
+
+
+
+
+    def _build_fsf_prompt(self, reasoning: str) -> str:
+        """
+        Build FSF prompt with proper format.
+
+        Prompt Template (from build_fsf_judge_graph.py):
+        - System: "You are a helpful assistant that converts reasoning traces into Graphviz diagrams."
+        - User: GRAPH_GENERATION_PROMPT + Reasoning trace
+
+        The FSF model will generate a DOT format graph representing the reasoning process.
+        """
+#         GRAPH_GENERATION_PROMPT = """Parse the reasoning trace into a Graphviz diagram. Focus on these essentials:
+
+# Node Rules:
+# - One node per distinct reasoning step
+# - 'fillcolor=lightblue': Successful reasoning steps
+# - 'fillcolor=lightpink': Failed attempts
+
+# Edge Rules:
+# - Connect node A → node B if the information or insight from A is actually used to construct the reasoning in B; branch new attempts from their starting ancestor, not from dead ends.
+
+# Requirements:
+# - Use 'rankdir=TB'
+# - Include ALL attempts (including failures), do not miss any steps in the reasoning.
+# - ALWAYS start with a "problem statement" node
+# - ALWAYS end with a "final answer" node
+# - Do NOT reorder or reorganize the reasoning flow
+
+# Generate complete Graphviz DOT code in dot blocks."""
+        GRAPH_GENERATION_PROMPT = """\
+### Node Definitions (Strict)
+- [Color: lightblue] 'Success/Progress': Direct steps that lead toward the correct answer.
+- [Color: lightpink] 'Failed Attempt': Steps containing errors, incorrect logic, or dead ends.
+- [Color: lightyellow] 'Reflection/Critique': METASTEPS where the model explicitly identifies a previous error (e.g., "Wait, this is wrong because...", "Actually, I missed the boundary condition").
+
+### Edge Rules
+1. CHRONOLOGICAL FLOW: Connect nodes sequentially based on the order of thought.
+2. THE REFLECTION BRIDGE: If a model realizes a mistake and pivots, the graph MUST show the chain: [Failed Node (pink)] -> [Reflection Node (yellow)] -> [Corrective Step (blue)].
+3. BRANCHING: Only branch from a common ancestor if the model completely restarts a task without acknowledging the previous failure.
+
+### Output Format
+- Output ONLY a valid Graphviz DOT code block.
+- Use 'rankdir=TB' and 'node [shape=box, style=filled, fontname="Arial"]'.
+- No conversational filler or explanations.
+
+---
+
+### Few-Shot Examples
+
+#### Example 1: Standard Success (Direct Reasoning)
+Reasoning Trace: The area of a circle with radius 3 is PI * 3^2, which is 9PI. Thus, the answer is 9PI.
+Output:
+```dot
+digraph G {
+    rankdir=TB;
+    node [shape=box, style=filled, fontname="Arial"];
+    N1 [label="Problem: Area of circle r=3", fillcolor=lightblue];
+    N2 [label="Formula: PI * 3^2", fillcolor=lightblue];
+    N3 [label="Calculation: 9PI", fillcolor=lightblue];
+    N4 [label="Final Answer: 9PI", fillcolor=lightblue];
+    N1 -> N2 -> N3 -> N4;
+}
+```
+#### Example 2: The Reflection Bridge (Self-Correction)
+Reasoning Trace: Solve 2x + 10 = 20. First, subtract 10 from 20 to get 30. Wait, 20 minus 10 is 10, not 30. So 2x = 10, which means x = 5. Final answer is 5.
+Output:
+```dot
+digraph G {
+    rankdir=TB;
+    node [shape=box, style=filled, fontname="Arial"];
+    N1 [label="Problem: 2x + 10 = 20", fillcolor=lightblue];
+    N2 [label="Mistake: 20-10=30", fillcolor=lightpink];
+    N3 [label="Reflection: 20-10 is actually 10", fillcolor=lightyellow];
+    N4 [label="Correction: 2x=10 -> x=5", fillcolor=lightblue];
+    N5 [label="Final Answer: 5", fillcolor=lightblue];
+    N1 -> N2 -> N3 -> N4 -> N5;
+}
+```
+#### Example 3: Abandoned Path (Branching without explicit reflection)
+Reasoning Trace: Find the root of 4. Is it 1? No. Let's try 2. 2*2=4. Answer is 2.
+Output:
+```dot
+digraph G {
+    rankdir=TB;
+    node [shape=box, style=filled, fontname="Arial"];
+    N1 [label="Problem: sqrt(4)", fillcolor=lightblue];
+    N2 [label="Try 1: 1*1=1 (Fail)", fillcolor=lightpink];
+    N3 [label="Try 2: 2*2=4 (Success)", fillcolor=lightblue];
+    N4 [label="Final Answer: 2", fillcolor=lightblue];
+    N1 -> N2;
+    N1 -> N3 -> N4;
+}
+```
+### Current Task
+Reasoning Trace: {reasoning_trace}
+Output:
+"""
+
+        # 处理 <rewrite_reasoning> 标签
+        if '<rewrite_reasoning>' in reasoning:
+            reasoning = reasoning.split('<rewrite_reasoning>')[-1]
+        if '</rewrite_reasoning>' in reasoning:
+            reasoning = reasoning.split('</rewrite_reasoning>')[0]
+            
+        reasoning = reasoning.strip()
+
+        messages = [
+            {
+                "role": "system",
+                # "content": "You are a helpful assistant that converts reasoning traces into Graphviz diagrams.",
+                "content": "You are a Cognitive Logic Analyst specializing in reasoning trajectory visualization. Your goal is to convert a raw reasoning trace into a structured Graphviz DOT diagram that distinguishes between successful steps, failed attempts, and explicit self-corrections.",
+            },
+            {
+                "role": "user",
+                # "content": f"{GRAPH_GENERATION_PROMPT}\\n\\nReasoning trace:\\n{reasoning}",
+                "content": f"{GRAPH_GENERATION_PROMPT.format(reasoning_trace=reasoning)}",
+            },
+        ]
+
+        prompt = self.tokenizer.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True, enable_thinking=False
+        )
+        return prompt
+    def _parse_fsf_from_dot(self, dot_output: str) -> Optional[float] | Tuple[Optional[float], int]:
+        """
+        Parse FSF value from DOT graph format output.
+        
+        FSF = failed_nodes / total_nodes
+        Failed nodes have fillcolor=lightpink
+        Reflection/Critique nodes have fillcolor=lightyellow
+        
+        Args:
+            dot_output: Raw model output text (DOT format)
+            
+        Returns:
+            - If return_ref_count=False (default): FSF value between 0.0 and 1.0, or None if parsing fails
+            - If return_ref_count=True: Tuple of (FSF value, reflection/critique node count)
+        """
+        try:
+            import pydot
+
+            # Strip leading newlines and markdown code blocks
+            # Like analyze_rg_fsf.py, directly parse DOT without regex
+            cleaned_output = dot_output.strip().lstrip('```dot').rstrip('```').strip('```').strip()
+
+            # Directly parse with pydot (no regex matching needed)
+            graphs = pydot.graph_from_dot_data(cleaned_output)
+
+            if not graphs or len(graphs) == 0:
+                logger.warning(f"[SGLangFSFActor-{self.gpu_ids}] Failed to parse DOT graph")
+                return None
+
+            graph = graphs[0]
+            nodes = graph.get_nodes() or []
+            
+            node_count = len(nodes)
+            if node_count == 0:
+                return 0.0
+
+            # Count failed nodes (fillcolor=lightpink) and reflection nodes (fillcolor=lightyellow)
+            failed_nodes = 0
+            reflection_nodes = 0
+            for node in nodes:
+                if node is None:
+                    continue
+                try:
+                    fillcolor = node.get('fillcolor')
+                    if fillcolor is not None:
+                        fillcolor_str = str(fillcolor).strip('"').lower()
+                        if fillcolor_str == 'lightpink':
+                            failed_nodes += 1
+                        elif fillcolor_str == 'lightyellow':
+                            reflection_nodes += 1
+                except:
+                    continue
+
+            fsf = failed_nodes / node_count
+            # Log FSF parsing details at INFO level for visibility
+            logger.info(f"[SGLangFSFActor-{self.gpu_ids}] FSF={fsf:.4f} ({failed_nodes}/{node_count} nodes, {node_count-failed_nodes} successful, {reflection_nodes} reflection)")
+            return fsf, reflection_nodes
+
+        except ImportError:
+            logger.warning(f"[SGLangFSFActor-{self.gpu_ids}] pydot not installed")
+            return None
+        except Exception as e:
+            logger.warning(f"[SGLangFSFActor-{self.gpu_ids}] DOT parsing error: {e}")
+            return None

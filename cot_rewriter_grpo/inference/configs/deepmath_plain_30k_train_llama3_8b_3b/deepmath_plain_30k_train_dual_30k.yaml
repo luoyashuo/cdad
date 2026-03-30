@@ -1,0 +1,18 @@
+build_mode: "dual"
+question_limit: null
+
+
+filters:
+  fsf_positive: false
+  fsf_zero: true
+  correct_only: true
+
+selection_strategy: "priority_correct"
+
+output_filename: "dual_30k.jsonl"
+
+llamafactory:
+  enabled: true
+  dataset_info_path: "/home/luoys/cdad/LlamaFactory/data/dataset_info.json"
+  dataset_name: "deepmath_plain_30k_train_llama3_8b_3b_dual_30k"
+  use_absolute_path: true
