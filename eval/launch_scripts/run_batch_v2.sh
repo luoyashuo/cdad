@@ -166,11 +166,16 @@ declare -a JOBS=(
     # "/data/cdad/checkpoints/vallina_sft/llama3_3b_instruct_vallina_full_sft_30k"      "eval_configs/eval_all_sft_v2.yaml"
     # "/data/modelscope_cache/models/LLM-Research/Llama-3.2-1B-Instruct"      "eval_configs/eval_all_sft_v2.yaml"
     # "/data/modelscope_cache/models/LLM-Research/Llama-3.2-3B-Instruct"      "eval_configs/eval_all_sft_v2.yaml"
-    "/data/cdad/checkpoints/tokenskip/llama3_1b_instruct_full_sft_tokenskip_30k_r25"      "eval_configs/eval_all_sft_v2.yaml"
-    "/data/cdad/checkpoints/tokenskip/llama3_1b_instruct_full_sft_tokenskip_30k_r50"      "eval_configs/eval_all_sft_v2.yaml"
-    "/data/cdad/checkpoints/tokenskip/llama3_3b_instruct_full_sft_tokenskip_30k_r25"      "eval_configs/eval_all_sft_v2.yaml"
-    "/data/cdad/checkpoints/tokenskip/llama3_3b_instruct_full_sft_tokenskip_30k_r50"      "eval_configs/eval_all_sft_v2.yaml"
-    "/data/cdad/checkpoints/morsd/llama3_3b_instruct_full_sft_morsd_30k"      "eval_configs/eval_all_sft_v2.yaml"
+    # "/data/cdad/checkpoints/tokenskip/llama3_1b_instruct_full_sft_tokenskip_30k_r25"      "eval_configs/eval_all_sft_v2.yaml"
+    # "/data/cdad/checkpoints/tokenskip/llama3_1b_instruct_full_sft_tokenskip_30k_r50"      "eval_configs/eval_all_sft_v2.yaml"
+    # "/data/cdad/checkpoints/tokenskip/llama3_3b_instruct_full_sft_tokenskip_30k_r25"      "eval_configs/eval_all_sft_v2.yaml"
+    # "/data/cdad/checkpoints/tokenskip/llama3_3b_instruct_full_sft_tokenskip_30k_r50"      "eval_configs/eval_all_sft_v2.yaml"
+    # "/data/cdad/checkpoints/morsd/llama3_3b_instruct_full_sft_morsd_30k"      "eval_configs/eval_all_sft_v2.yaml"
+    "/data/modelscope_cache/models/LLM-Research/Llama-3.2-3B-Instruct"      "eval_configs/eval_all_baseline.yaml"
+    "/data/cdad/checkpoints/tokenskip/llama3_3b_instruct_full_sft_tokenskip_30k_r50"      "eval_configs/eval_all_baseline.yaml"
+    "/data/cdad/checkpoints/vallina_sft/llama3_3b_instruct_vallina_full_sft_30k"      "eval_configs/eval_all_baseline.yaml"
+    "/data/cdad/checkpoints/morsd/llama3_3b_instruct_full_sft_morsd"      "eval_configs/eval_all_baseline.yaml"
+    "/data/qzq/ckpt_mcckd_llama_3b"      "eval_configs/eval_all_baseline.yaml"
 )
 
 # ============================================================
@@ -185,7 +190,7 @@ declare -a JOBS=(
 #       ""                                  # model2 全新跑
 #       "/data/.../model3/evalscope/version_20260318_005432"
 #   )
-RESUME=1
+RESUME=0
 RESUME_DIRS=()
 
 # FORCE_RESCORE=1: 强制重新评分，即使 repeats 数量与上次相同

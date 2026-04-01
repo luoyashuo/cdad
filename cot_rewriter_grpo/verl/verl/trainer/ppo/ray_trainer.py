@@ -882,6 +882,16 @@ class RayPPOTrainer:
             print(f"[VALIDATION] Batch {batch_idx + 1}/{val_dataloader_len} completed in {batch_time:.2f}s")
 
         print(f"[VALIDATION] All batches processed. Total samples: {len(sample_scores)}")
+
+        # Cleanup reward computer after all validation batches to release GPU memory.
+        # (Per-batch cleanup is skipped during validation to avoid SGLang port reuse errors.)
+        try:
+            from verl.experimental.reward.cot_rewriter.combined_reward import cleanup_reward_computer
+            cleanup_reward_computer()
+            print("[VALIDATION] Reward computer cleanup completed.")
+        except Exception as _cleanup_exc:
+            print(f"[VALIDATION] Warning: reward computer cleanup failed: {_cleanup_exc}")
+
         self._maybe_log_val_generations(inputs=sample_inputs, outputs=sample_outputs, scores=sample_scores)
 
         # dump generations

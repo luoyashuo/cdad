@@ -90,6 +90,8 @@ uv pip install torch-memory-saver
 uv pip install pydot>=2.0.0
 uv pip install graphviz>=0.20.0
 uv pip install matplotlib seaborn
+uv pip install aiofiles==25.1.0
+uv pip install loguru==0.7.3
 ```
 
 

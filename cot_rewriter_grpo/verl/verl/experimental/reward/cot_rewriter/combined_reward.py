@@ -2042,8 +2042,13 @@ def compute_cot_rewriter_reward(
         },
     }
 
-    # Cleanup Student vLLM to release GPU memory for Actor vLLM reload
-    if cleanup_after_compute:
+    # Cleanup Student vLLM to release GPU memory for Actor vLLM reload.
+    # During validation, skip per-batch cleanup to avoid EADDRINUSE errors when
+    # SGLang tries to reuse ports that are still in TIME_WAIT from the previous batch.
+    # The _validate() loop in ray_trainer.py is responsible for calling cleanup after
+    # all validation batches are done.
+    is_validation = data.meta_info.get("validate", False)
+    if cleanup_after_compute and not is_validation:
         cleanup_reward_computer()
 
     return reward_result
