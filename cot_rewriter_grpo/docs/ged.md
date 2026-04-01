@@ -70,5 +70,5 @@ def calculate_sigmoid_ged_reward(orig_dot_str, rew_dot_str, alpha=0.5):
 
 # Swanlab和rollout_data保存
 1. swanlab reward中记录ged的max,min,mean; 还有记录ged归一化后的ged_01的max,min,mean
-2. rollout_data中记录ged,ged_01
+2. rollout_data中记录ged,ged_01的值
 
