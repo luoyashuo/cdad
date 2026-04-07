@@ -182,6 +182,175 @@ def extract_rewrite_reasoning(text: str) -> Tuple[str, bool, str]:
     return fallback_content, False, error_reason
 
 
+def _clean_dot_output(dot_str: str) -> str:
+    """Remove markdown fences around DOT output if present."""
+    cleaned = (dot_str or "").strip()
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r"^```[a-zA-Z]*\s*", "", cleaned)
+        cleaned = re.sub(r"\s*```$", "", cleaned)
+    return cleaned.strip()
+
+
+def _normalize_fillcolor(attrs: Dict[str, Any]) -> str:
+    """Normalize pydot/networkx fillcolor values for GED cost functions."""
+    fillcolor = attrs.get("fillcolor", "lightblue")
+    if isinstance(fillcolor, (list, tuple)):
+        fillcolor = fillcolor[0] if fillcolor else "lightblue"
+    return str(fillcolor).strip('"').lower()
+
+
+def dot_to_nx_graph(dot_str: str):
+    """Convert DOT text into a NetworkX directed graph."""
+    if not dot_str or not isinstance(dot_str, str):
+        return None
+
+    try:
+        import networkx as nx
+        import pydot
+    except ImportError as exc:
+        raise ImportError(
+            "GED logic reward requires both 'networkx' and 'pydot' to be installed."
+        ) from exc
+
+    cleaned = _clean_dot_output(dot_str)
+    graphs = pydot.graph_from_dot_data(cleaned)
+    if not graphs:
+        return None
+
+    return nx.DiGraph(nx.nx_pydot.from_pydot(graphs[0]))
+
+
+def calculate_graph_edit_distance(
+    original_dot_str: str,
+    rewrite_dot_str: str,
+    timeout: float = 5.0,
+) -> Optional[float]:
+    """
+    Compute GED between two reasoning graphs.
+
+    Returns None when DOT parsing fails or NetworkX times out.
+    """
+    try:
+        import networkx as nx
+    except ImportError as exc:
+        raise ImportError(
+            "GED logic reward requires both 'networkx' and 'pydot' to be installed."
+        ) from exc
+
+    g_orig = dot_to_nx_graph(original_dot_str)
+    g_rewrite = dot_to_nx_graph(rewrite_dot_str)
+    if g_orig is None or g_rewrite is None:
+        return None
+
+    def node_subst_cost(n1_attrs: Dict[str, Any], n2_attrs: Dict[str, Any]) -> float:
+        c1 = _normalize_fillcolor(n1_attrs)
+        c2 = _normalize_fillcolor(n2_attrs)
+        if c1 == c2:
+            return 0.0
+        if c1 == "lightpink" and c2 == "lightblue":
+            return 20.0
+        return 2.0
+
+    def node_del_cost(n_attrs: Dict[str, Any]) -> float:
+        return 20.0 if _normalize_fillcolor(n_attrs) == "lightpink" else 2.0
+
+    def node_ins_cost(n_attrs: Dict[str, Any]) -> float:
+        cost = 20.0 if _normalize_fillcolor(n_attrs) == "lightpink" else 2.0
+        del n_attrs
+        return cost
+
+    ged_distance = nx.graph_edit_distance(
+        g_orig,
+        g_rewrite,
+        node_subst_cost=node_subst_cost,
+        node_del_cost=node_del_cost,
+        node_ins_cost=node_ins_cost,
+        timeout=timeout,
+    )
+    if ged_distance is None:
+        return None
+
+    return float(ged_distance)
+
+
+def _build_logic_reward_groups(
+    batch_size: int,
+    questions: Optional[List[str]] = None,
+    group_size: Optional[int] = None,
+) -> List[Tuple[int, int]]:
+    """Build contiguous group boundaries for group-wise GED normalization."""
+    if batch_size <= 0:
+        return []
+
+    if group_size is not None and group_size > 0:
+        groups = []
+        for start in range(0, batch_size, group_size):
+            end = min(start + group_size, batch_size)
+            groups.append((start, end))
+        return groups
+
+    if questions:
+        groups = []
+        start = 0
+        while start < batch_size:
+            end = start + 1
+            while end < batch_size and questions[end] == questions[start]:
+                end += 1
+            groups.append((start, end))
+            start = end
+        if any((end - start) > 1 for start, end in groups):
+            return groups
+
+    return [(0, batch_size)]
+
+
+def compute_group_wise_ged_reward(
+    ged_values: List[Optional[float]],
+    questions: Optional[List[str]] = None,
+    group_size: Optional[int] = None,
+    alpha: float = 0.5,
+    eps: float = 1e-6,
+) -> List[float]:
+    """
+    Map GED distances to [0, 1] with per-group normalization.
+
+    For groups with multiple valid samples, apply z-score normalization followed by
+    sigmoid(-alpha * z). For singleton groups, fall back to the raw-GED mapping
+    2 / (1 + exp(alpha * ged)) so the sample still receives a useful signal.
+    """
+    rewards = [0.0] * len(ged_values)
+    groups = _build_logic_reward_groups(
+        batch_size=len(ged_values),
+        questions=questions,
+        group_size=group_size,
+    )
+
+    for start, end in groups:
+        valid_indices = [
+            idx for idx in range(start, end)
+            if ged_values[idx] is not None and np.isfinite(float(ged_values[idx]))
+        ]
+        if not valid_indices:
+            continue
+
+        values = np.array([float(ged_values[idx]) for idx in valid_indices], dtype=np.float64)
+
+        if len(valid_indices) == 1:
+            score = 2.0 / (1.0 + np.exp(alpha * values[0]))
+            rewards[valid_indices[0]] = float(np.clip(score, 0.0, 1.0))
+            continue
+
+        mean_val = values.mean()
+        std_val = max(values.std(), eps)
+        z_scores = (values - mean_val) / std_val
+        group_scores = 1.0 / (1.0 + np.exp(alpha * z_scores))
+
+        for idx, score in zip(valid_indices, group_scores):
+            rewards[idx] = float(np.clip(score, 0.0, 1.0))
+
+    return rewards
+
+
 class CombinedRewardComputer:
     """
     Combined Reward Computer
@@ -305,6 +474,10 @@ class CombinedRewardComputer:
         fsf_micro_batch_size: int = 4,  # Micro batch size for FSF inference (to avoid OOM)
         fsf_skip_group_on_parse_error: bool = True,  # Skip entire group if any FSF parsing fails
         save_fsf_dot_outputs: bool = False,  # Whether to save raw FSF DOT outputs to rollout_data
+        logic_reward_group_size: Optional[int] = None,  # Group size for GED normalization
+        logic_reward_alpha: float = 0.5,  # Sigmoid steepness for GED reward
+        logic_reward_ged_timeout: float = 5.0,  # GED solver timeout per sample
+        use_fsf_penalty: bool = False,  # Optional legacy FSF penalty (disabled for GED reward)
         fsf_reward_mode: str = 'direct',  # FSF reward calculation mode: 'direct' or 'threshold'
                                          # - 'direct': R_logic = -rewrite_fsf (default)
                                          # - 'threshold': R_logic = -1 if fsf > 0 else 0
@@ -411,8 +584,15 @@ class CombinedRewardComputer:
             fsf_reward_scale: Scale factor for FSF reward (replaces lambda_logic, default: 1.0)
             fsf_micro_batch_size: Micro batch size for FSF inference to avoid OOM (default: 4).
                 Lower values reduce memory but increase computation time.
-            fsf_skip_group_on_parse_error: If True (default), skip FSF reward for entire group
-                when any sample fails to parse. If False, use 0.0 for failed samples.
+            fsf_skip_group_on_parse_error: Deprecated for GED reward. Kept for compatibility.
+                GED reward now skips only the failed sample instead of dropping the whole group.
+            logic_reward_group_size: Group size used for GED group-wise normalization. When
+                None, the code infers groups from contiguous identical questions and otherwise
+                falls back to the full batch.
+            logic_reward_alpha: Sigmoid steepness for GED-to-reward mapping (default: 0.5).
+            logic_reward_ged_timeout: Timeout in seconds for each NetworkX GED computation.
+            use_fsf_penalty: If True, keep the legacy FSF zero-reward penalty
+                (rewrite_failed_nodes < original_failed_nodes). Default is False.
             r_logic_repeat_n: Number of times to repeat FSF calculation for R_logic (default: 1).
                 Higher values (e.g., 3) reduce LLM judge volatility by averaging multiple samples.
                 R_logic is computed as the average of n independent FSF calculations.
@@ -542,6 +722,10 @@ class CombinedRewardComputer:
         self.fsf_micro_batch_size = fsf_micro_batch_size  # Micro batch size for FSF inference
         self.fsf_skip_group_on_parse_error = fsf_skip_group_on_parse_error  # Skip group on parse error
         self.save_fsf_dot_outputs = save_fsf_dot_outputs  # Whether to save raw DOT outputs
+        self.logic_reward_group_size = logic_reward_group_size
+        self.logic_reward_alpha = logic_reward_alpha
+        self.logic_reward_ged_timeout = logic_reward_ged_timeout
+        self.use_fsf_penalty = use_fsf_penalty
         self.save_prompts = save_prompts  # Whether to save request prompts for debugging
         self.r_logic_repeat_n = r_logic_repeat_n  # Number of times to repeat FSF calculation for averaging
         self.fsf_judge = None  # Created on-demand in compute_reward
@@ -737,6 +921,10 @@ class CombinedRewardComputer:
         # FSF is computed on-demand with proper memory management
         # Memory management: student is cleaned up before FSF computation
         r_logic = [0.0] * batch_size
+        ged_distances: List[Optional[float]] = [None] * batch_size
+        ged_rewards = [0.0] * batch_size
+        logic_reward_valid_flags = [0] * batch_size
+        ged_parse_failed_count = 0
 
         # === Load pre-computed original_fsf from training data ===
         # Training data has 'fsf' field with pre-computed FSF values
@@ -781,7 +969,7 @@ class CombinedRewardComputer:
         fsf_parse_failed_count = 0  # Count of samples with parse failures
         fsf_group_skipped = False  # Whether the entire group's FSF reward was skipped
 
-        # Try FSF if enabled
+        # Try FSF/GED logic reward if enabled
         if self.use_logic_reward:
             if not self.fsf_model_path:
                 raise ValueError("fsf_model_path must be provided when use_logic_reward=True")
@@ -806,10 +994,32 @@ class CombinedRewardComputer:
             )
 
             try:
-                # Compute rewrite FSF only (original_fsf is loaded from dataset)
-                # Support repeated sampling for more stable R_logic
-                # OPTIMIZATION: Instead of calling FSF N times, expand the batch and call once
                 repeat_n = self.r_logic_repeat_n
+                need_dot_outputs = True
+
+                logger.info(
+                    f"[FSF] Computing original graphs for {len(original_cots)} original CoTs "
+                    f"(save_dot_outputs={self.save_fsf_dot_outputs})..."
+                )
+                original_fsf_result = self.fsf_judge.compute_rewrite_fsf_only(
+                    rewrite_cots=original_cots,
+                    return_dot_outputs=need_dot_outputs,
+                    save_prompts=False,
+                )
+
+                computed_original_fsfs = original_fsf_result.get("rewrite_fsfs", [None] * batch_size)
+                computed_original_failed_nodes = original_fsf_result.get("rewrite_failed_nodes", [None] * batch_size)
+                computed_original_total_nodes = original_fsf_result.get("rewrite_total_nodes", [None] * batch_size)
+                computed_original_dot_outputs = original_fsf_result.get("rewrite_dot_outputs", [None] * batch_size)
+
+                for i in range(batch_size):
+                    if computed_original_fsfs[i] is not None:
+                        original_fsfs[i] = computed_original_fsfs[i]
+                    if computed_original_failed_nodes[i] is not None:
+                        original_failed_nodes[i] = computed_original_failed_nodes[i]
+                    if computed_original_total_nodes[i] is not None:
+                        original_total_nodes[i] = computed_original_total_nodes[i]
+                    original_dot_outputs[i] = computed_original_dot_outputs[i]
 
                 # Expand rewrite_cots by repeat_n: [cot0, cot0, cot0, cot1, cot1, cot1, ...]
                 # This allows computing all repeated samples in a single batch call
@@ -833,17 +1043,14 @@ class CombinedRewardComputer:
                 # Single batch call for all repeated samples
                 fsf_result = self.fsf_judge.compute_rewrite_fsf_only(
                     rewrite_cots=expanded_rewrite_cots,
-                    return_dot_outputs=self.save_fsf_dot_outputs,
+                    return_dot_outputs=need_dot_outputs,
                     save_prompts=self.save_prompts,
                 )
 
                 expanded_rewrite_fsfs = fsf_result["rewrite_fsfs"]
                 expanded_rewrite_failed_nodes = fsf_result.get("rewrite_failed_nodes", [None] * len(expanded_rewrite_cots))
                 expanded_rewrite_total_nodes = fsf_result.get("rewrite_total_nodes", [None] * len(expanded_rewrite_cots))
-
-                # Extract DOT outputs if needed
-                if self.save_fsf_dot_outputs:
-                    expanded_dot_outputs = fsf_result.get("rewrite_dot_outputs", [None] * len(expanded_rewrite_cots))
+                expanded_dot_outputs = fsf_result.get("rewrite_dot_outputs", [None] * len(expanded_rewrite_cots))
 
                 # Extract saved prompts if needed
                 if self.save_prompts and "saved_prompts" in fsf_result:
@@ -865,33 +1072,11 @@ class CombinedRewardComputer:
                         if tn_val is not None:
                             rewrite_total_nodes_accumulator[sample_idx].append(tn_val)
 
-                # Reorganize DOT outputs: save all runs' outputs as a list for each sample
-                # When r_logic_repeat_n > 1, collect all DOT outputs for each sample
-                # When r_logic_repeat_n == 1, save single output (for backward compatibility)
-                rewrite_dot_outputs = [None] * batch_size
-                if self.save_fsf_dot_outputs:
-                    # Initialize lists for each sample
-                    rewrite_dot_outputs_lists = [[] for _ in range(batch_size)]
-                    for expanded_idx, dot_output in enumerate(expanded_dot_outputs):
-                        sample_idx, run_idx = sample_to_expanded_map[expanded_idx]
-                        # Collect all runs' outputs
-                        rewrite_dot_outputs_lists[sample_idx].append(dot_output)
-
-                    # Convert to final format:
-                    # - If repeat_n > 1: store as list of all runs' outputs
-                    # - If repeat_n == 1: store as single value (backward compatibility)
-                    for sample_idx in range(batch_size):
-                        if repeat_n > 1:
-                            # Store all runs as a list
-                            rewrite_dot_outputs[sample_idx] = rewrite_dot_outputs_lists[sample_idx]
-                            if sample_idx < 3 and rewrite_dot_outputs_lists[sample_idx]:
-                                logger.info(
-                                    f"[FSF] Sample {sample_idx}: Collected {len(rewrite_dot_outputs_lists[sample_idx])} DOT outputs "
-                                    f"(repeat_n={repeat_n}, saved as list to rewrite_dot_outputs)"
-                                )
-                        else:
-                            # Store single value for backward compatibility
-                            rewrite_dot_outputs[sample_idx] = rewrite_dot_outputs_lists[sample_idx][0] if rewrite_dot_outputs_lists[sample_idx] else None
+                # Reorganize DOT outputs for both internal GED computation and optional rollout saving.
+                rewrite_dot_outputs_lists = [[] for _ in range(batch_size)]
+                for expanded_idx, dot_output in enumerate(expanded_dot_outputs):
+                    sample_idx, _ = sample_to_expanded_map[expanded_idx]
+                    rewrite_dot_outputs_lists[sample_idx].append(dot_output)
 
                 # Compute average FSF for each sample
                 rewrite_fsfs = []
@@ -919,52 +1104,63 @@ class CombinedRewardComputer:
                 rewrite_failed = sum(1 for f in rewrite_fsfs if f is None)
                 fsf_parse_failed_count = rewrite_failed
 
-                # Compute original failed_nodes if not available from dataset
-                if any(fn is None for fn in original_failed_nodes):
-                    logger.info(f"[FSF] Computing original failed_nodes for {batch_size} original CoTs...")
-                    original_fsf_result = self.fsf_judge.compute_rewrite_fsf_only(
-                        rewrite_cots=original_cots,
-                        return_dot_outputs=False,
-                        save_prompts=False,
-                    )
-                    for i in range(batch_size):
-                        if original_failed_nodes[i] is None:
-                            original_failed_nodes[i] = original_fsf_result.get("rewrite_failed_nodes", [None] * batch_size)[i]
-                            original_total_nodes[i] = original_fsf_result.get("rewrite_total_nodes", [None] * batch_size)[i]
+                # Convert collected rewrite DOT outputs to rollout-friendly shape.
+                rewrite_dot_outputs = [None] * batch_size
+                for sample_idx in range(batch_size):
+                    if self.save_fsf_dot_outputs:
+                        if repeat_n > 1:
+                            rewrite_dot_outputs[sample_idx] = rewrite_dot_outputs_lists[sample_idx]
+                        else:
+                            rewrite_dot_outputs[sample_idx] = (
+                                rewrite_dot_outputs_lists[sample_idx][0]
+                                if rewrite_dot_outputs_lists[sample_idx]
+                                else None
+                            )
 
-                # FSF is now a binary penalty (fsf > 0 → reward=0), r_logic kept for logging only
-                r_logic = []
-                for orig_fsf, rew_fsf in zip(original_fsfs, rewrite_fsfs):
-                    if rew_fsf is None:
-                        r_logic.append(0.0)
-                    else:
-                        r_logic.append(-rew_fsf)  # kept for observation/logging
+                # Compute GED per sample; parse failures only skip that sample's logic reward.
+                for i in range(batch_size):
+                    orig_dot = original_dot_outputs[i]
+                    rewrite_dots = rewrite_dot_outputs_lists[i]
+                    if not orig_dot or not rewrite_dots:
+                        ged_parse_failed_count += 1
+                        continue
 
-                has_any_parse_failure = fsf_parse_failed_count > 0
-
-                if has_any_parse_failure and self.fsf_skip_group_on_parse_error:
-                    # Skip entire group when any parsing fails (conservative approach)
-                    # This means R_logic = 0 for all samples, but other rewards (R_cog, R_useful) are still applied
-                    logger.warning(
-                        f"[FSF] FSF parsing failed for {fsf_parse_failed_count} rewrite samples. "
-                        f"Skipping FSF reward for entire group (fsf_skip_group_on_parse_error=True). "
-                        f"R_logic will be 0 for all samples, but R_cog and R_useful are still applied."
-                    )
-                    # Set all FSF rewards to 0 for group
-                    r_logic = [0.0 for _ in range(batch_size)]
-                    rewrite_fsfs = [0.0 for _ in range(batch_size)]
-                    rewrite_failed_nodes = [0 for _ in range(batch_size)]
-                    rewrite_total_nodes = [0 for _ in range(batch_size)]
-                    rewrite_dot_outputs = [None for _ in range(batch_size)]
-                    fsf_group_skipped = True
-                else:
-                    fsf_group_skipped = False
-                    if has_any_parse_failure:
-                        logger.warning(
-                            f"[FSF] FSF parsing failed for {fsf_parse_failed_count} rewrite samples. "
-                            f"Using partial results (fsf_skip_group_on_parse_error=False). "
-                            f"Failed samples have R_logic=0."
+                    sample_geds = []
+                    for rewrite_dot in rewrite_dots:
+                        if not rewrite_dot:
+                            continue
+                        ged_val = calculate_graph_edit_distance(
+                            original_dot_str=orig_dot,
+                            rewrite_dot_str=rewrite_dot,
+                            timeout=self.logic_reward_ged_timeout,
                         )
+                        if ged_val is not None:
+                            sample_geds.append(ged_val)
+
+                    if not sample_geds:
+                        ged_parse_failed_count += 1
+                        continue
+
+                    ged_distances[i] = float(sum(sample_geds) / len(sample_geds))
+                    logic_reward_valid_flags[i] = 1
+
+                ged_rewards = compute_group_wise_ged_reward(
+                    ged_values=ged_distances,
+                    questions=questions,
+                    group_size=self.logic_reward_group_size,
+                    alpha=self.logic_reward_alpha,
+                )
+                r_logic = list(ged_rewards)
+
+                if ged_parse_failed_count > 0:
+                    logger.warning(
+                        f"[GED] Skipped logic reward for {ged_parse_failed_count} samples due to DOT parse/GED failures. "
+                        f"Those samples keep R_logic=0."
+                    )
+
+                # fsf_skip_group_on_parse_error is intentionally ignored for GED reward:
+                # the requirement is to skip only the failed sample, not the whole group.
+                fsf_group_skipped = False
 
                 # Log FSF comparison statistics
                 valid_pairs = [(o, r) for o, r in zip(original_fsfs, rewrite_fsfs) if r is not None]
@@ -975,6 +1171,15 @@ class CombinedRewardComputer:
                         f"{improvements} improvements (rewrite_fsf < original_fsf), "
                         f"mean original_fsf={sum(o for o, _ in valid_pairs)/len(valid_pairs):.4f}, "
                         f"mean rewrite_fsf={sum(r for _, r in valid_pairs)/len(valid_pairs):.4f}"
+                    )
+
+                valid_geds = [v for v in ged_distances if v is not None and np.isfinite(v)]
+                if valid_geds:
+                    logger.info(
+                        f"[GED] Statistics: valid={len(valid_geds)}/{batch_size}, "
+                        f"mean={sum(valid_geds)/len(valid_geds):.4f}, "
+                        f"min={min(valid_geds):.4f}, max={max(valid_geds):.4f}, "
+                        f"alpha={self.logic_reward_alpha}, group_size={self.logic_reward_group_size or 'auto'}"
                     )
             finally:
                 # FSF Judge cleanup - shutdown workers after compute_logic_reward
@@ -1122,10 +1327,10 @@ class CombinedRewardComputer:
         penalized_flags = [False] * batch_size  # Track whether each sample is penalized
         penalty_reasons = [[] for _ in range(batch_size)]  # Track penalty reasons per sample
 
-        # ========== FSF Penalty Detection ==========
+        # ========== Optional Legacy FSF Penalty Detection ==========
         # If rewrite_failed_nodes < original_failed_nodes, treat as penalty: reward → 0
         fsf_penalty_flags = [0.0] * batch_size  # 1.0 if penalty triggered, 0.0 otherwise
-        if self.use_logic_reward:
+        if self.use_logic_reward and self.use_fsf_penalty:
             for i in range(batch_size):
                 rew_fn = rewrite_failed_nodes[i]
                 orig_fn = original_failed_nodes[i]
@@ -1187,14 +1392,18 @@ class CombinedRewardComputer:
                             f"Reward will be set to 0 (original R_cog={r_cog[i]:.4f})"
                         )
 
-        # Compute base rewards: R_base = R_cog + lambda_useful * R_useful
-        # Note: FSF (R_logic) is no longer added to base_rewards; it's now a penalty (fsf > 0 → reward = 0).
+        # Compute base rewards: R_base = R_cog + lambda_useful * R_useful + lambda_logic * R_logic
         # Note: R_cog is NOT modified by correct_judge anymore; penalized samples get 0 at the end.
         if self.use_useful_reward:
-            base_rewards = [c + self.lambda_useful * u
-                           for c, u in zip(r_cog, r_useful)]
+            base_rewards = [
+                c + self.lambda_useful * u + self.lambda_logic * logic
+                for c, u, logic in zip(r_cog, r_useful, r_logic)
+            ]
         else:
-            base_rewards = list(r_cog)
+            base_rewards = [
+                c + self.lambda_logic * logic
+                for c, logic in zip(r_cog, r_logic)
+            ]
 
         # ========== Too Short / Too Long Penalty Detection ==========
         too_short_penalties_actual = [0.0] * batch_size
@@ -1282,6 +1491,12 @@ class CombinedRewardComputer:
             f"penalty_reasons: {dict((r, sum(1 for reasons in penalty_reasons for rr in reasons if rr == r)) for r in ['correct_judge', 'correct_judge_parse_fail', 'fsf', 'too_short', 'too_long', 'repeat'])}"
         )
 
+        ged_distances_for_output = [
+            float(v) if v is not None and np.isfinite(v) else float("nan")
+            for v in ged_distances
+        ]
+        original_fsf_parse_success = [1 if dot else 0 for dot in original_dot_outputs]
+
         # Keep penalty_scale and penalty_mode for backward compatibility in extra_info
         penalty_scale = r_cog_range if self.penalty_mode == "relative" else 1.0
 
@@ -1345,6 +1560,9 @@ class CombinedRewardComputer:
             "original_ppls": original_ppls,  # PPL values for original (ppl mode only)
             "relative_improvement_rates": relative_improvement_rates,  # Formula 1: avg_prob(rewrite)/avg_prob(original) - 1
             "logic_rewards": r_logic,
+            "ged": ged_distances_for_output,
+            "ged_01": ged_rewards,
+            "logic_reward_valid_flags": logic_reward_valid_flags,
             "total_rewards": total_rewards,
             "token_log_probs": token_log_probs,
             "token_ids": token_ids,
@@ -1355,9 +1573,11 @@ class CombinedRewardComputer:
             "rewrite_failed_nodes": rewrite_failed_nodes,  # Failed node counts for rewrite CoTs
             "original_total_nodes": original_total_nodes,  # Total node counts for original CoTs
             "rewrite_total_nodes": rewrite_total_nodes,  # Total node counts for rewrite CoTs
-            # Note: original_dot_outputs is omitted (original cot does not call FSF judge)
+            "original_fsf_parse_success": original_fsf_parse_success,
+            # Parse-success flags and raw DOT outputs from FSF Judge
             "fsf_parse_failed_count": fsf_parse_failed_count,  # Number of samples with FSF parse failures
             "fsf_group_skipped": fsf_group_skipped,  # Whether FSF reward was skipped for entire group
+            "ged_parse_failed_count": ged_parse_failed_count,  # Number of samples skipped by GED reward
             # === Correct Judge Keys ===
             "is_correct_results": is_correct_results,  # Correct Judge results (True=correct, False=incorrect, None=parse failure)
             "correct_judge_parse_failed_count": correct_judge_parse_failed_count,  # Number of samples with parse failures
@@ -1408,6 +1628,7 @@ class CombinedRewardComputer:
                 "original_failed_nodes_min": min([fn for fn in original_failed_nodes if fn is not None]) if any(fn is not None for fn in original_failed_nodes) else None,
                 "original_failed_nodes_mean": sum([fn for fn in original_failed_nodes if fn is not None]) / len([fn for fn in original_failed_nodes if fn is not None]) if any(fn is not None for fn in original_failed_nodes) else None,
                 # === FSF DOT outputs (for saving to rollout_data/val_data) ===
+                "original_dot_outputs": original_dot_outputs if self.save_fsf_dot_outputs else [None] * batch_size,
                 "rewrite_dot_outputs": rewrite_dot_outputs,  # Raw DOT outputs for rewrite CoTs (if save_fsf_dot_outputs=True)
                 # === Saved prompts (for debugging) ===
                 "saved_prompts": saved_prompts,  # Request prompts for student_model (if save_prompts=True)
@@ -1554,6 +1775,10 @@ def compute_cot_rewriter_reward(
     fsf_micro_batch_size: int = 4,  # Micro batch size for FSF inference (avoid OOM)
     fsf_skip_group_on_parse_error: bool = True,  # Skip entire group on parse error
     save_fsf_dot_outputs: bool = False,  # Whether to save raw FSF DOT outputs to rollout_data
+    logic_reward_group_size: Optional[int] = None,  # Group size used for GED normalization
+    logic_reward_alpha: float = 0.5,  # Sigmoid steepness for GED reward mapping
+    logic_reward_ged_timeout: float = 5.0,  # Timeout for each GED computation
+    use_fsf_penalty: bool = False,  # Optional legacy FSF penalty
     save_prompts: bool = False,  # Whether to save request prompts for student_model
     # Deprecated FSF params (kept for backward compat, ignored)
     fsf_reward_scale: float = 1.0,
@@ -1614,7 +1839,12 @@ def compute_cot_rewriter_reward(
         student_logprob_last_n_tokens: SGLang only - only compute last N tokens' logprobs
         fsf_reward_scale: Scale factor for FSF reward (replaces lambda_logic, default: 1.0)
         fsf_micro_batch_size: Micro batch size for FSF inference to avoid OOM (default: 4)
-        fsf_skip_group_on_parse_error: If True (default), skip entire group when any FSF parse fails
+        fsf_skip_group_on_parse_error: Deprecated for GED reward. Kept for compatibility.
+        logic_reward_group_size: Group size for GED group-wise normalization. Recommend
+            setting it to rollout.n for GRPO training.
+        logic_reward_alpha: Sigmoid steepness for GED reward mapping.
+        logic_reward_ged_timeout: Timeout in seconds for each NetworkX GED computation.
+        use_fsf_penalty: If True, keep the legacy FSF zero-reward penalty.
         r_logic_repeat_n: Number of times to repeat FSF calculation for R_logic (default: 1).
             Higher values (e.g., 3) reduce LLM judge volatility by averaging multiple samples.
             R_logic is computed as the average of n independent FSF calculations.
@@ -1811,6 +2041,10 @@ def compute_cot_rewriter_reward(
         fsf_micro_batch_size=fsf_micro_batch_size,
         fsf_skip_group_on_parse_error=fsf_skip_group_on_parse_error,
         save_fsf_dot_outputs=save_fsf_dot_outputs,
+        logic_reward_group_size=logic_reward_group_size,
+        logic_reward_alpha=logic_reward_alpha,
+        logic_reward_ged_timeout=logic_reward_ged_timeout,
+        use_fsf_penalty=use_fsf_penalty,
         save_prompts=save_prompts,
         r_logic_repeat_n=r_logic_repeat_n,
         # ========== Repeat Penalty Parameters ==========
@@ -1855,10 +2089,13 @@ def compute_cot_rewriter_reward(
     original_fsfs = result.get("original_fsfs", [0.0] * batch_size)
     rewrite_fsfs = result.get("rewrite_fsfs", [0.0] * batch_size)
     # Extract DOT outputs if available (when save_fsf_dot_outputs=True)
-    # Note: original_dot_outputs is not extracted (original cot does not call FSF judge)
+    original_dot_outputs = result["extra_info"].get("original_dot_outputs", [None] * batch_size)
     rewrite_dot_outputs = result["extra_info"].get("rewrite_dot_outputs", [None] * batch_size)
+    ged_values = result.get("ged", [float("nan")] * batch_size)
+    ged_01_values = result.get("ged_01", [0.0] * batch_size)
+    logic_reward_valid_flags = result.get("logic_reward_valid_flags", [0] * batch_size)
     # FSF parse success status: True if FSF value is not None, False otherwise
-    # Note: original_fsf_parse_success is not needed (original cot FSF is pre-computed in dataset)
+    original_fsf_parse_success = result.get("original_fsf_parse_success", [0] * batch_size)
     rewrite_fsf_parse_success = [1 if f is not None else 0 for f in rewrite_fsfs]
     too_short_penalties = result.get("too_short_penalties", [0.0] * batch_size)
     too_short_penalty_coeffs = result["extra_info"].get("too_short_penalty_coeffs", [0.0] * batch_size)
@@ -1970,14 +2207,17 @@ def compute_cot_rewriter_reward(
             "original_mean_log_probs": original_mean_log_probs,
             "no_cot_mean_log_probs": no_cot_mean_log_probs,  # Baseline (no CoT)
             "logic_rewards": logic_rewards,
+            "ged": ged_values,
+            "ged_01": ged_01_values,
+            "logic_reward_valid_flags": logic_reward_valid_flags,
             "total_rewards": total_rewards,
             "original_fsfs": original_fsfs,  # Pre-computed from dataset (observation only)
             "rewrite_fsfs": rewrite_fsfs,    # Computed by FSF judge (used for R_logic)
             # FSF parse success status: 1 if FSF value is not None, 0 otherwise
-            # Note: original_fsf_parse_success is omitted (original cot FSF is pre-computed in dataset)
+            "original_fsf_parse_success": original_fsf_parse_success,  # FSF 解析是否成功 (original)
             "rewrite_fsf_parse_success": rewrite_fsf_parse_success,  # FSF 解析是否成功 (rewrite)
             # FSF DOT outputs (if save_fsf_dot_outputs=True)
-            # Note: original_dot_outputs is omitted (original cot does not call FSF judge)
+            "original_dot_outputs": original_dot_outputs,  # Raw DOT outputs for original CoTs
             "rewrite_dot_outputs": rewrite_dot_outputs,  # Raw DOT outputs for rewrite CoTs only
             # Penalty flags for SwanLab logging (zero-reward penalty system)
             # Values are 1.0 (penalized) or 0.0 (not penalized) - used to compute rates
@@ -2029,6 +2269,7 @@ def compute_cot_rewriter_reward(
             # FSF: Parse failure count and group skip flag
             "fsf_parse_failed_count": np.array(result.get("fsf_parse_failed_count", 0), dtype=object),  # Number of samples with parse failures
             "fsf_group_skipped": np.array(result.get("fsf_group_skipped", False), dtype=object),  # Whether FSF reward was skipped for entire group
+            "ged_parse_failed_count": np.array(result.get("ged_parse_failed_count", 0), dtype=object),  # Number of samples skipped by GED reward
             # Correct Judge: Results and penalties
             "is_correct_results": result.get("is_correct_results", [True] * batch_size),  # Correct Judge results
             "correct_judge_parse_failed_count": np.array(result.get("correct_judge_parse_failed_count", 0), dtype=object),  # Number of parse failures

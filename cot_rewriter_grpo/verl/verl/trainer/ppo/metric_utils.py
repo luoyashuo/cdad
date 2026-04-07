@@ -501,6 +501,9 @@ def compute_reward_breakdown_metrics(reward_extra_infos_dict: dict[str, list[Any
         # reward group: all reward-related values
         ("cognitive_rewards", "reward/cognitive"),
         ("useful_rewards", "reward/useful"),  # R_useful: CoT有用程度
+        ("logic_rewards", "reward/logic"),
+        ("ged", "reward/ged"),
+        ("ged_01", "reward/ged_01"),
         ("total_rewards", "reward/total"),
         ("reward_deltas", "reward/delta"),  # Raw rewrite-original log_prob difference
         # stats group: observation statistics (not directly used as reward)
@@ -522,6 +525,9 @@ def compute_reward_breakdown_metrics(reward_extra_infos_dict: dict[str, list[Any
 
         # Convert to numpy array for easier computation
         values_array = np.array(values, dtype=np.float64)
+        values_array = values_array[np.isfinite(values_array)]
+        if values_array.size == 0:
+            continue
 
         # Compute statistics
         metrics[f"{metric_prefix}/mean"] = float(np.mean(values_array))
@@ -603,6 +609,10 @@ def compute_reward_breakdown_metrics(reward_extra_infos_dict: dict[str, list[Any
     if "fsf_group_skipped" in reward_extra_infos_dict:
         fsf_group_skipped = reward_extra_infos_dict["fsf_group_skipped"]
         metrics["stats/fsf_group_skipped"] = 1.0 if fsf_group_skipped else 0.0
+
+    if "ged_parse_failed_count" in reward_extra_infos_dict:
+        ged_parse_failed_count = reward_extra_infos_dict["ged_parse_failed_count"]
+        metrics["stats/ged_parse_failed"] = float(ged_parse_failed_count)
 
     # Correct Judge parse failure statistics
     if "correct_judge_parse_failed_count" in reward_extra_infos_dict:

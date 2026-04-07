@@ -575,7 +575,7 @@ class SGLangCorrectJudgeClient:
             ))
 
         try:
-            results = ray.get(init_futures, timeout=180)
+            results = ray.get(init_futures, timeout=600)
             logger.info(f"[SGLangCorrectJudgeClient] All {len(self.workers)} workers initialized")
         except Exception as e:
             logger.error(f"[SGLangCorrectJudgeClient] Parallel init failed: {e}")

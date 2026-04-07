@@ -6,7 +6,7 @@
 # - max_tokens 相对较小（16000），适合基线模型
 # - 所有 prompts 混合后统一调度
 
-model_path: /data/modelscope_cache/models/LLM-Research/Llama-3.2-3B-Instruct
+model_path: /data/modelscope_cache/models/Qwen/Qwen2.5-7B-Instruct
 
 # 评测 API 配置（用于 LLM judge）
 BASE_URL: https://dashscope.aliyuncs.com/compatible-mode/v1

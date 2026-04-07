@@ -47,11 +47,11 @@ def select_best_rewrite(
     Apply filters and select one rewrite according to strategy.
 
     Args:
-        rewrites: list of rewrite dicts with keys rewrite_cot, is_correct, fsf
+        rewrites: list of rewrite dicts with keys rewrite_cot, is_correct, fsf, ged
         filter_correct_only: keep only is_correct=True rewrites
         filter_fsf_positive: keep only fsf > 0 rewrites
         filter_fsf_zero: keep only fsf == 0 rewrites (mutually exclusive with filter_fsf_positive)
-        strategy: random / max_fsf / priority_correct
+        strategy: random / max_fsf / priority_correct / min_ged
 
     Returns:
         selected rewrite dict, or None if no candidates remain
@@ -83,6 +83,14 @@ def select_best_rewrite(
         pool = correct_cands if correct_cands else candidates
         pool.sort(key=lambda r: r.get("fsf") or 0.0, reverse=True)
         return pool[0] if pool else None
+
+    elif strategy == "min_ged":
+        # Select the rewrite with the lowest GED to the original CoT.
+        # Candidates with ged=None (parse/timeout failures) are deprioritized.
+        valid = [r for r in candidates if r.get("ged") is not None]
+        pool = valid if valid else candidates
+        pool.sort(key=lambda r: r.get("ged") if r.get("ged") is not None else float("inf"))
+        return pool[0]
 
     else:
         raise ValueError(f"Unknown selection strategy: {strategy!r}")
@@ -418,7 +426,7 @@ def parse_args():
     )
     parser.add_argument(
         "--strategy",
-        choices=["random", "max_fsf", "priority_correct"],
+        choices=["random", "max_fsf", "priority_correct", "min_ged"],
         default=None,
         help="Selection strategy (overrides config)",
     )

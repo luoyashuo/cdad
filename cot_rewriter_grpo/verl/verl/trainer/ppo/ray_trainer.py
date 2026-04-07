@@ -1828,6 +1828,7 @@ class RayPPOTrainer:
                                 "rewrite_ppls", "original_ppls",  # PPL values (ppl mode only)
                                 "relative_improvement_rates",  # Formula 1: avg_prob(rewrite)/avg_prob(original) - 1 (observation)
                                 "logic_rewards", "total_rewards", "original_fsfs", "rewrite_fsfs",
+                                "ged", "ged_01", "logic_reward_valid_flags",
                                 "reward_deltas",  # rewrite-original log_prob diff
                                 "r_cog_before_correct_judge",
                                 # Penalty fields
@@ -1840,9 +1841,9 @@ class RayPPOTrainer:
                                 # DAPO filter_groups flags
                                 "truncated", "format_valid", "length_ratio",
                                 # FSF parse status
-                                "fsf_parse_failed_count", "fsf_group_skipped",
+                                "fsf_parse_failed_count", "fsf_group_skipped", "ged_parse_failed_count",
                                 # FSF DOT outputs (raw FSF outputs for debugging/analysis)
-                                "rewrite_dot_outputs",
+                                "original_dot_outputs", "rewrite_dot_outputs",
                                 # Saved prompts for debugging (student_model and fsf_judge requests)
                                 "saved_prompts",
                                 # KL answer divergence values (raw, before normalization)
@@ -2411,6 +2412,7 @@ class RayDAPOTrainer(RayPPOTrainer):
                                 "rewrite_ppls", "original_ppls",  # PPL values (ppl mode only)
                                 "relative_improvement_rates",  # Formula 1: avg_prob(rewrite)/avg_prob(original) - 1 (observation)
                                 "logic_rewards", "total_rewards", "original_fsfs", "rewrite_fsfs",
+                                "ged", "ged_01", "logic_reward_valid_flags",
                                 "reward_deltas",  # rewrite-original log_prob diff
                                 "r_cog_before_correct_judge",
                                 # Penalty fields
@@ -2423,9 +2425,9 @@ class RayDAPOTrainer(RayPPOTrainer):
                                 # DAPO filter_groups flags
                                 "truncated", "format_valid", "length_ratio",
                                 # FSF parse status
-                                "fsf_parse_failed_count", "fsf_group_skipped",
+                                "fsf_parse_failed_count", "fsf_group_skipped", "ged_parse_failed_count",
                                 # FSF DOT outputs (raw FSF outputs for debugging/analysis)
-                                "rewrite_dot_outputs",
+                                "original_dot_outputs", "rewrite_dot_outputs",
                                 # Saved prompts for debugging (student_model and fsf_judge requests)
                                 "saved_prompts",
                                 # KL answer divergence values (raw, before normalization)

@@ -176,6 +176,7 @@ class CoTRewriterRewardManager:
         original_fsfs = extra_info.get("original_fsfs", [])
         rewrite_fsfs = extra_info.get("rewrite_fsfs", [])
         logic_rewards = extra_info.get("logic_rewards", [])
+        ged_values = extra_info.get("ged", [])
 
         for i in range(num_to_print):
             # Decode prompt and response
@@ -204,8 +205,11 @@ class CoTRewriterRewardManager:
             
             # Print FSF info
             if i < len(original_fsfs) and i < len(rewrite_fsfs):
-                logger.info(f"[Sample {i}] FSF: original={original_fsfs[i]:.4f}, rewrite={rewrite_fsfs[i]:.4f}, "
-                           f"logic_reward={logic_rewards[i] if i < len(logic_rewards) else 'N/A'}")
+                ged_str = ged_values[i] if i < len(ged_values) else "N/A"
+                logger.info(
+                    f"[Sample {i}] FSF: original={original_fsfs[i]:.4f}, rewrite={rewrite_fsfs[i]:.4f}, "
+                    f"ged={ged_str}, logic_reward={logic_rewards[i] if i < len(logic_rewards) else 'N/A'}"
+                )
 
     def _apply_overlong_penalty(
         self,

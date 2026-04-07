@@ -607,7 +607,7 @@ class SGLangFSFClient:
             init_futures.append(worker.compute_fsf_batch.remote(["test reasoning"], self.micro_batch_size))
 
         try:
-            results = ray.get(init_futures, timeout=180)
+            results = ray.get(init_futures, timeout=600)
             logger.info(f"[SGLangFSFClient] All {len(self.workers)} workers initialized")
         except Exception as e:
             logger.error(f"[SGLangFSFClient] Parallel init failed: {e}")

@@ -43,13 +43,16 @@ R_cog = avg(log P_student(Answer | Question, Rewrite_CoT)) + alpha * min(avg(log
 
 ### 2. 逻辑奖励 (Logic Reward, R_logic)
 
+当前实现使用 FSF Judge 先把 `original_cot` 和 `rewrite_cot` 转成 reasoning graph 的 DOT，再计算图编辑距离（GED）。
+
 ```
-R_logic = 1 if FSF(Rewrite_CoT) < FSF(Original_CoT) else 0
+GED = graph_edit_distance(Graph(original_cot), Graph(rewrite_cot))
+R_logic = sigmoid(group_normalize(-GED))
 ```
 
-- FSF (Failed Step Fraction): 失败分支占比
-- 使用 LLM-as-a-Judge 分析推理过程中的失败分支
-- 目的：鼓励减少无效的推理分支
+- FSF Judge 仍然负责输出 Graphviz DOT
+- GED 越小表示 rewrite 和 original 的逻辑结构越接近，奖励越高
+- 默认关闭旧的 FSF zero-penalty，改为把 `lambda_logic * R_logic` 直接加到总 reward
 
 ## 环境配置
 
@@ -88,11 +91,14 @@ uv pip install opentelemetry-api==1.34.1 opentelemetry-sdk==1.34.1 opentelemetry
 uv pip install cachetools==5.3.3 # 修复LRUCache报错
 uv pip install torch-memory-saver
 uv pip install pydot>=2.0.0
+uv pip install networkx>=3.0
 uv pip install graphviz>=0.20.0
 uv pip install matplotlib seaborn
 uv pip install aiofiles==25.1.0
 uv pip install loguru==0.7.3
 ```
+
+说明：GED 逻辑奖励依赖 `pydot` 和 `networkx`。如果你的环境里缺这两个包，请在项目根目录使用上面的 `uv pip install` 命令补齐。
 
 
 #### 环境问题

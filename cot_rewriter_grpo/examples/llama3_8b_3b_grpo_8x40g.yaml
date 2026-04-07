@@ -9,7 +9,7 @@ defaults:
 # ========== 基础训练配置 ==========
 trainer:
   project_name: cot_rewriter_grpo_kl
-  experiment_name: llama3_8b_3b_grpo_8x40g_v2
+  experiment_name: llama3_8b_3b_grpo_8x40g_v3
   total_epochs: 1000
   total_training_steps: 500
   save_freq: 10
@@ -231,9 +231,14 @@ custom_reward_function:
     use_tiered_reward: false           # 是否启用阶梯奖励
     tier_step: 0.001                   # 阶梯步长 (5% 改善)
     tier_reward: 0.002                  # 每阶梯奖励值
-    # ==================== FSF Penalty 配置 ====================
-    # FSF 现在作为 penalty：rewrite_fsf > 0 (存在失败步骤) → reward = 0
-    use_logic_reward: true             # 是否启用 FSF penalty
+    # ==================== Logic Reward 配置 (GED over reasoning graph) ====================
+    # 使用 FSF Judge 生成 original/rewrite 的 reasoning graph DOT，再计算 GED 相似度奖励
+    use_logic_reward: true             # 是否启用 GED logic reward
+    lambda_logic: 0.5                  # GED logic reward 权重
+    logic_reward_group_size: ${actor_rollout_ref.rollout.n}  # 组内归一化的 group size
+    logic_reward_alpha: 0.5            # GED reward sigmoid 陡峭度
+    logic_reward_ged_timeout: 5.0      # 单样本 GED 超时秒数
+    use_fsf_penalty: false             # 开启 GED reward 时关闭旧的 FSF zero-penalty
     fsf_model_path: /data/hf_home/models/Yaseal-qwen3_4b_fsf_grm
     fsf_tensor_parallel_size: 1
     fsf_temperature: 0.6
@@ -243,7 +248,7 @@ custom_reward_function:
     fsf_gpu_memory_utilization: 0.35   # 40GB GPU，降低避免 OOM
     fsf_max_model_len: 10000
     fsf_micro_batch_size: 1
-    fsf_skip_group_on_parse_error: true
+    fsf_skip_group_on_parse_error: true  # GED 模式下仅保留兼容，不再整组跳过
     save_fsf_dot_outputs: true
     save_prompts: true
     r_logic_repeat_n: 1

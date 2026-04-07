@@ -801,13 +801,17 @@ def _topup_fsf_judge_output(
                 dot_results[i + j] = dot_out
             pbar.update(end - i)
 
+    from verl.experimental.reward.cot_rewriter.combined_reward import calculate_graph_edit_distance
     for (rec_idx, rw_idx), fsf_val, dot_out in zip(flat_meta, fsf_results, dot_results):
         in_rw = input_records[rec_idx]["rewrite_cots"][rw_idx]
+        orig_dot = existing[rec_idx].get("original_fsf_model_output")
+        ged = calculate_graph_edit_distance(orig_dot, dot_out) if orig_dot and dot_out else None
         existing[rec_idx]["rewrite_cots"].append({
             "rewrite_cot": in_rw["rewrite_cot"],
             "is_correct": in_rw.get("is_correct"),
             "fsf": fsf_val,
             "fsf_model_output": dot_out,
+            "ged": ged,
         })
     # Recompute record-level fsf_tag for topped-up records
     topped_up_idxs = {rec_idx for rec_idx, _ in flat_meta}
@@ -1057,7 +1061,27 @@ def step_fsf_tag(
 
         pending_records = records[already_done:]
 
-        # Flatten
+        # Compute original_cot FSF and dot graphs upfront (one per record)
+        from verl.experimental.reward.cot_rewriter.combined_reward import calculate_graph_edit_distance
+        from tqdm import tqdm
+        original_fsf_list = [None] * len(pending_records)
+        original_dot_list = [None] * len(pending_records)
+        if pending_records:
+            flat_original_cots = [record["original_cot"] for record in pending_records]
+            logger.info(f"[Step4] Computing original_cot FSF+dot for {len(flat_original_cots)} records...")
+            with tqdm(total=len(flat_original_cots), desc="Original CoT FSF", unit="record") as pbar:
+                for i in range(0, len(flat_original_cots), batch_size):
+                    end = min(i + batch_size, len(flat_original_cots))
+                    orig_result = client.compute_rewrite_fsf_only(flat_original_cots[i:end], return_dot_outputs=True)
+                    for j, (fsf_val, dot_out) in enumerate(zip(
+                        orig_result["rewrite_fsfs"],
+                        orig_result.get("rewrite_dot_outputs", [None] * (end - i))
+                    )):
+                        original_fsf_list[i + j] = fsf_val
+                        original_dot_list[i + j] = dot_out
+                    pbar.update(end - i)
+
+        # Flatten rewrite_cots
         flat_rewrite_cots = []
         for record in pending_records:
             for rw in record.get("rewrite_cots", []):
@@ -1071,7 +1095,6 @@ def step_fsf_tag(
             record_flat_end.append(running)
 
         # Run FSF in batches, writing complete records incrementally (same as rollout)
-        from tqdm import tqdm
         fsf_results = [None] * len(flat_rewrite_cots)
         dot_results = [None] * len(flat_rewrite_cots)
         next_record_to_write = 0
@@ -1093,9 +1116,14 @@ def step_fsf_tag(
                            record_flat_end[next_record_to_write] <= end):
                         record = pending_records[next_record_to_write]
                         flat_start = record_flat_end[next_record_to_write] - len(record.get("rewrite_cots", []))
+                        orig_dot = original_dot_list[next_record_to_write]
                         for rw_idx, rw in enumerate(record.get("rewrite_cots", [])):
+                            rw_dot = dot_results[flat_start + rw_idx]
                             rw["fsf"] = fsf_results[flat_start + rw_idx]
-                            rw["fsf_model_output"] = dot_results[flat_start + rw_idx]
+                            rw["fsf_model_output"] = rw_dot
+                            rw["ged"] = calculate_graph_edit_distance(orig_dot, rw_dot)
+                        record["original_fsf"] = original_fsf_list[next_record_to_write]
+                        record["original_fsf_model_output"] = orig_dot
                         record["fsf_tag"] = any(
                             (rw.get("fsf") or 0) > 0 for rw in record.get("rewrite_cots", [])
                         )

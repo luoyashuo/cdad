@@ -24,3 +24,5 @@ uvicorn
 fastapi
 latex2sympy2_extended
 math_verify
+networkx>=3.0
+pydot>=2.0.0

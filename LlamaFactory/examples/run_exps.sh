@@ -13,7 +13,7 @@ export SWANLAB_API_KEY="xmtHYzg2Bw5uh1dprg81E"
 # 日志目录
 LOG_DIR="logs"
 
-TRAIN_PID=1674865  
+TRAIN_PID=2271114  
 
 echo "等待训练进程 PID $TRAIN_PID 结束..."
 while kill -0 "$TRAIN_PID" 2>/dev/null; do
@@ -45,10 +45,13 @@ declare -a CONFIGS=(
     # "examples/rewrite_cot/llama3_1b_instruct_full_sft_dual_30k.yaml"
     # "examples/morsd/llama3_3b_instruct_full_sft_morsd_30k.yaml"
     # "examples/vallina_sft/llama3_3b_instruct_vallina_full_sft_30k.yaml"
-    "examples/tokenskip/llama3_1b_instruct_full_sft_tokenskip_30k_r25.yaml"
-    "examples/tokenskip/llama3_1b_instruct_full_sft_tokenskip_30k_r50.yaml"
-    "examples/tokenskip/llama3_3b_instruct_full_sft_tokenskip_30k_r25.yaml"
-    "examples/tokenskip/llama3_3b_instruct_full_sft_tokenskip_30k_r50.yaml"
+    # "examples/tokenskip/llama3_1b_instruct_full_sft_tokenskip_30k_r25.yaml"
+    # "examples/tokenskip/llama3_1b_instruct_full_sft_tokenskip_30k_r50.yaml"
+    # "examples/tokenskip/llama3_3b_instruct_full_sft_tokenskip_30k_r25.yaml"
+    # "examples/tokenskip/llama3_3b_instruct_full_sft_tokenskip_30k_r50.yaml"
+    # "examples/morsd/qwen2_5_7b_instruct_full_sft_morsd_30k.yaml"
+    # "examples/tokenskip/qwen2_5_7b_instruct_full_sft_tokenskip_30k_r25.yaml"
+    "examples/rewrite_cot/qwen2.5_7b_instruct_lora_sft_mix_30k_r100.yaml"
 
 )
 
@@ -74,10 +77,13 @@ declare -a NAMES=(
     # "llama3_1b_instruct_full_sft_dual_30k"
     # "llama3_3b_instruct_full_sft_morsd_30k"
     # "llama3_3b_instruct_vallina_full_sft_30k"
-    "llama3_1b_instruct_full_sft_tokenskip_30k_r25"
-    "llama3_1b_instruct_full_sft_tokenskip_30k_r50"
-    "llama3_3b_instruct_full_sft_tokenskip_30k_r25"
-    "llama3_3b_instruct_full_sft_tokenskip_30k_r50"
+    # "llama3_1b_instruct_full_sft_tokenskip_30k_r25"
+    # "llama3_1b_instruct_full_sft_tokenskip_30k_r50"
+    # "llama3_3b_instruct_full_sft_tokenskip_30k_r25"
+    # "llama3_3b_instruct_full_sft_tokenskip_30k_r50"
+    # "qwen2_5_7b_instruct_full_sft_morsd_30k"
+    # "qwen2_5_7b_instruct_full_sft_tokenskip_30k_r25"
+    "qwen2.5_7b_instruct_lora_sft_mix_30k_r100"
 )
 
 echo "=== 开始串行训练任务 ==="
