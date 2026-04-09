@@ -9,7 +9,7 @@ defaults:
 # ========== 基础训练配置 ==========
 trainer:
   project_name: cot_rewriter_grpo_kl
-  experiment_name: llama3_8b_3b_grpo_8x40g_v3
+  experiment_name: llama3_8b_3b_grpo_8x40g_v4
   total_epochs: 1000
   total_training_steps: 500
   save_freq: 10
@@ -27,8 +27,8 @@ trainer:
 
 # ========== 数据配置 ==========
 data:
-  train_files: ${oc.env:DATA_BASE_DIR}/cot_rewrite_deepmath_fsf_1to3/train.jsonl
-  val_files: ${oc.env:DATA_BASE_DIR}/cot_rewrite_deepmath_fsf_1to3/val.jsonl
+  train_files: ${oc.env:DATA_BASE_DIR}/cot_rewrite_deepmath_plain_top5k/train.jsonl
+  val_files: ${oc.env:DATA_BASE_DIR}/cot_rewrite_deepmath_plain_top5k/val.jsonl
   train_batch_size: 16
   val_batch_size: 16
   gen_batch_size: 16

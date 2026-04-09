@@ -51,7 +51,10 @@ declare -a CONFIGS=(
     # "examples/tokenskip/llama3_3b_instruct_full_sft_tokenskip_30k_r50.yaml"
     # "examples/morsd/qwen2_5_7b_instruct_full_sft_morsd_30k.yaml"
     # "examples/tokenskip/qwen2_5_7b_instruct_full_sft_tokenskip_30k_r25.yaml"
-    "examples/rewrite_cot/qwen2.5_7b_instruct_lora_sft_mix_30k_r100.yaml"
+    # "examples/rewrite_cot/qwen2.5_7b_instruct_lora_sft_mix_30k_r100.yaml"
+    # "examples/rewrite_cot/llama3_3b_instruct_full_sft_mix_30k_r50_v3.yaml"
+    # "examples/rewrite_cot/llama3_3b_instruct_full_sft_mix_30k_r100_v3.yaml"
+    "examples/rewrite_cot/llama3_3b_instruct_full_sft_rep_fsf_30k.yaml"
 
 )
 
@@ -83,7 +86,10 @@ declare -a NAMES=(
     # "llama3_3b_instruct_full_sft_tokenskip_30k_r50"
     # "qwen2_5_7b_instruct_full_sft_morsd_30k"
     # "qwen2_5_7b_instruct_full_sft_tokenskip_30k_r25"
-    "qwen2.5_7b_instruct_lora_sft_mix_30k_r100"
+    # "qwen2.5_7b_instruct_lora_sft_mix_30k_r100"
+    # "llama3_3b_instruct_full_sft_mix_30k_r50_v3"
+    # llama3_3b_instruct_full_sft_mix_30k_r100_v3
+    llama3_3b_instruct_full_sft_rep_fsf_30k
 )
 
 echo "=== 开始串行训练任务 ==="

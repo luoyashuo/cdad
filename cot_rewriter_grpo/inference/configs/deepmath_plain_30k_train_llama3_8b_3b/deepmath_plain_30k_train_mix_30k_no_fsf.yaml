@@ -1,0 +1,21 @@
+build_mode: "mix"
+mix_rewrite_ratio: 1.0
+target_count: 30000
+question_limit: null
+mix_rewrite_record_filter:
+  original_fsf: "zero"
+
+filters:
+  fsf_positive: false
+  fsf_zero: true
+  correct_only: true
+
+selection_strategy: "priority_correct"
+
+output_filename: "mix_30k_no_fsf.jsonl"
+
+llamafactory:
+  enabled: true
+  dataset_info_path: "/home/luoys/cdad/LlamaFactory/data/dataset_info.json"
+  dataset_name: "deepmath_plain_30k_train_llama3_8b_3b_mix_30k_no_fsf"
+  use_absolute_path: true

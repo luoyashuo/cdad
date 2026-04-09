@@ -53,34 +53,34 @@ import itertools
 # =============================================================================
 
 def build_prompt(question: str, thought: str) -> Tuple[str, str]:
-#     system_prompt = """\
-# You are an expert in math and code. The 'Original Reasoning Process' provides a raw derivation that leads to a correct solution. Your task is to extract the correct path and present it clearly.
-
-# Follow these guidelines:
-# 1. **Refine and Bridge**: Retain the core logic, including essential self-reflections and verification steps. Supplement logical leaps and clarify complex steps to ensure a smooth, coherent flow.
-# 2. **Filter Invalid Paths**: Remove derivation branches within the 'Original Reasoning' that do not lead to the final answer (e.g., failed attempts, incorrect directions, or dead ends). Keep only the effective reasoning path.
-# 3. **Avoid Literal Repetition**: Rephrase the content in your own words rather than simply duplicating the text of the original process.
-
-# **Output Rules:**
-# - Directly output the rewritten reasoning process.
-# - Do NOT mention that you are rewriting another reasoning process."""
-
-
     system_prompt = """\
-You are an expert in math. The 'Original Reasoning Process' provides a raw derivation that leads to a correct solution. Your task is to extract the logical core and transform it into a "Cognitive-Aligned" reasoning path.
+You are an expert in math and code. The 'Original Reasoning Process' provides a raw derivation that leads to a correct solution. Your task is to extract the correct path and present it clearly.
 
 Follow these guidelines:
-
-1. **Refine and Bridge**: Retain the core logic, especially all self-reflection behaviors and verification steps. If the original process contains a moment where it realizes a mistake and pivots to a new strategy (e.g., "Wait, this is wrong because...", "Actually, let's try..."), YOU MUST PRESERVE THIS PIVOT. Supplement logical leaps to ensure a smooth, pedagogical flow.
-
-2. **Preserve Cognitive Pivots**: Treat "trial -> error detection -> correction" sequences as essential cognitive bridges rather than invalid paths. Ensure the transition between an initial attempt, the realization of a flaw, and the subsequent correction is logically explicit and clear.
-
-3. **Avoid Literal Repetition**: Rephrase the content in your own words to improve clarity and logical rigor. The final output should read like a master teacher's explanation, illustrating not just the correct answer, but the thinking process required to reach it.
+1. **Refine and Bridge**: Retain the core logic, including essential self-reflections and verification steps. Supplement logical leaps and clarify complex steps to ensure a smooth, coherent flow.
+2. **Filter Invalid Paths**: Remove derivation branches within the 'Original Reasoning' that do not lead to the final answer (e.g., failed attempts, incorrect directions, or dead ends). Keep only the effective reasoning path.
+3. **Avoid Literal Repetition**: Rephrase the content in your own words rather than simply duplicating the text of the original process.
 
 **Output Rules:**
 - Directly output the rewritten reasoning process.
-- Do NOT mention that you are rewriting another reasoning process.
-- Prioritize the completeness of the cognitive trajectory over absolute brevity."""
+- Do NOT mention that you are rewriting another reasoning process."""
+
+
+#     system_prompt = """\
+# You are an expert in math. The 'Original Reasoning Process' provides a raw derivation that leads to a correct solution. Your task is to extract the logical core and transform it into a "Cognitive-Aligned" reasoning path.
+
+# Follow these guidelines:
+
+# 1. **Refine and Bridge**: Retain the core logic, especially all self-reflection behaviors and verification steps. If the original process contains a moment where it realizes a mistake and pivots to a new strategy (e.g., "Wait, this is wrong because...", "Actually, let's try..."), YOU MUST PRESERVE THIS PIVOT. Supplement logical leaps to ensure a smooth, pedagogical flow.
+
+# 2. **Preserve Cognitive Pivots**: Treat "trial -> error detection -> correction" sequences as essential cognitive bridges rather than invalid paths. Ensure the transition between an initial attempt, the realization of a flaw, and the subsequent correction is logically explicit and clear.
+
+# 3. **Avoid Literal Repetition**: Rephrase the content in your own words to improve clarity and logical rigor. The final output should read like a master teacher's explanation, illustrating not just the correct answer, but the thinking process required to reach it.
+
+# **Output Rules:**
+# - Directly output the rewritten reasoning process.
+# - Do NOT mention that you are rewriting another reasoning process.
+# - Prioritize the completeness of the cognitive trajectory over absolute brevity."""
 
     user_prompt = f"""\
 ## Problem

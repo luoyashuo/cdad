@@ -801,17 +801,13 @@ def _topup_fsf_judge_output(
                 dot_results[i + j] = dot_out
             pbar.update(end - i)
 
-    from verl.experimental.reward.cot_rewriter.combined_reward import calculate_graph_edit_distance
     for (rec_idx, rw_idx), fsf_val, dot_out in zip(flat_meta, fsf_results, dot_results):
         in_rw = input_records[rec_idx]["rewrite_cots"][rw_idx]
-        orig_dot = existing[rec_idx].get("original_fsf_model_output")
-        ged = calculate_graph_edit_distance(orig_dot, dot_out) if orig_dot and dot_out else None
         existing[rec_idx]["rewrite_cots"].append({
             "rewrite_cot": in_rw["rewrite_cot"],
             "is_correct": in_rw.get("is_correct"),
             "fsf": fsf_val,
             "fsf_model_output": dot_out,
-            "ged": ged,
         })
     # Recompute record-level fsf_tag for topped-up records
     topped_up_idxs = {rec_idx for rec_idx, _ in flat_meta}
@@ -975,6 +971,71 @@ def step_correct_tag(
     return output_file
 
 
+
+
+def _topup_original_fsf_in_file(
+    client,
+    output_file: str,
+    batch_size: int,
+    logger: logging.Logger,
+) -> None:
+    """
+    Compute original_fsf and original_fsf_model_output for records that are missing them
+    (e.g. produced by an older pipeline version that skipped original-CoT FSF computation).
+    Records that gain an original_fsf_model_output have their rewrite GED set to 'pending'
+    so _compute_ged_pass can fill them in with the now-available original DOT graph.
+    Atomically rewrites output_file when done.
+    """
+    from tqdm import tqdm
+
+    records = _read_jsonl(output_file)
+    missing_idxs = [
+        i for i, rec in enumerate(records)
+        if not rec.get("original_fsf_model_output")
+    ]
+
+    if not missing_idxs:
+        logger.info("[Step4-OrigFSF] No records missing original_fsf_model_output, skipping topup")
+        return
+
+    logger.info(f"[Step4-OrigFSF] Computing original_fsf for {len(missing_idxs)} records...")
+    original_cots = [records[i]["original_cot"] for i in missing_idxs]
+    orig_fsf_list = [None] * len(missing_idxs)
+    orig_dot_list = [None] * len(missing_idxs)
+
+    with tqdm(total=len(missing_idxs), desc="Original CoT FSF topup", unit="record") as pbar:
+        for i in range(0, len(missing_idxs), batch_size):
+            end = min(i + batch_size, len(missing_idxs))
+            result = client.compute_rewrite_fsf_only(original_cots[i:end], return_dot_outputs=True)
+            for j, (fsf_val, dot_out) in enumerate(zip(
+                result["rewrite_fsfs"],
+                result.get("rewrite_dot_outputs", [None] * (end - i)),
+            )):
+                orig_fsf_list[i + j] = fsf_val
+                orig_dot_list[i + j] = dot_out
+            pbar.update(end - i)
+
+    for list_idx, rec_idx in enumerate(missing_idxs):
+        dot_out = orig_dot_list[list_idx]
+        records[rec_idx]["original_fsf"] = orig_fsf_list[list_idx]
+        records[rec_idx]["original_fsf_model_output"] = dot_out[:32000] if dot_out else dot_out
+
+    tmp_fd, tmp_path = tempfile.mkstemp(dir=os.path.dirname(output_file), suffix=".tmp")
+    try:
+        with os.fdopen(tmp_fd, "w") as fout:
+            for record in records:
+                fout.write(json.dumps(record, ensure_ascii=False) + "\n")
+        os.replace(tmp_path, output_file)
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except Exception:
+            pass
+        raise
+
+    logger.info(f"[Step4-OrigFSF] Topup complete: updated {len(missing_idxs)} records → {output_file}")
+
+
 # ---------------------------------------------------------------------------
 # Step 4: FSF Tag
 # ---------------------------------------------------------------------------
@@ -1012,8 +1073,49 @@ def step_fsf_tag(
                 needs_topup = True
                 logger.info(f"[Step4] Input rollouts increased ({existing_rollouts} → {input_rollouts}), will topup already-judged records")
 
+    model_path = fsf_cfg.get("model_path")
+
     if already_done >= total_records and os.path.exists(output_file) and not needs_topup:
-        logger.info(f"[Step4] FSF tag already complete ({already_done}/{total_records}), skipping")
+        sample = _read_jsonl(output_file)
+        # Check for records missing original_fsf (produced by older pipeline versions)
+        n_missing_orig = sum(1 for rec in sample if not rec.get("original_fsf_model_output"))
+        original_fsf_missing = n_missing_orig > 0
+
+        if original_fsf_missing and not dry_run:
+            logger.info(f"[Step4] {n_missing_orig} records missing original_fsf_model_output, running topup...")
+            if not model_path:
+                raise ValueError("fsf_judge.model_path is required for original_fsf topup")
+            if not ray.is_initialized():
+                ray.init(ignore_reinit_error=True)
+            import torch
+            from verl.experimental.reward.cot_rewriter.sglang_fsf_reward import SGLangFSFClient
+            gen = fsf_cfg["generation"]
+            devices = _get_judge_devices(fsf_cfg)
+            batch_size_cfg = fsf_cfg.get("batch_size", 96)
+            tp = fsf_cfg.get("tensor_parallel_size", 1)
+            num_gpus_cfg = len(devices) if devices is not None else torch.cuda.device_count()
+            num_actors_cfg = num_gpus_cfg // tp
+            micro_bs = max(1, batch_size_cfg // num_actors_cfg)
+            topup_client = SGLangFSFClient(
+                model_path=model_path,
+                tensor_parallel_size=tp,
+                mem_fraction_static=fsf_cfg.get("mem_fraction_static", 0.4),
+                dtype=fsf_cfg.get("dtype", "float16"),
+                max_model_len=fsf_cfg.get("max_model_len", 8192),
+                devices=devices,
+                temperature=gen.get("temperature", 0.6),
+                max_new_tokens=gen.get("max_new_tokens", 8000),
+                micro_batch_size=micro_bs,
+            )
+            try:
+                _topup_original_fsf_in_file(topup_client, output_file, batch_size_cfg, logger)
+            finally:
+                topup_client.shutdown()
+        elif original_fsf_missing and dry_run:
+            logger.info(f"[Step4] DRY-RUN: would topup original_fsf for {n_missing_orig} records")
+        else:
+            logger.info(f"[Step4] FSF tag already complete ({already_done}/{total_records}), skipping")
+
         return output_file
 
     logger.info(f"[Step4] FSF tag: {total_records} records, resuming from {already_done}")
@@ -1022,7 +1124,6 @@ def step_fsf_tag(
         logger.info("[Step4] DRY-RUN: skipping FSF judge")
         return output_file
 
-    model_path = fsf_cfg.get("model_path")
     if not model_path:
         raise ValueError("fsf_judge.model_path is required when fsf_judge.enabled=true")
 
@@ -1062,7 +1163,6 @@ def step_fsf_tag(
         pending_records = records[already_done:]
 
         # Compute original_cot FSF and dot graphs upfront (one per record)
-        from verl.experimental.reward.cot_rewriter.combined_reward import calculate_graph_edit_distance
         from tqdm import tqdm
         original_fsf_list = [None] * len(pending_records)
         original_dot_list = [None] * len(pending_records)
@@ -1120,10 +1220,10 @@ def step_fsf_tag(
                         for rw_idx, rw in enumerate(record.get("rewrite_cots", [])):
                             rw_dot = dot_results[flat_start + rw_idx]
                             rw["fsf"] = fsf_results[flat_start + rw_idx]
-                            rw["fsf_model_output"] = rw_dot
-                            rw["ged"] = calculate_graph_edit_distance(orig_dot, rw_dot)
+                            # Cap DOT output size: parse failures can produce huge repetition-loop garbage
+                            rw["fsf_model_output"] = rw_dot[:32000] if rw_dot else rw_dot
                         record["original_fsf"] = original_fsf_list[next_record_to_write]
-                        record["original_fsf_model_output"] = orig_dot
+                        record["original_fsf_model_output"] = orig_dot[:32000] if orig_dot else orig_dot
                         record["fsf_tag"] = any(
                             (rw.get("fsf") or 0) > 0 for rw in record.get("rewrite_cots", [])
                         )
@@ -1155,12 +1255,231 @@ def _read_jsonl(path: str) -> List[Dict[str, Any]]:
     return records
 
 
+def _parse_dot_stats(dot_string: Optional[str]) -> Optional[Dict[str, Any]]:
+    """
+    Parse a DOT graph string and return failure stats.
+    Must be module-level for multiprocessing.Pool.imap compatibility.
+    Returns dict with {fsf, failed_nodes, total_nodes} or None if parsing fails.
+    """
+    if not dot_string:
+        return None
+    try:
+        import pydot
+        cleaned = dot_string.lstrip('\n').strip('`').strip()
+        graphs = pydot.graph_from_dot_data(cleaned)
+        if not graphs:
+            return None
+        graph = graphs[0]
+        nodes = graph.get_nodes() or []
+        node_count = len(nodes)
+        if node_count == 0:
+            return {"fsf": 0.0, "failed_nodes": 0, "total_nodes": 0}
+        failed_nodes = 0
+        for node in nodes:
+            if node is None:
+                continue
+            try:
+                fillcolor = node.get('fillcolor')
+                if fillcolor is not None and str(fillcolor).strip('"').lower() == 'lightpink':
+                    failed_nodes += 1
+            except Exception:
+                continue
+        return {"fsf": failed_nodes / node_count, "failed_nodes": failed_nodes, "total_nodes": node_count}
+    except Exception:
+        return None
+
+
 def _get_judge_devices(judge_cfg: Dict[str, Any]) -> Optional[List[str]]:
     """Return device list from judge config, or None for auto-detect."""
     gpu_ids = judge_cfg.get("gpu_ids")
     if gpu_ids:
         return [f"cuda:{i}" for i in gpu_ids]
     return None
+
+
+# ---------------------------------------------------------------------------
+# Step 5 (optional): Distribution analysis
+# ---------------------------------------------------------------------------
+
+def step_analyze_distributions(
+    output_file: str,
+    output_dir: str,
+    logger: logging.Logger,
+) -> None:
+    """
+    Analyze and report FSF and failure-node-count distributions.
+    Reads fsf_tag_output.jsonl; saves report to {output_dir}/analysis/fsf_distributions.txt.
+    Does not require GPU.
+    """
+    from multiprocessing import Pool, cpu_count
+    from tqdm import tqdm
+
+    if not os.path.exists(output_file):
+        logger.warning(f"[Analyze] {output_file} not found, skipping distribution analysis")
+        return
+
+    analysis_dir = os.path.join(output_dir, "analysis")
+    os.makedirs(analysis_dir, exist_ok=True)
+    report_file = os.path.join(analysis_dir, "fsf_distributions.txt")
+
+    records = _read_jsonl(output_file)
+    n_records = len(records)
+    logger.info(f"[Analyze] Loaded {n_records} records for distribution analysis")
+
+    # --- Collect stored FSF float values (no DOT parsing needed) ---
+    orig_fsf_vals: List[float] = []
+    rw_fsf_vals_all: List[float] = []
+    rw_fsf_per_record: List[List[float]] = []
+    for rec in records:
+        fsf = rec.get("original_fsf")
+        if fsf is not None:
+            orig_fsf_vals.append(float(fsf))
+        row: List[float] = []
+        for rw in rec.get("rewrite_cots", []):
+            f = rw.get("fsf")
+            if f is not None:
+                v = float(f)
+                rw_fsf_vals_all.append(v)
+                row.append(v)
+        rw_fsf_per_record.append(row)
+
+    # --- Parse DOT graphs in parallel for failure-node counts ---
+    logger.info(f"[Analyze] Parsing DOT graphs for failure-node counts (parallel)...")
+    orig_dot_strs = [rec.get("original_fsf_model_output") for rec in records]
+    rw_dot_strs = [
+        rw.get("fsf_model_output")
+        for rec in records
+        for rw in rec.get("rewrite_cots", [])
+    ]
+
+    n_workers = max(1, min(cpu_count() or 8, 16))
+    with Pool(n_workers) as pool:
+        cs = max(1, len(orig_dot_strs) // (n_workers * 4))
+        orig_dot_stats = list(tqdm(
+            pool.imap(_parse_dot_stats, orig_dot_strs, chunksize=cs),
+            total=len(orig_dot_strs), desc="Parsing original DOTs", unit="rec",
+        ))
+    with Pool(n_workers) as pool:
+        cs = max(1, len(rw_dot_strs) // (n_workers * 4))
+        rw_dot_stats_flat = list(tqdm(
+            pool.imap(_parse_dot_stats, rw_dot_strs, chunksize=cs),
+            total=len(rw_dot_strs), desc="Parsing rewrite DOTs", unit="rollout",
+        ))
+
+    orig_failed_nodes = [s["failed_nodes"] for s in orig_dot_stats if s is not None]
+    orig_total_nodes  = [s["total_nodes"]  for s in orig_dot_stats if s is not None]
+    rw_failed_nodes   = [s["failed_nodes"] for s in rw_dot_stats_flat if s is not None]
+    rw_total_nodes    = [s["total_nodes"]  for s in rw_dot_stats_flat if s is not None]
+
+    # --- Helpers ---
+    def _summary(vals: List, label: str) -> List[str]:
+        if not vals:
+            return [f"  {label}: no data"]
+        n = len(vals)
+        s = sorted(vals)
+        mean = sum(vals) / n
+        var = sum((v - mean) ** 2 for v in vals) / max(n - 1, 1)
+        std = var ** 0.5
+        pcts = {p: s[min(int(n * p / 100), n - 1)] for p in [10, 25, 50, 75, 90, 99]}
+        return [
+            f"  {label}:  n={n}  mean={mean:.3f}  std={std:.3f}",
+            f"    P10={pcts[10]:.3f}  P25={pcts[25]:.3f}  P50={pcts[50]:.3f}"
+            f"  P75={pcts[75]:.3f}  P90={pcts[90]:.3f}  P99={pcts[99]:.3f}",
+        ]
+
+    def _hist(vals: List, bins: List, label: str) -> List[str]:
+        if not vals:
+            return [f"  {label} histogram: no data"]
+        n = len(vals)
+        counts = [0] * (len(bins) - 1)
+        for v in vals:
+            placed = False
+            for i in range(len(bins) - 1):
+                if bins[i] <= v < bins[i + 1]:
+                    counts[i] += 1
+                    placed = True
+                    break
+            if not placed:
+                counts[-1] += 1
+        max_cnt = max(counts) if counts else 1
+        out = [f"  {label} histogram:"]
+        for i, cnt in enumerate(counts):
+            lo = bins[i]
+            hi = bins[i + 1] if i + 1 < len(bins) else "inf"
+            bar = "█" * max(1, int(36 * cnt / max(max_cnt, 1))) if cnt > 0 else ""
+            pct = 100.0 * cnt / n if n > 0 else 0.0
+            hi_str = f"{hi:.2f}" if isinstance(hi, float) else str(hi)
+            out.append(f"    [{lo:>6.2f}, {hi_str:>6}): {cnt:8d} ({pct:5.1f}%) {bar}")
+        return out
+
+    fsf_bins  = [0.0, 0.001, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.001]
+    node_bins = [0, 1, 2, 3, 5, 10, 20, 50, 200]
+
+    # --- Build report ---
+    lines: List[str] = []
+    sep = "=" * 64
+    lines += [sep, "FSF Distribution Analysis", sep]
+    lines += [
+        f"Total records:              {n_records}",
+        f"Total rewrite rollouts:     {len(rw_fsf_vals_all)}",
+        f"Records with original_fsf:  {len(orig_fsf_vals)} / {n_records}"
+        f" ({100*len(orig_fsf_vals)/max(n_records,1):.1f}%)",
+        f"DOT parse success (orig):   {len(orig_failed_nodes)} / {n_records}"
+        f" ({100*len(orig_failed_nodes)/max(n_records,1):.1f}%)",
+        f"DOT parse success (rw):     {len(rw_failed_nodes)} / {max(len(rw_dot_strs),1)}"
+        f" ({100*len(rw_failed_nodes)/max(len(rw_dot_strs),1):.1f}%)",
+        "",
+    ]
+
+    lines += ["--- Original CoT FSF ---"]
+    lines += _summary(orig_fsf_vals, "FSF")
+    lines += _hist(orig_fsf_vals, fsf_bins, "FSF")
+    lines += [""]
+
+    lines += ["--- Original CoT Failure Nodes ---"]
+    lines += _summary(orig_failed_nodes, "Failed nodes")
+    lines += _hist(orig_failed_nodes, node_bins, "Failed nodes")
+    lines += [""]
+    lines += _summary(orig_total_nodes, "Total nodes")
+    lines += _hist(orig_total_nodes, node_bins, "Total nodes")
+    lines += [""]
+
+    lines += ["--- Rewrite CoT FSF (all rollouts) ---"]
+    lines += _summary(rw_fsf_vals_all, "FSF")
+    lines += _hist(rw_fsf_vals_all, fsf_bins, "FSF")
+    lines += [""]
+
+    lines += ["--- Rewrite CoT Failure Nodes ---"]
+    lines += _summary(rw_failed_nodes, "Failed nodes")
+    lines += _hist(rw_failed_nodes, node_bins, "Failed nodes")
+    lines += [""]
+    lines += _summary(rw_total_nodes, "Total nodes")
+    lines += _hist(rw_total_nodes, node_bins, "Total nodes")
+    lines += [""]
+
+    # FSF improvement: compare original vs best rewrite per record
+    delta: List[float] = []
+    for orig_fsf, rw_row in zip(orig_fsf_vals, rw_fsf_per_record):
+        if rw_row:
+            delta.append(orig_fsf - min(rw_row))
+    lines += ["--- FSF Improvement: original - min(rewrite) per record ---"]
+    lines += _summary(delta, "Improvement")
+    if delta:
+        n_imp = sum(1 for d in delta if d > 0)
+        n_zero = sum(1 for d in delta if d == 0)
+        n_worse = sum(1 for d in delta if d < 0)
+        nd = len(delta)
+        lines += [
+            f"  Improved  (delta > 0): {n_imp:7d} / {nd} ({100*n_imp/nd:.1f}%)",
+            f"  No change (delta = 0): {n_zero:7d} / {nd} ({100*n_zero/nd:.1f}%)",
+            f"  Worse     (delta < 0): {n_worse:7d} / {nd} ({100*n_worse/nd:.1f}%)",
+        ]
+
+    report = "\n".join(lines)
+    logger.info("[Analyze]\n" + report)
+    with open(report_file, "w") as f:
+        f.write(report + "\n")
+    logger.info(f"[Analyze] Report saved to {report_file}")
 
 
 STEP_ORDER = ["model", "rollout", "correct", "fsf"]
@@ -1172,7 +1491,7 @@ def determine_start_step(
     config: Dict[str, Any],
 ) -> str:
     if args.step:
-        step_map = {"model": "model", "rollout": "rollout", "correct": "correct", "fsf": "fsf"}
+        step_map = {"model": "model", "rollout": "rollout", "correct": "correct", "fsf": "fsf", "analyze": "analyze"}
         return step_map.get(args.step, "model")
 
     if args.resume or config.get("resume", True):
@@ -1198,8 +1517,9 @@ def parse_args():
     parser.add_argument("--config", required=True, help="Path to YAML config file")
     parser.add_argument(
         "--step",
-        choices=["model", "rollout", "correct", "fsf"],
-        help="Start from this step (overrides resume logic)",
+        choices=["model", "rollout", "correct", "fsf", "analyze"],
+        help="Start from this step (overrides resume logic). "
+             "'analyze' re-runs distribution analysis on existing fsf_tag_output.jsonl.",
     )
     parser.add_argument(
         "--resume",
@@ -1246,10 +1566,19 @@ def main():
     if args.dry_run:
         logger.info("DRY-RUN mode enabled - will check paths without executing")
 
+    # --step analyze: read-only, just (re-)run distribution analysis and exit
+    if args.step == "analyze":
+        fsf_output = os.path.join(output_dir, "intermediate", "fsf_tag_output.jsonl")
+        step_analyze_distributions(fsf_output, output_dir, logger)
+        return
+
     start_step = determine_start_step(args, ckpt_mgr, config)
 
     if start_step == "done":
         logger.info("All steps already complete.")
+        fsf_output = os.path.join(output_dir, "intermediate", "fsf_tag_output.jsonl")
+        if os.path.exists(fsf_output):
+            step_analyze_distributions(fsf_output, output_dir, logger)
         return
 
     logger.info(f"Starting from step: {start_step}")
@@ -1321,6 +1650,11 @@ def main():
 
     logger.info("Pipeline steps 1-4 complete.")
     logger.info(f"Output directory: {output_dir}")
+
+    # Distribution analysis (always runs after step 4, or when resuming a fully-done run)
+    fsf_output = os.path.join(output_dir, "intermediate", "fsf_tag_output.jsonl")
+    if not args.dry_run and os.path.exists(fsf_output):
+        step_analyze_distributions(fsf_output, output_dir, logger)
 
 
 if __name__ == "__main__":

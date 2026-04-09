@@ -1,0 +1,24 @@
+# Dataset build config for deepmath_plain_30k_train
+# 开启 correct 过滤，关闭 FSF 过滤（因为 FSF judge 未完成）
+
+build_mode: "mix"
+question_limit: null
+
+filters:
+  fsf_positive: false      # 关闭 FSF 过滤（FSF judge 未完成）
+  correct_only: true       # 开启 correct 过滤
+
+selection_strategy: "random"
+
+# Mix mode 配置
+mix_rewrite_ratio: 0.5
+target_count: 30000
+
+output_filename: "mix_30k_r50_v3.jsonl"
+
+# LlamaFactory 自动注册
+llamafactory:
+  enabled: true
+  dataset_info_path: "/home/luoys/cdad/LlamaFactory/data/dataset_info.json"
+  dataset_name: "deepmath_plain_30k_train_llama3_8b_3b_mix_30k_r50_v3"
+  use_absolute_path: true

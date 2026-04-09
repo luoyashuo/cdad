@@ -36,6 +36,46 @@ def _read_jsonl(path: str) -> List[Dict[str, Any]]:
     return records
 
 
+def _get_original_fsf_value(record: Dict[str, Any]) -> Optional[float]:
+    """Return original_fsf as float when present and numeric."""
+    value = record.get("original_fsf")
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _record_matches_original_fsf(record: Dict[str, Any], mode: Optional[str]) -> bool:
+    """
+    Record-level filter for deciding whether a question is eligible for rewrite
+    replacement in mix mode.
+
+    Supported modes:
+      - any / all / None: no filtering
+      - positive / gt0 / nonzero: original_fsf > 0
+      - zero / eq0: original_fsf == 0
+    """
+    if mode is None:
+        return True
+
+    normalized = str(mode).strip().lower()
+    if normalized in ("", "any", "all", "none"):
+        return True
+
+    fsf_value = _get_original_fsf_value(record)
+    if fsf_value is None:
+        return False
+
+    if normalized in ("positive", "gt0", "nonzero"):
+        return fsf_value > 0
+    if normalized in ("zero", "eq0"):
+        return fsf_value == 0
+
+    raise ValueError(f"Unknown original_fsf filter mode: {mode!r}")
+
+
 def select_best_rewrite(
     rewrites: List[Dict[str, Any]],
     filter_correct_only: bool,
@@ -199,6 +239,12 @@ def _make_sharegpt_sample(question: str, cot: str, solution: str) -> Dict[str, A
     }
 
 
+def _format_ratio(numerator: int, denominator: int) -> str:
+    if denominator <= 0:
+        return "N/A"
+    return f"{numerator}/{denominator} ({100.0 * numerator / denominator:.2f}%)"
+
+
 def build_dataset(
     records: List[Dict[str, Any]],
     output_file: str,
@@ -211,6 +257,7 @@ def build_dataset(
     question_limit: Optional[int] = None,
     mix_rewrite_ratio: float = 0.5,
     target_count: Optional[int] = None,
+    mix_rewrite_record_original_fsf: Optional[str] = None,
 ) -> Dict[str, int]:
     """
     Build ShareGPT dataset from a list of records.
@@ -242,6 +289,8 @@ def build_dataset(
     output_samples = 0
     mix_rewrite = 0
     mix_original = 0
+    mix_rewrite_ineligible = 0
+    mix_rewrite_no_valid = 0
 
     if build_mode == "mix":
         # Pre-pass: split into valid-rewrite pool and no-rewrite pool
@@ -249,6 +298,11 @@ def build_dataset(
         no_rewrite_pool: List[Dict] = []
 
         for record in records:
+            if not _record_matches_original_fsf(record, mix_rewrite_record_original_fsf):
+                no_rewrite_pool.append(record)
+                mix_rewrite_ineligible += 1
+                continue
+
             rewrites = record.get("rewrite_cots", [])
             best = select_best_rewrite(
                 rewrites,
@@ -261,6 +315,7 @@ def build_dataset(
                 valid_rewrite_pool.append((record, best))
             else:
                 no_rewrite_pool.append(record)
+                mix_rewrite_no_valid += 1
 
         skipped = len(no_rewrite_pool)
 
@@ -313,6 +368,8 @@ def build_dataset(
             "output_samples": output_samples,
             "mix_rewrite": mix_rewrite,
             "mix_original": mix_original,
+            "mix_rewrite_ineligible": mix_rewrite_ineligible,
+            "mix_rewrite_no_valid": mix_rewrite_no_valid,
         }
 
     with open(output_file, "w") as fout:
@@ -365,6 +422,8 @@ def build_dataset(
         "output_samples": output_samples,
         "mix_rewrite": mix_rewrite,
         "mix_original": mix_original,
+        "mix_rewrite_ineligible": mix_rewrite_ineligible,
+        "mix_rewrite_no_valid": mix_rewrite_no_valid,
     }
 
 
@@ -495,10 +554,15 @@ def main():
     target_count = db_cfg.get("target_count", None)
     if target_count is not None:
         target_count = int(target_count)
+    mix_rewrite_record_filter_cfg = db_cfg.get("mix_rewrite_record_filter", {})
+    mix_rewrite_record_original_fsf = mix_rewrite_record_filter_cfg.get("original_fsf", None)
+    dataset_input_file = db_cfg.get("input_file", None)
 
     # Determine input/output paths
     if args.input_file:
         input_file = args.input_file
+    elif dataset_input_file:
+        input_file = dataset_input_file
     else:
         # Try checkpoint first
         ckpt_mgr = CheckpointManager(output_dir)
@@ -535,6 +599,10 @@ def main():
     if build_mode == "mix":
         print(f"  Mix ratio:      rewrite={mix_rewrite_ratio:.2f}, original={1-mix_rewrite_ratio:.2f}")
         print(f"  Target count:   {target_count if target_count is not None else 'all valid rewrites'}")
+        print(
+            "  Rewrite pool:   "
+            f"original_fsf={mix_rewrite_record_original_fsf if mix_rewrite_record_original_fsf is not None else 'any'}"
+        )
 
     stats = build_dataset(
         records=records,
@@ -548,6 +616,7 @@ def main():
         question_limit=question_limit,
         mix_rewrite_ratio=mix_rewrite_ratio,
         target_count=target_count,
+        mix_rewrite_record_original_fsf=mix_rewrite_record_original_fsf,
     )
 
     print(f"\nDone:")
@@ -558,6 +627,10 @@ def main():
     if build_mode == "mix":
         print(f"  Mix rewrite:      {stats['mix_rewrite']}")
         print(f"  Mix original:     {stats['mix_original']}")
+        print(f"  Replacement ratio(output):      {_format_ratio(stats['mix_rewrite'], stats['output_samples'])}")
+        print(f"  Original retain ratio(output):  {_format_ratio(stats['mix_original'], stats['output_samples'])}")
+        print(f"  Rewrite ineligible(original_fsf filter): {stats['mix_rewrite_ineligible']}")
+        print(f"  Rewrite fallback(no valid rewrite):      {stats['mix_rewrite_no_valid']}")
     print(f"  Output file:      {output_file}")
 
     # LlamaFactory registration
