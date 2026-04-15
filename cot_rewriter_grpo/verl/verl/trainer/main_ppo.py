@@ -241,13 +241,23 @@ class TaskRunner:
             role_worker_mapping[Role.RefPolicy] = ray.remote(ActorRolloutRefWorker)
             mapping[Role.RefPolicy] = global_pool_id
 
+        disable_validation = (
+            config.trainer.test_freq <= 0
+            and not config.trainer.get("val_before_train", True)
+            and not config.trainer.get("val_only", False)
+        )
+
         # Load the reward manager for training and validation.
         reward_fn = load_reward_manager(
             config, tokenizer, num_examine=0, **config.reward_model.get("reward_kwargs", {})
         )
-        val_reward_fn = load_reward_manager(
-            config, tokenizer, num_examine=1, **config.reward_model.get("reward_kwargs", {})
-        )
+        if disable_validation:
+            print("[VALIDATION] Disabled by config: skipping val reward manager and val dataset creation")
+            val_reward_fn = None
+        else:
+            val_reward_fn = load_reward_manager(
+                config, tokenizer, num_examine=1, **config.reward_model.get("reward_kwargs", {})
+            )
 
         # Get TaskRunner GPU resources for resource check adjustment
         # TaskRunner GPUs are time-shared with training (used after vLLM offload for reward computation)
@@ -262,7 +272,9 @@ class TaskRunner:
 
         # Create training and validation datasets.
         train_dataset = create_rl_dataset(config.data.train_files, config.data, tokenizer, processor, is_train=True)
-        val_dataset = create_rl_dataset(config.data.val_files, config.data, tokenizer, processor, is_train=False)
+        val_dataset = None
+        if not disable_validation:
+            val_dataset = create_rl_dataset(config.data.val_files, config.data, tokenizer, processor, is_train=False)
         train_sampler = create_rl_sampler(config.data, train_dataset)
 
         # Select trainer based on configuration.

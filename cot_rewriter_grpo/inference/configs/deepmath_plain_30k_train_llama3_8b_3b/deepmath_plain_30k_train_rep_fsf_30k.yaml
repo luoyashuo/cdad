@@ -2,6 +2,7 @@ build_mode: "mix"
 mix_rewrite_ratio: 1.0
 target_count: 30000
 question_limit: null
+mix_select_longest: true
 input_file: "/data/hf_home/datasets/Yaseal/CDAD_EXP/cot_rewrite/llama3_8b_3b_grpo_8x40g/intermediate/fsf_tag_output.jsonl"
 mix_rewrite_record_filter:
   original_fsf: "positive"

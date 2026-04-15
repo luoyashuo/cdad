@@ -232,8 +232,13 @@ custom_reward_function:
     tier_step: 0.001                   # 阶梯步长 (5% 改善)
     tier_reward: 0.002                  # 每阶梯奖励值
     # ==================== FSF Penalty 配置 ====================
-    # FSF 现在作为 penalty：rewrite_fsf > 0 (存在失败步骤) → reward = 0
-    use_logic_reward: true             # 是否启用 FSF penalty
+    # 使用 FSF Judge 生成 original/rewrite 的 reasoning graph DOT，再计算 GED 相似度奖励
+    use_logic_reward: false             # 是否启用 GED logic reward
+    lambda_logic: 0.5                  # GED logic reward 权重
+    logic_reward_group_size: ${actor_rollout_ref.rollout.n}  # 组内归一化的 group size
+    logic_reward_alpha: 0.5            # GED reward sigmoid 陡峭度
+    logic_reward_ged_timeout: 5.0      # 单样本 GED 超时秒数
+    use_fsf_penalty: true             # 开启 GED reward 时关闭旧的 FSF zero-penalty
     fsf_model_path: /data/hf_home/models/Yaseal-qwen3_4b_fsf_grm
     fsf_tensor_parallel_size: 1
     fsf_temperature: 0.3

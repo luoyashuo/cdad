@@ -242,6 +242,64 @@ def select_top_thought_length_entries(
     return selected_entries
 
 
+def select_mixed_thought_length_entries(
+    raw_entries: List[Dict[str, Any]],
+    total_k: Optional[int],
+    top_pool_k: int = 5000,
+    top_ratio: float = 0.7,
+    seed: int = 42,
+) -> List[Dict[str, Any]]:
+    if total_k is None or total_k <= 0:
+        print(f"  Mixed selection disabled, using all {len(raw_entries)} entries")
+        return raw_entries
+
+    if not 0.0 <= top_ratio <= 1.0:
+        raise ValueError(f"top_ratio must be in [0, 1], got {top_ratio}")
+
+    if len(raw_entries) <= total_k:
+        print(f"  Entries count ({len(raw_entries)}) <= total_k ({total_k}), using all entries")
+        return raw_entries
+
+    sorted_entries = sorted(
+        raw_entries,
+        key=lambda x: len(x.get("original_thought", "")),
+        reverse=True,
+    )
+
+    top_pool = sorted_entries[:min(top_pool_k, len(sorted_entries))]
+    rest_pool = sorted_entries[len(top_pool):]
+
+    target_top = min(int(total_k * top_ratio), len(top_pool))
+    target_random = total_k - target_top
+
+    rng = random.Random(seed)
+
+    selected_top = rng.sample(top_pool, target_top) if target_top < len(top_pool) else top_pool.copy()
+
+    selected_random_count = min(target_random, len(rest_pool))
+    selected_random = (
+        rng.sample(rest_pool, selected_random_count)
+        if selected_random_count < len(rest_pool)
+        else rest_pool.copy()
+    )
+
+    if len(selected_top) + len(selected_random) < total_k:
+        used_ids = {id(item) for item in selected_top}
+        unused_top = [item for item in top_pool if id(item) not in used_ids]
+        need = total_k - len(selected_top) - len(selected_random)
+        filler = rng.sample(unused_top, need) if need < len(unused_top) else unused_top
+        selected_top.extend(filler)
+
+    selected_entries = selected_top + selected_random
+    rng.shuffle(selected_entries)
+
+    selected_lengths = [len(item.get("original_thought", "")) for item in selected_entries]
+    print(f"  Mixed selection: {len(selected_top)} from top-{len(top_pool)} thought lengths + {len(selected_random)} random from remaining pool")
+    print(f"  Selected total: {len(selected_entries)} entries")
+    print(f"  Thought length range in selected set: {min(selected_lengths)} - {max(selected_lengths)} chars")
+    return selected_entries
+
+
 def split_by_question(
     raw_entries: List[Dict[str, Any]],
     train_ratio: float,
@@ -321,6 +379,9 @@ def get_default_config() -> Dict[str, Any]:
         ],
         "output_dir": "/data/hf_home/datasets/Yaseal/CDAD_EXP/cot_rewrite_deepmath_plain_30k",
         "top_thought_k": None,
+        "mixed_total_k": None,
+        "mixed_top_pool_k": 5000,
+        "mixed_top_ratio": 0.7,
         "tokenizer_path": None,
         "max_problem_tokens": None,
         "train_ratio": 0.99,
@@ -340,6 +401,9 @@ def main(config: Optional[Dict[str, Any]] = None):
     input_paths = config["input_paths"]
     output_dir = config["output_dir"]
     top_thought_k = config.get("top_thought_k")
+    mixed_total_k = config.get("mixed_total_k")
+    mixed_top_pool_k = config.get("mixed_top_pool_k", 5000)
+    mixed_top_ratio = config.get("mixed_top_ratio", 0.7)
     tokenizer_path = config.get("tokenizer_path")
     max_problem_tokens = config.get("max_problem_tokens")
     train_ratio = config.get("train_ratio", 0.99)
@@ -353,6 +417,9 @@ def main(config: Optional[Dict[str, Any]] = None):
     print(f"  INPUT_PATHS:        {input_paths}")
     print(f"  OUTPUT_DIR:         {output_dir}")
     print(f"  TOP_THOUGHT_K:      {top_thought_k}")
+    print(f"  MIXED_TOTAL_K:      {mixed_total_k}")
+    print(f"  MIXED_TOP_POOL_K:   {mixed_top_pool_k}")
+    print(f"  MIXED_TOP_RATIO:    {mixed_top_ratio}")
     print(f"  TRAIN_RATIO:        {train_ratio}")
     print(f"  RANDOM_SEED:        {random_seed}")
     print(f"  TOKENIZER_PATH:     {tokenizer_path}")
@@ -374,9 +441,18 @@ def main(config: Optional[Dict[str, Any]] = None):
     print("\n" + "-" * 60)
     print("Step 2: Selecting entries by thought length...")
     print("-" * 60)
-    selected_raw_entries = select_top_thought_length_entries(
-        raw_entries, top_k=top_thought_k
-    )
+    if mixed_total_k is not None:
+        selected_raw_entries = select_mixed_thought_length_entries(
+            raw_entries,
+            total_k=mixed_total_k,
+            top_pool_k=mixed_top_pool_k,
+            top_ratio=mixed_top_ratio,
+            seed=random_seed,
+        )
+    else:
+        selected_raw_entries = select_top_thought_length_entries(
+            raw_entries, top_k=top_thought_k
+        )
 
     print("\n" + "-" * 60)
     print("Step 3: Splitting by question and building entries...")
@@ -417,6 +493,9 @@ def main(config: Optional[Dict[str, Any]] = None):
             "raw_entries_before_selection": len(raw_entries),
             "raw_entries_after_selection": len(selected_raw_entries),
             "top_thought_k": top_thought_k,
+            "mixed_total_k": mixed_total_k,
+            "mixed_top_pool_k": mixed_top_pool_k,
+            "mixed_top_ratio": mixed_top_ratio,
         },
         "split_stats": split_stats,
         "counts": {
@@ -445,6 +524,9 @@ if __name__ == "__main__":
     )
     parser.add_argument("--output-dir", type=str, help="Output directory")
     parser.add_argument("--top-thought-k", type=int, default=None, help="Keep top K entries by original_thought length before split")
+    parser.add_argument("--mixed-total-k", type=int, default=None, help="Build a mixed subset with this total size before split")
+    parser.add_argument("--mixed-top-pool-k", type=int, default=5000, help="Top-length pool size used by mixed selection")
+    parser.add_argument("--mixed-top-ratio", type=float, default=0.7, help="Ratio drawn from the top-length pool in mixed selection")
     parser.add_argument("--train-ratio", type=float, default=0.99, help="Train ratio (default: 0.99)")
     parser.add_argument("--seed", type=int, default=42, help="Random seed (default: 42)")
     parser.add_argument("--tokenizer", type=str, default=None, help="Tokenizer path for token-length filtering")
@@ -463,6 +545,10 @@ if __name__ == "__main__":
             config["output_dir"] = args.output_dir
         if args.top_thought_k is not None:
             config["top_thought_k"] = args.top_thought_k
+        if args.mixed_total_k is not None:
+            config["mixed_total_k"] = args.mixed_total_k
+        config["mixed_top_pool_k"] = args.mixed_top_pool_k
+        config["mixed_top_ratio"] = args.mixed_top_ratio
         config["train_ratio"] = args.train_ratio
         config["random_seed"] = args.seed
         if args.tokenizer:
@@ -486,6 +572,14 @@ python3 build_cot_rewrite_from_deepmath_plain.py \
     --input /data/hf_home/datasets/Yaseal/CDAD_EXP/deepmath_plain_30k/train.jsonl \
     --output-dir /data/hf_home/datasets/Yaseal/CDAD_EXP/cot_rewrite_deepmath_plain_top5k \
     --top-thought-k 5000 \
+    --train-ratio 0.99
+
+python3 build_cot_rewrite_from_deepmath_plain.py \
+    --input /data/hf_home/datasets/Yaseal/CDAD_EXP/deepmath_plain_30k/train.jsonl \
+    --output-dir /data/hf_home/datasets/Yaseal/CDAD_EXP/cot_rewrite_deepmath_plain_mix5k \
+    --mixed-total-k 5000 \
+    --mixed-top-pool-k 5000 \
+    --mixed-top-ratio 0.7 \
     --train-ratio 0.99
 
 python3 build_cot_rewrite_from_deepmath_plain.py \

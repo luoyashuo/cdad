@@ -586,7 +586,7 @@ class RayPPOTrainer:
             train_dataset = create_rl_dataset(
                 self.config.data.train_files, self.config.data, self.tokenizer, self.processor
             )
-        if val_dataset is None:
+        if self.val_reward_fn is not None and val_dataset is None:
             val_dataset = create_rl_dataset(
                 self.config.data.val_files, self.config.data, self.tokenizer, self.processor
             )
@@ -610,21 +610,24 @@ class RayPPOTrainer:
             sampler=train_sampler,
         )
 
-        val_batch_size = self.config.data.val_batch_size  # Prefer config value if set
-        if val_batch_size is None:
-            val_batch_size = len(self.val_dataset)
+        self.val_dataloader = None
+        if self.val_reward_fn is not None and self.val_dataset is not None:
+            val_batch_size = self.config.data.val_batch_size  # Prefer config value if set
+            if val_batch_size is None:
+                val_batch_size = len(self.val_dataset)
 
-        self.val_dataloader = StatefulDataLoader(
-            dataset=self.val_dataset,
-            batch_size=val_batch_size,
-            num_workers=num_workers,
-            shuffle=self.config.data.get("validation_shuffle", True),
-            drop_last=False,
-            collate_fn=collate_fn,
-        )
+            self.val_dataloader = StatefulDataLoader(
+                dataset=self.val_dataset,
+                batch_size=val_batch_size,
+                num_workers=num_workers,
+                shuffle=self.config.data.get("validation_shuffle", True),
+                drop_last=False,
+                collate_fn=collate_fn,
+            )
 
         assert len(self.train_dataloader) >= 1, "Train dataloader is empty!"
-        assert len(self.val_dataloader) >= 1, "Validation dataloader is empty!"
+        if self.val_dataloader is not None:
+            assert len(self.val_dataloader) >= 1, "Validation dataloader is empty!"
 
         print(
             f"Size of train dataloader: {len(self.train_dataloader)}, Size of val dataloader: "
@@ -1393,6 +1396,7 @@ class RayPPOTrainer:
 
                     # compute global_valid tokens
                     batch.meta_info["global_token_num"] = torch.sum(batch.batch["attention_mask"], dim=-1).tolist()
+                    batch.meta_info["global_steps"] = self.global_steps
 
                     # recompute old_log_probs BEFORE reward (for KL reward computation)
                     with marked_timer("old_log_prob", timing_raw, color="blue"):
@@ -1527,7 +1531,9 @@ class RayPPOTrainer:
                             # Skip global config values that should not be per-sample (e.g., penalty_mode, base_reward_range)
                             global_config_keys = {"penalty_mode", "base_reward_range", "lambda_logic", "lambda_useful",
                                               "too_short_threshold_low", "too_short_threshold_high",
+                                              "too_short_active_threshold", "too_short_target_threshold",
                                               "too_long_threshold_low", "too_long_threshold_high",
+                                              "too_long_active_threshold", "global_steps",
                                               "fsf_reward_scale", "fsf_reward_mode", "fsf_temperature", "fsf_top_k", "fsf_top_p",
                                               "use_logic_reward", "use_useful_reward", "alpha_cog",
                                               "use_tiered_reward", "tier_step", "tier_reward",

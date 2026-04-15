@@ -44,7 +44,7 @@ benchmarks:
   MATH500:
     dataset_name: "math_500"
     repeats: 8
-    temperature: 0.6
+    temperature: 0.8
     max_tokens: 28000
     few_shot_num: 0
 
@@ -52,6 +52,37 @@ benchmarks:
     dataset_name: "amc"
     subset: "amc23"
     repeats: 16
-    temperature: 0.6
+    temperature: 0.8
     max_tokens: 28000
     few_shot_num: 0
+
+  AGIEvalMath:
+    dataset_name: "agieval_math"
+    repeats: 4
+    temperature: 0.6
+    top_p: 0.95
+    top_k: 25
+    max_tokens: 28000
+    few_shot_num: 0
+  ARC:
+    dataset_name: "arc"
+    subset: "ARC-Challenge"
+    repeats: 3
+    temperature: 1.0
+    top_p: 0.8
+    top_k: 20
+    repetition_penalty: 1.05
+    max_tokens: 28000
+    few_shot_num: 0
+    data_source: huggingface
+
+  GPQA:
+    dataset_name: "gpqa_extend"
+    repeats: 4
+    temperature: 1.0
+    top_p: 0.8
+    top_k: 20
+    repetition_penalty: 1.05
+    max_tokens: 28000
+    few_shot_num: 0
+    use_sandbox: false

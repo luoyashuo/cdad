@@ -2,14 +2,14 @@
 # Copy this file and edit the paths/parameters for your experiment.
 
 # Basic configuration
-experiment_name: "llama3_8b_3b_grpo_8x40g_v3"
+experiment_name: "llama3_8b_3b_grpo_8x40g"
 output_root: "/data/hf_home/datasets/Yaseal/CDAD_EXP/cot_rewrite"
 resume: true   # Auto-resume from last checkpoint on restart
 seed: 42
 
 # Model configuration
 model:
-  checkpoint_path: "/data/cdad/checkpoints/cot_rewriter/cot_rewriter_grpo/llama3_8b_3b_grpo_8x40g_v3/global_step_60"
+  checkpoint_path: "/data/cdad/checkpoints/cot_rewriter/cot_rewriter_grpo/llama3_8b_3b_grpo_8x40g/global_step_70"
   # Format detection: auto / hf / lora / fsdp / megatron
   # auto: detects based on directory structure
   format: "auto"

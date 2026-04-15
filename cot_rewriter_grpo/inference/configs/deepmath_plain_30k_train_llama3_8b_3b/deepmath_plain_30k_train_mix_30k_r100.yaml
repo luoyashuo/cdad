@@ -2,6 +2,7 @@ build_mode: "mix"
 mix_rewrite_ratio: 1.0
 target_count: 30000
 question_limit: null
+mix_select_longest: true
 
 filters:
   fsf_positive: false

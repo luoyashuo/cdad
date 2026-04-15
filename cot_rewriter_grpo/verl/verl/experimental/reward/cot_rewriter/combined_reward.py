@@ -368,6 +368,13 @@ class CombinedRewardComputer:
     TIER_REWARD = 0.1
 
     @staticmethod
+    def _safe_int(value: Any, default: int = 0) -> int:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default
+
+    @staticmethod
     def apply_tiered_reward(
         r_cog: float,
         tier_step: float = TIER_STEP,
@@ -405,6 +412,19 @@ class CombinedRewardComputer:
         tier_index = int(r_cog / tier_step)  # floor division
         return (tier_index + 1) * tier_reward
 
+    def _get_active_too_short_threshold(self, global_steps: Optional[int]) -> float:
+        threshold = self.too_short_threshold_high
+        if not self.too_short_threshold_warmup_enable:
+            return threshold
+
+        steps = max(0, self._safe_int(global_steps, 0))
+        interval = max(1, self.too_short_threshold_warmup_step_interval)
+        active_threshold = (
+            self.too_short_threshold_warmup_start
+            + (max(steps - 1, 0) // interval) * self.too_short_threshold_warmup_increment
+        )
+        return min(threshold, active_threshold)
+
     def __init__(
         self,
         student_model_path: str = "./models/Qwen3-1.7B",
@@ -431,6 +451,10 @@ class CombinedRewardComputer:
         too_short_threshold_low: float = 0.4,  # Lower threshold for too_short_penalty
         too_short_threshold_high: float = 0.8,  # Upper threshold for too_short_penalty
         too_short_max_penalty: float = 0.5,  # Maximum penalty for too short outputs
+        too_short_threshold_warmup_enable: bool = False,  # Gradually ramp too_short threshold in early training
+        too_short_threshold_warmup_start: float = 0.3,  # Initial too_short threshold during warmup
+        too_short_threshold_warmup_step_interval: int = 10,  # Increase threshold every N steps
+        too_short_threshold_warmup_increment: float = 0.1,  # Threshold increment per warmup interval
         too_long_threshold_low: float = 1.5,  # Lower threshold for too_long_penalty
         too_long_threshold_high: float = 2.0,  # Upper threshold for too_long_penalty
         too_long_max_penalty: float = 0.5,  # Maximum penalty for too long outputs
@@ -639,6 +663,10 @@ class CombinedRewardComputer:
         self.too_short_threshold_low = too_short_threshold_low
         self.too_short_threshold_high = too_short_threshold_high
         self.too_short_max_penalty = too_short_max_penalty
+        self.too_short_threshold_warmup_enable = too_short_threshold_warmup_enable
+        self.too_short_threshold_warmup_start = too_short_threshold_warmup_start
+        self.too_short_threshold_warmup_step_interval = too_short_threshold_warmup_step_interval
+        self.too_short_threshold_warmup_increment = too_short_threshold_warmup_increment
         self.too_long_threshold_low = too_long_threshold_low
         self.too_long_threshold_high = too_long_threshold_high
         self.too_long_max_penalty = too_long_max_penalty
@@ -786,6 +814,10 @@ class CombinedRewardComputer:
             Dictionary with reward info and extra metrics
         """
         batch_size = len(questions)
+        global_steps = None
+        if data is not None and hasattr(data, "meta_info") and data.meta_info is not None:
+            global_steps = data.meta_info.get("global_steps")
+        active_too_short_threshold = self._get_active_too_short_threshold(global_steps)
 
         # Log per-sample prompts before reward computation
         logger.log_per_sample_rewards(
@@ -969,10 +1001,14 @@ class CombinedRewardComputer:
         fsf_parse_failed_count = 0  # Count of samples with parse failures
         fsf_group_skipped = False  # Whether the entire group's FSF reward was skipped
 
-        # Try FSF/GED logic reward if enabled
-        if self.use_logic_reward:
+        # Try FSF judge if either GED logic reward or legacy FSF penalty is enabled.
+        need_fsf_judge = self.use_logic_reward or self.use_fsf_penalty
+        if need_fsf_judge:
             if not self.fsf_model_path:
-                raise ValueError("fsf_model_path must be provided when use_logic_reward=True")
+                raise ValueError(
+                    "fsf_model_path must be provided when use_logic_reward=True "
+                    "or use_fsf_penalty=True"
+                )
 
             # Cleanup student client first to free GPU memory
             logger.info("[FSF] Cleaning up student client before loading FSF model...")
@@ -995,7 +1031,7 @@ class CombinedRewardComputer:
 
             try:
                 repeat_n = self.r_logic_repeat_n
-                need_dot_outputs = True
+                need_dot_outputs = self.use_logic_reward or self.save_fsf_dot_outputs
 
                 logger.info(
                     f"[FSF] Computing original graphs for {len(original_cots)} original CoTs "
@@ -1117,51 +1153,6 @@ class CombinedRewardComputer:
                                 else None
                             )
 
-                # Compute GED per sample; parse failures only skip that sample's logic reward.
-                for i in range(batch_size):
-                    orig_dot = original_dot_outputs[i]
-                    rewrite_dots = rewrite_dot_outputs_lists[i]
-                    if not orig_dot or not rewrite_dots:
-                        ged_parse_failed_count += 1
-                        continue
-
-                    sample_geds = []
-                    for rewrite_dot in rewrite_dots:
-                        if not rewrite_dot:
-                            continue
-                        ged_val = calculate_graph_edit_distance(
-                            original_dot_str=orig_dot,
-                            rewrite_dot_str=rewrite_dot,
-                            timeout=self.logic_reward_ged_timeout,
-                        )
-                        if ged_val is not None:
-                            sample_geds.append(ged_val)
-
-                    if not sample_geds:
-                        ged_parse_failed_count += 1
-                        continue
-
-                    ged_distances[i] = float(sum(sample_geds) / len(sample_geds))
-                    logic_reward_valid_flags[i] = 1
-
-                ged_rewards = compute_group_wise_ged_reward(
-                    ged_values=ged_distances,
-                    questions=questions,
-                    group_size=self.logic_reward_group_size,
-                    alpha=self.logic_reward_alpha,
-                )
-                r_logic = list(ged_rewards)
-
-                if ged_parse_failed_count > 0:
-                    logger.warning(
-                        f"[GED] Skipped logic reward for {ged_parse_failed_count} samples due to DOT parse/GED failures. "
-                        f"Those samples keep R_logic=0."
-                    )
-
-                # fsf_skip_group_on_parse_error is intentionally ignored for GED reward:
-                # the requirement is to skip only the failed sample, not the whole group.
-                fsf_group_skipped = False
-
                 # Log FSF comparison statistics
                 valid_pairs = [(o, r) for o, r in zip(original_fsfs, rewrite_fsfs) if r is not None]
                 if valid_pairs:
@@ -1173,14 +1164,60 @@ class CombinedRewardComputer:
                         f"mean rewrite_fsf={sum(r for _, r in valid_pairs)/len(valid_pairs):.4f}"
                     )
 
-                valid_geds = [v for v in ged_distances if v is not None and np.isfinite(v)]
-                if valid_geds:
-                    logger.info(
-                        f"[GED] Statistics: valid={len(valid_geds)}/{batch_size}, "
-                        f"mean={sum(valid_geds)/len(valid_geds):.4f}, "
-                        f"min={min(valid_geds):.4f}, max={max(valid_geds):.4f}, "
-                        f"alpha={self.logic_reward_alpha}, group_size={self.logic_reward_group_size or 'auto'}"
+                if self.use_logic_reward:
+                    # Compute GED per sample; parse failures only skip that sample's logic reward.
+                    for i in range(batch_size):
+                        orig_dot = original_dot_outputs[i]
+                        rewrite_dots = rewrite_dot_outputs_lists[i]
+                        if not orig_dot or not rewrite_dots:
+                            ged_parse_failed_count += 1
+                            continue
+
+                        sample_geds = []
+                        for rewrite_dot in rewrite_dots:
+                            if not rewrite_dot:
+                                continue
+                            ged_val = calculate_graph_edit_distance(
+                                original_dot_str=orig_dot,
+                                rewrite_dot_str=rewrite_dot,
+                                timeout=self.logic_reward_ged_timeout,
+                            )
+                            if ged_val is not None:
+                                sample_geds.append(ged_val)
+
+                        if not sample_geds:
+                            ged_parse_failed_count += 1
+                            continue
+
+                        ged_distances[i] = float(sum(sample_geds) / len(sample_geds))
+                        logic_reward_valid_flags[i] = 1
+
+                    ged_rewards = compute_group_wise_ged_reward(
+                        ged_values=ged_distances,
+                        questions=questions,
+                        group_size=self.logic_reward_group_size,
+                        alpha=self.logic_reward_alpha,
                     )
+                    r_logic = list(ged_rewards)
+
+                    if ged_parse_failed_count > 0:
+                        logger.warning(
+                            f"[GED] Skipped logic reward for {ged_parse_failed_count} samples due to DOT parse/GED failures. "
+                            f"Those samples keep R_logic=0."
+                        )
+
+                    # fsf_skip_group_on_parse_error is intentionally ignored for GED reward:
+                    # the requirement is to skip only the failed sample, not the whole group.
+                    fsf_group_skipped = False
+
+                    valid_geds = [v for v in ged_distances if v is not None and np.isfinite(v)]
+                    if valid_geds:
+                        logger.info(
+                            f"[GED] Statistics: valid={len(valid_geds)}/{batch_size}, "
+                            f"mean={sum(valid_geds)/len(valid_geds):.4f}, "
+                            f"min={min(valid_geds):.4f}, max={max(valid_geds):.4f}, "
+                            f"alpha={self.logic_reward_alpha}, group_size={self.logic_reward_group_size or 'auto'}"
+                        )
             finally:
                 # FSF Judge cleanup - shutdown workers after compute_logic_reward
                 if self.fsf_judge is not None:
@@ -1286,12 +1323,12 @@ class CombinedRewardComputer:
                         length_ratios[i] = ratio
 
                         # Too short: ratio below threshold → penalized
-                        if self.too_short_max_penalty > 0 and ratio < self.too_short_threshold_high:
+                        if self.too_short_max_penalty > 0 and ratio < active_too_short_threshold:
                             too_short_penalty_coeffs[i] = 1.0  # flag
                             if i < 3:
                                 logger.info(
                                     f"[TOO_SHORT_PENALTY] Sample {i}: "
-                                    f"ratio={ratio:.3f} < threshold={self.too_short_threshold_high}, "
+                                    f"ratio={ratio:.3f} < threshold={active_too_short_threshold}, "
                                     f"reward will be set to 0"
                                 )
 
@@ -1308,15 +1345,23 @@ class CombinedRewardComputer:
         # Log length_ratio statistics
         valid_ratios = [r for r in length_ratios if r > 0]
         if valid_ratios:
-            too_short_count = sum(1 for r in valid_ratios if r < self.too_short_threshold_high)
+            too_short_count = sum(1 for r in valid_ratios if r < active_too_short_threshold)
+            too_short_count_target = sum(1 for r in valid_ratios if r < self.too_short_threshold_high)
             too_long_count = sum(1 for r in valid_ratios if r > self.too_long_threshold_low)
             logger.info(
                 f"[LENGTH_RATIO] batch_size={batch_size}, "
                 f"mean={sum(valid_ratios)/len(valid_ratios):.3f}, "
                 f"min={min(valid_ratios):.3f}, max={max(valid_ratios):.3f}, "
-                f"too_short(<{self.too_short_threshold_high})={too_short_count}, "
+                f"too_short(<{active_too_short_threshold})={too_short_count}, "
                 f"too_long(>{self.too_long_threshold_low})={too_long_count}"
             )
+            if self.too_short_threshold_warmup_enable:
+                logger.info(
+                    f"[TOO_SHORT_WARMUP] global_steps={self._safe_int(global_steps, 0)}, "
+                    f"active_threshold={active_too_short_threshold}, "
+                    f"target_threshold={self.too_short_threshold_high}, "
+                    f"target_too_short_count={too_short_count_target}"
+                )
 
         r_cog_range = max(r_cog) - min(r_cog) if len(r_cog) > 1 else 1.0
         r_cog_range = max(r_cog_range, 1e-6)
@@ -1330,7 +1375,7 @@ class CombinedRewardComputer:
         # ========== Optional Legacy FSF Penalty Detection ==========
         # If rewrite_failed_nodes < original_failed_nodes, treat as penalty: reward → 0
         fsf_penalty_flags = [0.0] * batch_size  # 1.0 if penalty triggered, 0.0 otherwise
-        if self.use_logic_reward and self.use_fsf_penalty:
+        if self.use_fsf_penalty:
             for i in range(batch_size):
                 rew_fn = rewrite_failed_nodes[i]
                 orig_fn = original_failed_nodes[i]
@@ -1600,13 +1645,19 @@ class CombinedRewardComputer:
                 "lambda_logic": self.lambda_logic,
                 "lambda_useful": self.lambda_useful,
                 "too_short_penalties": too_short_penalties,
+                "too_short_penalties_actual": too_short_penalties_actual,
                 "too_short_penalty_coeffs": too_short_penalty_coeffs,  # Coefficients for logging
                 "too_long_penalties": too_long_penalties,  # too_long_penalty coefficients
+                "too_long_penalties_actual": too_long_penalties_actual,
                 "too_long_penalty_coeffs": too_long_penalty_coeffs,  # too_long_penalty coefficients
                 "repeat_penalties": repeat_penalty_coeffs,  # Repeat penalty coefficients
                 "repeat_penalties_actual": repeat_penalties_actual,  # 1.0 if penalized, 0.0 if not
                 "similarities": similarities,  # Similarity values between original and rewrite
                 "length_ratios": length_ratios,  # For DAPO filter_groups
+                "too_short_active_threshold": active_too_short_threshold,
+                "too_short_target_threshold": self.too_short_threshold_high,
+                "too_long_active_threshold": self.too_long_threshold_low,
+                "global_steps": self._safe_int(global_steps, 0),
                 # Penalty info for external use (format/truncation penalties)
                 "penalty_mode": self.penalty_mode,  # "relative" or "absolute"
                 "base_rewards": base_rewards,
@@ -1746,6 +1797,10 @@ def compute_cot_rewriter_reward(
     too_short_threshold_low: float = 0.4,  # Deprecated (kept for compat), use too_short_threshold_high
     too_short_threshold_high: float = 0.8,  # Too short threshold: ratio < this → penalized
     too_short_max_penalty: float = 0.5,  # > 0 enables too_short penalty (reward=0)
+    too_short_threshold_warmup_enable: bool = False,  # Gradually ramp too_short threshold in early training
+    too_short_threshold_warmup_start: float = 0.3,  # Initial too_short threshold during warmup
+    too_short_threshold_warmup_step_interval: int = 10,  # Increase threshold every N steps
+    too_short_threshold_warmup_increment: float = 0.1,  # Threshold increment per warmup interval
     too_long_threshold_low: float = 1.5,  # Too long threshold: ratio > this → penalized
     too_long_threshold_high: float = 2.0,  # Deprecated (kept for compat), use too_long_threshold_low
     too_long_max_penalty: float = 0.5,  # > 0 enables too_long penalty (reward=0)
@@ -2015,6 +2070,10 @@ def compute_cot_rewriter_reward(
         too_short_threshold_low=too_short_threshold_low,
         too_short_threshold_high=too_short_threshold_high,
         too_short_max_penalty=too_short_max_penalty,
+        too_short_threshold_warmup_enable=too_short_threshold_warmup_enable,
+        too_short_threshold_warmup_start=too_short_threshold_warmup_start,
+        too_short_threshold_warmup_step_interval=too_short_threshold_warmup_step_interval,
+        too_short_threshold_warmup_increment=too_short_threshold_warmup_increment,
         too_long_threshold_low=too_long_threshold_low,
         too_long_threshold_high=too_long_threshold_high,
         too_long_max_penalty=too_long_max_penalty,
@@ -2227,6 +2286,9 @@ def compute_cot_rewriter_reward(
             "too_long_penalties": too_long_penalties,  # Penalty coefficients for logging
             "too_short_penalties_actual": result.get("extra_info", {}).get("too_short_penalties_actual", [0.0] * batch_size),  # 1.0 if penalized
             "too_long_penalties_actual": result.get("extra_info", {}).get("too_long_penalties_actual", [0.0] * batch_size),  # 1.0 if penalized
+            "too_short_active_threshold": result.get("extra_info", {}).get("too_short_active_threshold", too_short_threshold_high),
+            "too_short_target_threshold": result.get("extra_info", {}).get("too_short_target_threshold", too_short_threshold_high),
+            "too_long_active_threshold": result.get("extra_info", {}).get("too_long_active_threshold", too_long_threshold_low),
             "repeat_penalties": result.get("repeat_penalties", [0.0] * batch_size),  # Repeat penalty coefficients
             "repeat_penalties_actual": result.get("extra_info", {}).get("repeat_penalties_actual", [0.0] * batch_size),  # 1.0 if penalized
             "similarities": result.get("extra_info", {}).get("similarities", [0.0] * batch_size),

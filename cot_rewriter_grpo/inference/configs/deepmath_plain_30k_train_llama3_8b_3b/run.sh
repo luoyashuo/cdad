@@ -35,3 +35,9 @@ bash inference/build_dataset.sh --config inference/configs/deepmath_plain_30k_tr
 bash inference/build_dataset.sh --config inference/configs/deepmath_plain_30k_train_llama3_8b_3b/rollout.yaml  \
     --dataset-config inference/configs/deepmath_plain_30k_train_llama3_8b_3b/deepmath_plain_30k_train_rep_no_fsf_30k.yaml
 
+bash inference/build_dataset.sh --config inference/configs/deepmath_plain_30k_train_llama3_8b_3b/rollout.yaml  \
+    --dataset-config inference/configs/deepmath_plain_30k_train_llama3_8b_3b/deepmath_plain_30k_train_mix_30k_r100_long.yaml
+
+
+bash inference/build_dataset.sh --config inference/configs/deepmath_plain_30k_train_llama3_8b_3b/rollout.yaml  \
+    --dataset-config inference/configs/deepmath_plain_30k_train_llama3_8b_3b/deepmath_plain_30k_train_rep_fsf_r80_30k.yaml

@@ -258,6 +258,8 @@ def build_dataset(
     mix_rewrite_ratio: float = 0.5,
     target_count: Optional[int] = None,
     mix_rewrite_record_original_fsf: Optional[str] = None,
+    mix_select_longest: bool = False,
+    prob_replace_ratio: float = 0.8,
 ) -> Dict[str, int]:
     """
     Build ShareGPT dataset from a list of records.
@@ -269,12 +271,19 @@ def build_dataset(
                                mix_rewrite_ratio) slots from questions with valid rewrites
                                (after filtering); then fill the remainder with original_cot
                                from unused questions (no duplicate questions).
+                    "prob_replace" – one sample per question. For records eligible for
+                               replacement (filtered by mix_rewrite_record_original_fsf),
+                               replace with rewrite_cot at prob_replace_ratio probability
+                               when a valid rewrite exists; otherwise use original_cot.
         question_limit: if set, randomly sample this many questions before building.
         mix_rewrite_ratio: (mix mode only) fraction of target_count that uses rewrite_cot.
-        target_count: (mix mode only) desired total output samples. If None, uses all
-                      questions with valid rewrites as rewrite samples (old behavior).
+        target_count: (mix/prob_replace mode) desired total output samples. If None, uses
+                      all questions.
+        prob_replace_ratio: (prob_replace mode only) probability of replacing with
+                            rewrite_cot when a record is eligible. Default: 0.8.
 
-    Returns stats dict: total, selected, skipped, output_samples, mix_rewrite, mix_original.
+    Returns stats dict: total, selected, skipped, output_samples, mix_rewrite, mix_original,
+                        and for prob_replace: fsf_positive_count, replaced_count.
     """
     random.seed(seed)
 
@@ -324,14 +333,20 @@ def build_dataset(
         n_rewrite = min(int(round(n_total * mix_rewrite_ratio)), len(valid_rewrite_pool))
         n_original = n_total - n_rewrite
 
-        # Shuffle and partition valid_rewrite_pool
-        random.shuffle(valid_rewrite_pool)
+        # Select rewrite samples: by length (longest first) or random
+        if mix_select_longest:
+            valid_rewrite_pool.sort(key=lambda x: len(x[1].get("rewrite_cot", "")), reverse=True)
+        else:
+            random.shuffle(valid_rewrite_pool)
         rewrite_selected = valid_rewrite_pool[:n_rewrite]
         remaining_valid = valid_rewrite_pool[n_rewrite:]
 
         # Build original pool: remaining valid records + no-rewrite records (no duplicate questions)
         original_pool: List[Dict] = [r for r, _ in remaining_valid] + no_rewrite_pool
-        random.shuffle(original_pool)
+        if mix_select_longest:
+            original_pool.sort(key=lambda r: len(r.get("original_cot", "")), reverse=True)
+        else:
+            random.shuffle(original_pool)
         original_selected = original_pool[:n_original]
 
         if len(original_selected) < n_original:
@@ -370,6 +385,77 @@ def build_dataset(
             "mix_original": mix_original,
             "mix_rewrite_ineligible": mix_rewrite_ineligible,
             "mix_rewrite_no_valid": mix_rewrite_no_valid,
+        }
+
+    if build_mode == "prob_replace":
+        # One sample per question. For eligible records (original_fsf filter), replace
+        # with rewrite_cot at prob_replace_ratio probability when a valid rewrite exists;
+        # all other records use original_cot.
+        fsf_positive_count = 0
+        replaced_count = 0
+        no_valid_rewrite_count = 0
+
+        all_records = list(records)
+        if target_count is not None and target_count < len(all_records):
+            random.shuffle(all_records)
+            all_records = all_records[:target_count]
+
+        all_samples = []
+        for record in all_records:
+            question = record["question"]
+            solution = record.get("solution", "")
+            original_cot = record.get("original_cot", "")
+
+            is_eligible = _record_matches_original_fsf(record, mix_rewrite_record_original_fsf)
+            if is_eligible:
+                fsf_positive_count += 1
+
+            use_rewrite = False
+            if is_eligible and random.random() < prob_replace_ratio:
+                rewrites = record.get("rewrite_cots", [])
+                best = select_best_rewrite(
+                    rewrites,
+                    filter_correct_only=filter_correct_only,
+                    filter_fsf_positive=filter_fsf_positive,
+                    filter_fsf_zero=filter_fsf_zero,
+                    strategy=strategy,
+                )
+                if best is not None:
+                    use_rewrite = True
+                    replaced_count += 1
+                    all_samples.append(
+                        (_make_sharegpt_sample(question, best["rewrite_cot"], solution), "rewrite")
+                    )
+                else:
+                    no_valid_rewrite_count += 1
+
+            if not use_rewrite:
+                all_samples.append(
+                    (_make_sharegpt_sample(question, original_cot, solution), "original")
+                )
+
+        random.shuffle(all_samples)
+
+        with open(output_file, "w") as fout:
+            for sample, kind in all_samples:
+                fout.write(json.dumps(sample, ensure_ascii=False) + "\n")
+                if kind == "rewrite":
+                    mix_rewrite += 1
+                else:
+                    mix_original += 1
+                output_samples += 1
+
+        return {
+            "total": total,
+            "selected": replaced_count,
+            "skipped": 0,
+            "output_samples": output_samples,
+            "mix_rewrite": mix_rewrite,
+            "mix_original": mix_original,
+            "mix_rewrite_ineligible": total - fsf_positive_count,
+            "mix_rewrite_no_valid": no_valid_rewrite_count,
+            "fsf_positive_count": fsf_positive_count,
+            "replaced_count": replaced_count,
         }
 
     with open(output_file, "w") as fout:
@@ -546,16 +632,21 @@ def main():
     build_mode = db_cfg.get("build_mode", "single")
     question_limit = db_cfg.get("question_limit", None)
 
-    if build_mode not in ("single", "dual", "mix"):
-        print(f"ERROR: Unknown build_mode '{build_mode}'. Use 'single', 'dual', or 'mix'.", file=sys.stderr)
+    if build_mode not in ("single", "dual", "mix", "prob_replace"):
+        print(f"ERROR: Unknown build_mode '{build_mode}'. Use 'single', 'dual', 'mix', or 'prob_replace'.", file=sys.stderr)
         sys.exit(1)
 
     mix_rewrite_ratio = float(db_cfg.get("mix_rewrite_ratio", 0.5))
+    fsf_positive_replace_ratio = db_cfg.get("fsf_positive_replace_ratio", None)
+    if fsf_positive_replace_ratio is not None:
+        fsf_positive_replace_ratio = float(fsf_positive_replace_ratio)
+    prob_replace_ratio = float(db_cfg.get("prob_replace_ratio", 0.8))
     target_count = db_cfg.get("target_count", None)
     if target_count is not None:
         target_count = int(target_count)
     mix_rewrite_record_filter_cfg = db_cfg.get("mix_rewrite_record_filter", {})
     mix_rewrite_record_original_fsf = mix_rewrite_record_filter_cfg.get("original_fsf", None)
+    mix_select_longest = bool(db_cfg.get("mix_select_longest", False))
     dataset_input_file = db_cfg.get("input_file", None)
 
     # Determine input/output paths
@@ -580,6 +671,24 @@ def main():
     records = _read_jsonl(input_file)
     print_tag_distribution(records, output_dir)
 
+    # Auto-compute mix_rewrite_ratio from fsf_positive_replace_ratio:
+    # ensures exactly (fsf>0 count * ratio) rewrites, guaranteed to succeed.
+    if fsf_positive_replace_ratio is not None and build_mode == "mix":
+        n_fsf_positive = sum(
+            1 for r in records
+            if _get_original_fsf_value(r) is not None and _get_original_fsf_value(r) > 0
+        )
+        total_records = len(records)
+        if target_count is None:
+            target_count = total_records
+        n_rewrite_target = int(round(n_fsf_positive * fsf_positive_replace_ratio))
+        mix_rewrite_ratio = n_rewrite_target / target_count
+        print(
+            f"[fsf_positive_replace_ratio={fsf_positive_replace_ratio}] "
+            f"fsf>0={n_fsf_positive}, target rewrites={n_rewrite_target}, "
+            f"mix_rewrite_ratio={mix_rewrite_ratio:.4f}"
+        )
+
     if args.output_file:
         output_file = args.output_file
     else:
@@ -603,6 +712,14 @@ def main():
             "  Rewrite pool:   "
             f"original_fsf={mix_rewrite_record_original_fsf if mix_rewrite_record_original_fsf is not None else 'any'}"
         )
+        print(f"  Select longest: {mix_select_longest}")
+    if build_mode == "prob_replace":
+        print(f"  Replace prob:   {prob_replace_ratio:.2f} (applied to eligible records only)")
+        print(f"  Target count:   {target_count if target_count is not None else 'all records'}")
+        print(
+            "  Eligible filter: "
+            f"original_fsf={mix_rewrite_record_original_fsf if mix_rewrite_record_original_fsf is not None else 'any'}"
+        )
 
     stats = build_dataset(
         records=records,
@@ -617,6 +734,8 @@ def main():
         mix_rewrite_ratio=mix_rewrite_ratio,
         target_count=target_count,
         mix_rewrite_record_original_fsf=mix_rewrite_record_original_fsf,
+        mix_select_longest=mix_select_longest,
+        prob_replace_ratio=prob_replace_ratio,
     )
 
     print(f"\nDone:")
@@ -631,6 +750,14 @@ def main():
         print(f"  Original retain ratio(output):  {_format_ratio(stats['mix_original'], stats['output_samples'])}")
         print(f"  Rewrite ineligible(original_fsf filter): {stats['mix_rewrite_ineligible']}")
         print(f"  Rewrite fallback(no valid rewrite):      {stats['mix_rewrite_no_valid']}")
+    if build_mode == "prob_replace":
+        print(f"  --- Probabilistic Replacement Stats ---")
+        print(f"  Used rewrite_cot:   {stats['mix_rewrite']}  ({_format_ratio(stats['mix_rewrite'], stats['output_samples'])})")
+        print(f"  Used original_cot:  {stats['mix_original']}  ({_format_ratio(stats['mix_original'], stats['output_samples'])})")
+        print(f"  original_fsf > 0:   {stats['fsf_positive_count']}  ({_format_ratio(stats['fsf_positive_count'], stats['output_samples'])})")
+        print(f"  Replaced (fsf>0 -> rewrite): {stats['replaced_count']}  ({_format_ratio(stats['replaced_count'], stats['fsf_positive_count'])} of eligible)")
+        print(f"  No valid rewrite (fell back to original): {stats['mix_rewrite_no_valid']}")
+        print(f"  Ineligible (original_fsf filter): {stats['mix_rewrite_ineligible']}")
     print(f"  Output file:      {output_file}")
 
     # LlamaFactory registration

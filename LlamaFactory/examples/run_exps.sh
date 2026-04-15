@@ -20,7 +20,7 @@ while kill -0 "$TRAIN_PID" 2>/dev/null; do
     echo "训练仍在进行中，10s 后检查..."
     sleep 10
 done
-log "训练进程已结束"
+echo "训练进程已结束"
 
 # 训练任务列表
 declare -a CONFIGS=(
@@ -54,7 +54,23 @@ declare -a CONFIGS=(
     # "examples/rewrite_cot/qwen2.5_7b_instruct_lora_sft_mix_30k_r100.yaml"
     # "examples/rewrite_cot/llama3_3b_instruct_full_sft_mix_30k_r50_v3.yaml"
     # "examples/rewrite_cot/llama3_3b_instruct_full_sft_mix_30k_r100_v3.yaml"
-    "examples/rewrite_cot/llama3_3b_instruct_full_sft_rep_fsf_30k.yaml"
+    # "examples/rewrite_cot/llama3_3b_instruct_full_sft_mix_30k_r100_long.yaml"
+
+    # "examples/rewrite_cot/llama3_3b_instruct_full_sft_rep_fsf_30k.yaml"
+    # "examples/rewrite_cot/llama3_3b_instruct_full_sft_rep_fsf_r80_30k.yaml"
+    # "examples/rewrite_cot/qwen2.5_7b_instruct_lora_sft_rep_fsf_r80_30k.yaml"
+    # "examples/fsf_vs_nofsf/llama3_1b_instruct_full_sft_fsf_10k.yaml"
+    # "examples/fsf_vs_nofsf/llama3_1b_instruct_full_sft_nofsf_10k.yaml"
+    # "examples/fsf_vs_nofsf/llama3_3b_instruct_full_sft_fsf_10k.yaml"
+    # "examples/fsf_vs_nofsf/llama3_3b_instruct_full_sft_nofsf_10k.yaml"
+    "examples/fsf_vs_nofsf/llama3_3b_instruct_full_sft_fsf_10k_v2.yaml"
+    "examples/fsf_vs_nofsf/llama3_3b_instruct_full_sft_nofsf_10k_v2.yaml"
+    "examples/fsf_vs_nofsf/llama3_1b_instruct_full_sft_fsf_10k_v2.yaml"
+    "examples/fsf_vs_nofsf/llama3_1b_instruct_full_sft_nofsf_10k_v2.yaml"
+    "examples/fsf_vs_nofsf/qwen2.5_7b_instruct_lora_sft_fsf_10k_v2.yaml"
+    "examples/fsf_vs_nofsf/qwen2.5_7b_instruct_lora_sft_nofsf_10k_v2.yaml"
+    # "examples/fsf_vs_nofsf/qwen2.5_7b_instruct_lora_sft_fsf_10k.yaml"
+    # "examples/fsf_vs_nofsf/qwen2.5_7b_instruct_lora_sft_nofsf_10k.yaml"
 
 )
 
@@ -89,7 +105,22 @@ declare -a NAMES=(
     # "qwen2.5_7b_instruct_lora_sft_mix_30k_r100"
     # "llama3_3b_instruct_full_sft_mix_30k_r50_v3"
     # llama3_3b_instruct_full_sft_mix_30k_r100_v3
-    llama3_3b_instruct_full_sft_rep_fsf_30k
+    # "llama3_3b_instruct_full_sft_rep_fsf_30k"
+    # "llama3_3b_instruct_full_sft_mix_30k_r100_long"
+    # "llama3_3b_instruct_full_sft_rep_fsf_r80_30k"
+    # "qwen2.5_7b_instruct_lora_sft_rep_fsf_r80_30k"
+    # "llama3_1b_instruct_full_sft_fsf_10k"
+    # "llama3_1b_instruct_full_sft_nofsf_10k"
+    # "llama3_3b_instruct_full_sft_fsf_10k"
+    # "llama3_3b_instruct_full_sft_nofsf_10k"
+    "llama3_3b_instruct_full_sft_fsf_10k_v2"
+    "llama3_3b_instruct_full_sft_nofsf_10k_v2"
+    "llama3_1b_instruct_full_sft_fsf_10k_v2"
+    "llama3_1b_instruct_full_sft_nofsf_10k_v2"
+    "qwen2.5_7b_instruct_lora_sft_fsf_10k_v2"
+    "qwen2.5_7b_instruct_lora_sft_nofsf_10k_v2"
+    # "qwen2.5_7b_instruct_lora_sft_fsf_10k"
+    # "qwen2.5_7b_instruct_lora_sft_nofsf_10k"
 )
 
 echo "=== 开始串行训练任务 ==="

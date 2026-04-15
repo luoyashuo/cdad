@@ -1,0 +1,32 @@
+{
+  "input": "/data/hf_home/datasets/Yaseal/CDAD_EXP/deepmath_sft_30k/train.jsonl",
+  "scored_input": "/home/luoys/cdad/baselines/FSF/_smoke_test_output/scored_records.jsonl",
+  "output_dir": "/home/luoys/cdad/baselines/FSF/_smoke_test_output",
+  "repo_root": "/home/luoys/cdad/cot_rewriter_grpo",
+  "model_path": "/data/hf_home/models/Yaseal-qwen3_4b_fsf_grm",
+  "seed": 42,
+  "target_size": 2,
+  "selection": "random",
+  "pair_on_question": false,
+  "save_dot_outputs": false,
+  "max_records": 32,
+  "stats": {
+    "total_questions": 32,
+    "total_thoughts": 96,
+    "questions_with_positive_thought": 23,
+    "questions_with_positive_and_zero_thought": 18,
+    "questions_parse_all_failed": 0,
+    "positive_thoughts": 40,
+    "zero_thoughts": 56,
+    "missing_thoughts": 0,
+    "zero_dataset_size": 2,
+    "positive_dataset_size": 2
+  },
+  "outputs": {
+    "scored_records": "/home/luoys/cdad/baselines/FSF/_smoke_test_output/scored_records.jsonl",
+    "zero_raw": "/home/luoys/cdad/baselines/FSF/_smoke_test_output/fsf_zero_2/raw_samples.jsonl",
+    "zero_sharegpt": "/home/luoys/cdad/baselines/FSF/_smoke_test_output/fsf_zero_2/sharegpt.jsonl",
+    "positive_raw": "/home/luoys/cdad/baselines/FSF/_smoke_test_output/fsf_positive_2/raw_samples.jsonl",
+    "positive_sharegpt": "/home/luoys/cdad/baselines/FSF/_smoke_test_output/fsf_positive_2/sharegpt.jsonl"
+  }
+}

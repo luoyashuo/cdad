@@ -524,18 +524,22 @@ class SGLangCorrectJudgeClient:
             max_base_port = range_end - sglang_port_range
 
             port = None
-            for candidate in range(range_start, max_base_port):
+            for candidate in range(range_start, max_base_port + 1):
                 if is_port_range_available(candidate):
                     port = candidate
                     break
 
             if port is None:
                 raise RuntimeError(
-                    f"Cannot find available port range for CorrectJudge worker {group_idx} "
-                    f"in range [{range_start}, {max_base_port})"
+                    f"Cannot find available CorrectJudge port range for worker {group_idx} "
+                    f"in range [{range_start}, {max_base_port}]"
                 )
 
             assigned_ports.append(port)
+            logger.info(
+                f"[SGLangCorrectJudgeClient] Worker {group_idx}: using port {port} "
+                f"(range: [{range_start}, {range_end}))"
+            )
 
         # Create Ray actors
         for group_idx, gpu_group in enumerate(gpu_groups):

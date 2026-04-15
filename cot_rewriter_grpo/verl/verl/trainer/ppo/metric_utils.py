@@ -493,6 +493,15 @@ def compute_reward_breakdown_metrics(reward_extra_infos_dict: dict[str, list[Any
     import numpy as np
 
     metrics = {}
+    active_too_short_threshold = float(
+        reward_extra_infos_dict.get(
+            "too_short_active_threshold",
+            reward_extra_infos_dict.get("too_short_target_threshold", 0.8),
+        )
+    )
+    active_too_long_threshold = float(
+        reward_extra_infos_dict.get("too_long_active_threshold", 1.5)
+    )
 
     # Define reward components to track (mean/max/min statistics)
     # Grouped by SwanLab panel: reward/* for reward metrics, stats/* for observation stats
@@ -592,14 +601,13 @@ def compute_reward_breakdown_metrics(reward_extra_infos_dict: dict[str, list[Any
         length_ratios = reward_extra_infos_dict["length_ratio"]
         if length_ratios:
             ratios_array = np.array(length_ratios, dtype=np.float64)
-            # Count how many samples are below/above thresholds
-            low_threshold = 0.4
-            high_threshold = 0.8
-            below_low = np.sum(ratios_array < low_threshold)
-            above_high = np.sum(ratios_array >= high_threshold)
+            below_low = np.sum(ratios_array < active_too_short_threshold)
+            above_high = np.sum(ratios_array > active_too_long_threshold)
             metrics["stats/length_ratio_below_low"] = below_low
             metrics["stats/length_ratio_above_high"] = above_high
             metrics["stats/length_ratio_in_range"] = len(ratios_array) - below_low - above_high
+            metrics["stats/too_short_active_threshold"] = active_too_short_threshold
+            metrics["stats/too_long_active_threshold"] = active_too_long_threshold
 
     # FSF parse failure statistics (count of samples with parse failures)
     if "fsf_parse_failed_count" in reward_extra_infos_dict:

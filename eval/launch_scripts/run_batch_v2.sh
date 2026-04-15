@@ -76,7 +76,7 @@ kill_stray_ray() {
 # 可选：等待训练进程结束
 # ============================================================
 # 如果需要等待训练结束，取消下面两行的注释并设置正确的 PID
-TRAIN_PID=688520  # 训练脚本 PID
+TRAIN_PID=115340   # 训练脚本 PID
 
 if [ -n "$TRAIN_PID" ]; then
     log "等待训练进程 PID $TRAIN_PID 结束..."
@@ -186,7 +186,13 @@ declare -a JOBS=(
     # "/data/cdad/checkpoints/rewrite_cot/llama3_3b_instruct_full_sft_mix_30k_r50_v3"      "eval_configs/eval_all_sft_v2.yaml"
     # "/data/cdad/checkpoints/rewrite_cot/llama3_3b_instruct_full_sft_mix_30k_r100_v3"      "eval_configs/eval_all_sft_v2.yaml"
     # "/data/cdad/checkpoints/tokenskip/qwen2_5_7b_instruct_full_sft_tokenskip_30k_r25"      "eval_configs/eval_all_sft_v2.yaml"
-    "/data/cdad/checkpoints/rewrite_cot/llama3_3b_instruct_full_sft_rep_fsf_30k"      "eval_configs/eval_all_sft_v2.yaml"
+    # "/data/cdad/checkpoints/rewrite_cot/llama3_3b_instruct_full_sft_rep_fsf_30k"      "eval_configs/eval_all_sft_v2.yaml"
+    # "/data/cdad/checkpoints/rewrite_cot/llama3_3b_instruct_full_sft_mix_30k_r100_long"      "eval_configs/eval_all_sft_v2_quick.yaml"
+    # "/data/cdad/checkpoints/rewrite_cot/qwen2.5_7b_instruct_lora_sft_rep_fsf_r80_30k"      "eval_configs/eval_all_sft_v2.yaml"
+    # "/data/cdad/checkpoints/rewrite_cot/llama3_3b_instruct_full_sft_rep_fsf_r80_30k"      "eval_configs/eval_all_sft_v2.yaml"
+    # "/data/cdad/checkpoints/rewrite_cot/deepmath_plain_30k_train_llama3_8b_1b_rep_fsf_r80_30k"      "eval_configs/eval_all_sft_v2.yaml"
+    "/data/cdad/checkpoints/rewrite_cot/deepmath_plain_30k_train_llama3_8b_1b_rep_fsf_r80_30k"      "eval_configs/eval_all_sft_v3.yaml"
+    "/data/cdad/checkpoints/rewrite_cot/llama3_3b_instruct_full_sft_rep_fsf_r80_30k"      "eval_configs/eval_all_sft_v3.yaml"
     # "/data/cdad/checkpoints/vallina_sft/qwen2.5_7b_instruct_lora_sft_30k"          "eval_configs/eval_all_baseline.yaml"
     # /data/modelscope_cache/models/Qwen/Qwen2.5-7B-Instruct  "eval_configs/eval_all_baseline.yaml"
     # /data/modelscope_cache/models/Qwen/Qwen2.5-7B-Instruct  "eval_configs/eval_all_sft_v2.yaml" 
@@ -205,7 +211,7 @@ declare -a JOBS=(
 #       ""                                  # model2 全新跑
 #       "/data/.../model3/evalscope/version_20260318_005432"
 #   )
-RESUME=0
+RESUME=1
 RESUME_DIRS=()
 
 # FORCE_RESCORE=1: 强制重新评分，即使 repeats 数量与上次相同
