@@ -76,7 +76,7 @@ kill_stray_ray() {
 # 可选：等待训练进程结束
 # ============================================================
 # 如果需要等待训练结束，取消下面两行的注释并设置正确的 PID
-TRAIN_PID=115340   # 训练脚本 PID
+TRAIN_PID=134820   # 训练脚本 PID
 
 if [ -n "$TRAIN_PID" ]; then
     log "等待训练进程 PID $TRAIN_PID 结束..."
@@ -191,12 +191,20 @@ declare -a JOBS=(
     # "/data/cdad/checkpoints/rewrite_cot/qwen2.5_7b_instruct_lora_sft_rep_fsf_r80_30k"      "eval_configs/eval_all_sft_v2.yaml"
     # "/data/cdad/checkpoints/rewrite_cot/llama3_3b_instruct_full_sft_rep_fsf_r80_30k"      "eval_configs/eval_all_sft_v2.yaml"
     # "/data/cdad/checkpoints/rewrite_cot/deepmath_plain_30k_train_llama3_8b_1b_rep_fsf_r80_30k"      "eval_configs/eval_all_sft_v2.yaml"
-    "/data/cdad/checkpoints/rewrite_cot/deepmath_plain_30k_train_llama3_8b_1b_rep_fsf_r80_30k"      "eval_configs/eval_all_sft_v3.yaml"
-    "/data/cdad/checkpoints/rewrite_cot/llama3_3b_instruct_full_sft_rep_fsf_r80_30k"      "eval_configs/eval_all_sft_v3.yaml"
+    # "/data/cdad/checkpoints/rewrite_cot/deepmath_plain_30k_train_llama3_8b_1b_rep_fsf_r80_30k"      "eval_configs/eval_all_sft_v3.yaml"
+    # "/data/cdad/checkpoints/rewrite_cot/llama3_3b_instruct_full_sft_rep_fsf_r80_30k"      "eval_configs/eval_all_sft_v3.yaml"
     # "/data/cdad/checkpoints/vallina_sft/qwen2.5_7b_instruct_lora_sft_30k"          "eval_configs/eval_all_baseline.yaml"
     # /data/modelscope_cache/models/Qwen/Qwen2.5-7B-Instruct  "eval_configs/eval_all_baseline.yaml"
     # /data/modelscope_cache/models/Qwen/Qwen2.5-7B-Instruct  "eval_configs/eval_all_sft_v2.yaml" 
     # "/data/qzq/ckpt_mcckd_qwen_7B/mcckd_qwen2.5_7b"      "eval_configs/eval_all_sft_v2.yaml"
+    #"/data/cdad/checkpoints/rewrite_cot/llama3_3b_instruct_full_sft_use_llama3_1b_card" "eval_configs/eval_all_sft_v3.yaml"
+    #"/data/cdad/checkpoints/rewrite_cot/llama3_3b_instruct_full_sft_use_qwen_2_5_card" "eval_configs/eval_all_sft_v3.yaml"
+    #"/data/cdad/checkpoints/rewrite_cot/qwen2.5_7b_instruct_lora_sft_rep_fsf_r80_30k_no_fsf" "eval_configs/eval_all_sft_v3.yaml"
+    #"/data/cdad/checkpoints/rewrite_cot/qwen2.5_7b_instruct_lora_sft_rep_fsf_r80_30k_no_cot_kl" "eval_configs/eval_all_sft_v3.yaml"
+    #"/data/cdad/checkpoints/rewrite_cot/llama3_1b_instruct_full_sft_rep_fsf_r80_30k_rat" "eval_configs/eval_all_baseline.yaml"
+    #"/data/cdad/checkpoints/rewrite_cot/llama3_3b_instruct_full_sft_rep_fsf_r80_30k_rat" "eval_configs/eval_all_sft_v3.yaml"
+    #"/data/cdad/checkpoints/rewrite_cot/qwen2.5_7b_instruct_lora_sft_rep_fsf_r80_30k_rat" "eval_configs/eval_odd.yaml"
+    "/data/cdad/checkpoints/rewrite_cot/qwen2.5_7b_instruct_lora_sft_rep_fsf_r80_30k_no_kl_answer" "eval_configs/eval_all_sft_v3.yaml"
 )
 
 # ============================================================

@@ -1971,5 +1971,70 @@
       "user_tag": "user",
       "assistant_tag": "assistant"
     }
+  },
+  "deepmath_plain_30k_train_qwen2_5_7b_rep_fsf_r80_30k_no_fsf": {
+    "file_name": "/data/hf_home/datasets/Yaseal/CDAD_EXP/cot_rewrite/qwen2_5_7b_ablation_no_fsf/final/rep_fsf_r80_30k_no_fsf.jsonl",
+    "formatting": "sharegpt",
+    "columns": {
+      "messages": "conversations"
+    },
+    "tags": {
+      "role_tag": "role",
+      "content_tag": "content",
+      "user_tag": "user",
+      "assistant_tag": "assistant"
+    }
+  },
+  "deepmath_plain_30k_train_qwen2_5_7b_rep_fsf_r80_30k_no_cot_kl": {
+    "file_name": "/data/hf_home/datasets/Yaseal/CDAD_EXP/cot_rewrite/qwen2_5_7b_ablation_no_cot_kl/final/rep_fsf_r80_30k_no_cot_kl.jsonl",
+    "formatting": "sharegpt",
+    "columns": {
+      "messages": "conversations"
+    },
+    "tags": {
+      "role_tag": "role",
+      "content_tag": "content",
+      "user_tag": "user",
+      "assistant_tag": "assistant"
+    }
+  },
+  "deepmath_plain_30k_llama_reformat_as_teacher": {
+    "file_name": "/data/hf_home/datasets/Yaseal/CDAD_EXP/Reformat_as_teacher/rep_fsf_r80_30k_llama_reformat_as_teacher.jsonl",
+    "formatting": "sharegpt",
+    "columns": {
+      "messages": "conversations"
+    },
+    "tags": {
+      "role_tag": "role",
+      "content_tag": "content",
+      "user_tag": "user",
+      "assistant_tag": "assistant"
+    }
+  },
+  "deepmath_plain_30k_qwen_reformat_as_teacher": {
+    "file_name": "/data/hf_home/datasets/Yaseal/CDAD_EXP/Reformat_as_teacher/rep_fsf_r80_30k_qwen_reformat_as_teacher.jsonl",
+    "formatting": "sharegpt",
+    "columns": {
+      "messages": "conversations"
+    },
+    "tags": {
+      "role_tag": "role",
+      "content_tag": "content",
+      "user_tag": "user",
+      "assistant_tag": "assistant"
+    }
+  },
+  "deepmath_plain_30k_train_qwen2_5_7b_rep_fsf_r80_30k_no_kl_answer": {
+    "file_name": "/data/hf_home/datasets/Yaseal/CDAD_EXP/cot_rewrite/qwen2_5_7b_ablation_no_kl_answer/final/rep_fsf_r80_30k_no_kl_answer.jsonl",
+    "formatting": "sharegpt",
+    "columns": {
+      "messages": "conversations"
+    },
+    "tags": {
+      "role_tag": "role",
+      "content_tag": "content",
+      "user_tag": "user",
+      "assistant_tag": "assistant"
+    }
   }
 }

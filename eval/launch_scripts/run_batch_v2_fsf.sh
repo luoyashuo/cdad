@@ -171,7 +171,7 @@ declare -a JOBS=(
     # "/data/cdad/checkpoints/fsf_vs_nofsf/llama3_3b_instruct_full_sft_fsf_10k"      "eval_configs/eval_all_sft_v2_quick.yaml"
     # "/data/cdad/checkpoints/fsf_vs_nofsf/llama3_3b_instruct_full_sft_nofsf_10k"    "eval_configs/eval_all_sft_v2_quick.yaml"
     # "/data/cdad/checkpoints/fsf_vs_nofsf/qwen2.5_7b_instruct_lora_sft_fsf_10k"     "eval_configs/eval_all_sft_v2_quick.yaml"
-    "/data/cdad/checkpoints/fsf_vs_nofsf/qwen2.5_7b_instruct_lora_sft_nofsf_10k"   "eval_configs/eval_all_sft_v2_quick.yaml"
+    # "/data/cdad/checkpoints/fsf_vs_nofsf/qwen2.5_7b_instruct_lora_sft_nofsf_10k"   "eval_configs/eval_all_sft_v2_quick.yaml"
     "/data/cdad/checkpoints/fsf_vs_nofsf/llama3_3b_instruct_full_sft_nofsf_10k_v2"  "eval_configs/eval_all_sft_v2_quick.yaml"
     "/data/cdad/checkpoints/fsf_vs_nofsf/llama3_3b_instruct_full_sft_fsf_10k_v2"     "eval_configs/eval_all_sft_v2_quick.yaml"
     "/data/cdad/checkpoints/fsf_vs_nofsf/llama3_1b_instruct_full_sft_fsf_10k_v2"     "eval_configs/eval_all_sft_v2_quick.yaml"

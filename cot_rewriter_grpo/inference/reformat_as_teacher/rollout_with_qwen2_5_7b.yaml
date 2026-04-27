@@ -1,0 +1,46 @@
+# CoT Rewrite Inference Pipeline - Full Configuration Example
+# Copy this file and edit the paths/parameters for your experiment.
+
+# Basic configuration
+experiment_name: "qwen2_5_7b_reformat_as_teacher"
+output_root: "/data/hf_home/datasets/Yaseal/CDAD_EXP/Reformat_as_teacher"
+output_filename: "rep_fsf_r80_30k_qwen_reformat_as_teacher.jsonl"
+resume: true   # Auto-resume from last checkpoint on restart
+seed: 42
+
+# Model configuration
+model:
+  checkpoint_path: "/data/modelscope_cache/models/Qwen/Qwen2.5-7B-Instruct/"
+  # Format detection: auto / hf / lora / fsdp / megatron
+  # auto: detects based on directory structure
+  format: "auto"
+  merge_lora: true       # Merge LoRA weights if format=lora
+  dtype: "bfloat16"
+  max_model_len: 8192
+
+# Rollout configuration (Step 2)
+rollout:
+  input_data: "/data/hf_home/datasets/Yaseal/CDAD_EXP/deepmath_plain_30k/train.jsonl"  # ShareGPT format JSONL
+  num_rollouts: 1          # Number of rewrites per sample
+  batch_size: 96           # Rollouts per mini-batch (= samples × num_rollouts); controls GPU concurrency and tqdm granularity
+
+  generation:
+    temperature: 0.6
+    top_p: 0.95
+    max_new_tokens: 28000
+
+  parallel:
+    # gpu_ids: auto-detected if not specified
+    # gpu_ids: [0, 1, 2, 3, 4, 5, 6, 7]
+    tensor_parallel_size: 1   # GPUs per vLLM instance (DP = total_gpus / tp_size)
+
+dataset_build:
+  filters:
+    fsf_positive: true      # Only keep rewrites with FSF > 0
+    correct_only: true      # Only keep rewrites where is_correct=True
+
+  # Selection strategy: random / max_fsf / priority_correct
+  selection_strategy: "random"
+
+  # Output filename (relative to {output_root}/{experiment_name}/final/)
+  output_filename: "random_nofsf_correct.jsonl"

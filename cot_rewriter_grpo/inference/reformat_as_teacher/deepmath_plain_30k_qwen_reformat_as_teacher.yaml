@@ -1,0 +1,23 @@
+build_mode: "mix"
+fsf_positive_replace_ratio: 0.8
+target_count: null  # auto = total records
+question_limit: null
+mix_select_longest: true
+input_file: "/data/hf_home/datasets/Yaseal/CDAD_EXP/Reformat_as_teacher/qwen2_5_7b_reformat_as_teacher/intermediate/fsf_tag_output.jsonl"
+mix_rewrite_record_filter:
+  original_fsf: "positive"
+
+filters:
+  fsf_positive: false
+  fsf_zero: true
+  correct_only: true
+
+selection_strategy: "priority_correct"
+
+output_filename: "rep_fsf_r80_30k_qwen_reformat_as_teacher.jsonl"
+
+llamafactory:
+  enabled: true
+  dataset_info_path: "/home/luoys/cdad/LlamaFactory/data/dataset_info.json"
+  dataset_name: "deepmath_plain_30k_qwen_reformat_as_teacher"
+  use_absolute_path: true

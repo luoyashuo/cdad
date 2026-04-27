@@ -1,0 +1,23 @@
+build_mode: "mix"
+fsf_positive_replace_ratio: 0.8
+target_count: null  # auto = total records
+question_limit: null
+mix_select_longest: true
+input_file: "/data/hf_home/datasets/Yaseal/CDAD_EXP/cot_rewrite/qwen2_5_7b_ablation_no_kl_answer/intermediate/fsf_tag_output.jsonl"
+mix_rewrite_record_filter:
+  original_fsf: "positive"
+
+filters:
+  fsf_positive: false
+  fsf_zero: true
+  correct_only: true
+
+selection_strategy: "priority_correct"
+
+output_filename: "rep_fsf_r80_30k_no_kl_answer.jsonl"
+
+llamafactory:
+  enabled: true
+  dataset_info_path: "/home/luoys/cdad/LlamaFactory/data/dataset_info.json"
+  dataset_name: "deepmath_plain_30k_train_qwen2_5_7b_rep_fsf_r80_30k_no_kl_answer"
+  use_absolute_path: true

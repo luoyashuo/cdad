@@ -20,7 +20,7 @@ model:
 # Rollout configuration (Step 2)
 rollout:
   input_data: "/data/hf_home/datasets/Yaseal/CDAD_EXP/deepmath_plain_30k/train.jsonl"  # ShareGPT format JSONL
-  num_rollouts: 8          # Number of rewrites per sample
+  num_rollouts: 3          # Number of rewrites per sample
   batch_size: 96           # Rollouts per mini-batch (= samples × num_rollouts); controls GPU concurrency and tqdm granularity
 
   generation:
